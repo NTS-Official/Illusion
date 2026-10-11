@@ -4,6 +4,10 @@
 # Note that there are a couple of TOML lists in this file.
 # Find more information on toml format here:  https://github.com/toml-lang/toml
 
+modLoader="kotlinforforge"
+# Change this if you require a certain version of KotlinForForge
+loaderVersion="${kff_version_range}"
+
 # The license for you mod. This is mandatory metadata and allows for easier comprehension of your redistributive properties.
 # Review your options at https://choosealicense.com/. All rights reserved is the default copyright stance, and is thus the default here.
 license="${mod_license}"
@@ -69,7 +73,7 @@ config="${mod_id}.mixins.json"
     # AFTER - This mod is loaded AFTER the dependency
     ordering="NONE"
     # Side this dependency is applied on - BOTH, CLIENT, or SERVER
-    side="BOTH"
+    side="CLIENT"
 
 # Here's another dependency
 [[dependencies.${mod_id}]]
@@ -78,7 +82,14 @@ config="${mod_id}.mixins.json"
     # This version range declares a minimum of the current minecraft version up to but not including the next major version
     versionRange="${minecraft_version_range}"
     ordering="NONE"
-    side="BOTH"
+    side="CLIENT"
+
+[[dependencies.${mod_id}]]
+    modId="kotlinforforge"
+    type="required"
+    versionRange="${kff_version_range}"
+    ordering="NONE"
+    side="CLIENT"
 
 # Features are specific properties of the game environment, that you may want to declare you require. This example declares
 # that your mod requires GL version 3.2 or higher. Other features will be added. They are side aware so declaring this won't

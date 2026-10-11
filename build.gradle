@@ -3,6 +3,11 @@ plugins {
     id 'maven-publish'
     id 'net.neoforged.moddev' version '2.0.148'
     id 'idea'
+    // 2.4.0 = first line whose stdlib metadata matches, and 2.3.0+ is required
+    // because Kotlin only gained JVM target 25 support in 2.3.0 (Kotlin 2.2.x
+    // silently falls back to JVM_24, which Gradle 9's KGP then rejects as an
+    // inconsistent JVM-target pair against compileJava(25)).
+    id 'org.jetbrains.kotlin.jvm' version '2.4.0'
 }
 
 tasks.named('wrapper', Wrapper).configure {
@@ -28,6 +33,10 @@ sourceSets.main.resources {
 
 repositories {
     // Add here additional repositories if required by some of the dependencies below.
+    maven {
+        name = 'Kotlin for Forge'
+        url = 'https://thedarkcolour.github.io/KotlinForForge/'
+        }
 }
 
 base {
@@ -89,6 +98,17 @@ neoForge {
             // You can set various levels here.
             // Please read: https://stackoverflow.com/questions/2031163/when-to-use-the-different-log-levels
             logLevel = org.slf4j.event.Level.DEBUG
+
+            // The DirectX 12 backend talks to native code through the Java FFM API
+            // (java.lang.foreign.Linker), which JEP 472 classifies as a RESTRICTED method.
+            // The JVM denies restricted calls made from unnamed-module (class path) code
+            // unless native access is explicitly enabled: JDK 25 still only warns, but the
+            // warning is scheduled to become a hard error. A mod cannot grant itself native
+            // access at runtime, and NeoForge/FML does not set this flag anywhere, so it has
+            // to come from the command line -- here for dev runs.
+            // End users must add the very same option to their launcher's JVM arguments:
+            //     --enable-native-access=ALL-UNNAMED
+            jvmArgument '--enable-native-access=ALL-UNNAMED'
         }
     }
 
@@ -132,6 +152,8 @@ dependencies {
     // For more info:
     // http://www.gradle.org/docs/current/userguide/artifact_dependencies_tutorial.html
     // http://www.gradle.org/docs/current/userguide/dependency_management.html
+
+    implementation 'thedarkcolour:kotlinforforge-neoforge:6.4.0'
 }
 
 // This block of code expands all declared replace properties in the specified resource targets.
@@ -145,6 +167,9 @@ var generateModMetadata = tasks.register("generateModMetadata", ProcessResources
             mod_name               : mod_name,
             mod_license            : mod_license,
             mod_version            : mod_version,
+            // KotlinForForge loader range — referenced by modLoader/loaderVersion
+            // and by the kotlinforforge dependency block in neoforge.mods.toml.
+            kff_version_range      : kff_version_range,
     ]
     inputs.properties replaceProperties
     expand replaceProperties
@@ -156,6 +181,59 @@ var generateModMetadata = tasks.register("generateModMetadata", ProcessResources
 sourceSets.main.resources.srcDir generateModMetadata
 // To avoid having to run "generateModMetadata" manually, make it run on every project reload
 neoForge.ideSyncTask generateModMetadata
+
+// ---------------------------------------------------------------------------
+// copyNative — stage the MCDR native DLL into the mod resources
+// ---------------------------------------------------------------------------
+// `MCDR\` (the native library) and `Illusion\` (this mod) are INDEPENDENTLY
+// managed repositories, so a build of this project may legitimately run with no
+// native output present at all: a fresh clone, CI that only builds the JVM half,
+// or a developer who has not run MSBuild yet. This task therefore NEVER fails
+// the build — it stages MCDR.dll when it can find one, and logs a warning and
+// skips when it cannot.
+//
+// The DLL is staged at the RESOURCE ROOT because McdrAbi.extractLibrary() looks
+// it up as `/MCDR.dll` on the classpath — which resolves both from the packaged
+// mod JAR and from build/resources/main during `runClient`.
+//
+// Build the native half first (Visual Studio 2026 / MSVC v145, C++23):
+//   msbuild MCDR\MCDR.vcxproj /p:Configuration=Release /p:Platform=x64
+def mcdrNativeDir = file('../MCDR')
+def mcdrNativeConfigs = ['x64_Release', 'x64_Debug']
+
+var copyNative = tasks.register('copyNative') {
+    group = 'build'
+    description = 'Stages MCDR.dll into the mod resources; skips (never fails) when the native build output is absent.'
+    var outDir = layout.buildDirectory.dir('generated/native')
+    outputs.dir(outDir)
+    // Always re-run: the copy is trivial, and a stale staged DLL is far more
+    // expensive to diagnose than the copy is to repeat.
+    outputs.upToDateWhen { false }
+    doLast {
+        try {
+            var dir = outDir.get().asFile
+            dir.mkdirs()
+            var candidates = mcdrNativeConfigs.collect { new File(mcdrNativeDir, "target/${it}/MCDR.dll") }
+            var src = candidates.find { it.isFile() }
+            if (src == null) {
+                logger.warn("[copyNative] MCDR.dll not found; looked in: ${candidates.join(', ')}. " +
+                        "Skipping native staging — build MCDR with MSBuild if the D3D12 backend is needed.")
+                return
+            }
+            var dst = new File(dir, 'MCDR.dll')
+            dst.bytes = src.bytes
+            logger.lifecycle("[copyNative] staged ${src} -> ${dst} (${dst.length()} bytes)")
+        } catch (Throwable t) {
+            // Independently managed repos: a missing, locked or half-written native
+            // output must never break the JVM build.
+            logger.warn("[copyNative] skipped: ${t}")
+        }
+    }
+}
+
+// Feed the staged directory into the main resource set so the DLL ends up in
+// build/resources/main and inside the mod JAR.
+sourceSets.main.resources.srcDir copyNative
 
 // Example configuration to allow publishing using the maven-publish plugin
 publishing {
@@ -173,6 +251,30 @@ publishing {
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8' // Use the UTF-8 charset for Java compilation
+}
+
+// ---------------------------------------------------------------------------
+// Kotlin
+// ---------------------------------------------------------------------------
+// The whole JVM side of this mod is Kotlin except the mixins (Mixin cannot
+// target Kotlin classes reliably, and the mixins only touch vanilla types).
+//
+// Two rules encoded here, both load-bearing and easy to break by accident:
+//
+//  1. jvmTarget MUST be 25. The Java toolchain is 25 and NeoForge 26.2 ships
+//     Java 25 bytecode; letting Kotlin fall back to an older target makes
+//     Gradle 9 fail with "Inconsistent JVM-target compatibility".
+//  2. Never pass -Xjdk-release. On Kotlin 2.2.x it silently rewrote EVERY
+//     java.lang.invoke.MethodHandle.invokeExact call site into a varargs call
+//     (KT-72880), which destroys the FFM binding layer at runtime with no
+//     compile error. It is fixed in 2.4.x, but there is no reason to use it.
+//
+// Kotlin source files are always read as UTF-8; unlike JavaCompile there is no
+// encoding option to set.
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_25)
+    }
 }
 
 // IDEA no longer automatically downloads sources/javadoc jars for dependencies, so we need to explicitly enable the behavior.

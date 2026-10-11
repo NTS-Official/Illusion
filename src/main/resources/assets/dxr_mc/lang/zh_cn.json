@@ -1,0 +1,8 @@
+{
+  "dxr_mc.configuration.title": "Illusion 配置",
+  "dxr_mc.configuration.section.dxr_mc.client.toml": "Illusion 配置",
+  "dxr_mc.configuration.section.dxr_mc.client.toml.title": "Illusion 配置",
+  "dxr_mc.configuration.aaMode": "抗锯齿",
+  "options.graphicsApi.dx12": "优先 Direct3D 12（实验性）",
+  "options.graphicsApi.tooltip.dx12": "实验性功能。使用 DXRMC 的 Direct3D 12 后端渲染，而非 OpenGL 或 Vulkan。在部分系统上可能降低性能或导致不稳定。"
+}
