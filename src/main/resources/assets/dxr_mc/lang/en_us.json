@@ -1,0 +1,13 @@
+{
+  "itemGroup.dxr_mc": "Example Mod Tab",
+  "block.dxr_mc.example_block": "Example Block",
+  "item.dxr_mc.example_item": "Example Item",
+
+  "dxr_mc.configuration.title": "Illusion Configs",
+  "dxr_mc.configuration.section.dxr_mc.common.toml": "Illusion Configs",
+  "dxr_mc.configuration.section.dxr_mc.common.toml.title": "Illusion Configs",
+  "dxr_mc.configuration.items": "Item List",
+  "dxr_mc.configuration.logDirtBlock": "Log Dirt Block",
+  "dxr_mc.configuration.magicNumberIntroduction": "Magic Number Text",
+  "dxr_mc.configuration.magicNumber": "Magic Number"
+}
