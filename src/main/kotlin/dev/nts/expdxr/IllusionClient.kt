@@ -1,6 +1,6 @@
 package dev.nts.expdxr
 
-import dev.nts.expdxr.client.Dx12ExitWatchdog
+import dev.nts.expdxr.client.debug.D3D12ExitWatchdog
 import net.neoforged.api.distmarker.Dist
 import net.neoforged.fml.ModContainer
 import net.neoforged.fml.common.Mod
@@ -28,6 +28,6 @@ class IllusionClient(container: ModContainer) {
             "Illusion client setup: DX12 backend is registered via PreferredGraphicsApiMixin; "
                 + "creation is driven by the vanilla backend-selection loop"
         )
-        Dx12ExitWatchdog.start()
+        D3D12ExitWatchdog.start()
     }
 }

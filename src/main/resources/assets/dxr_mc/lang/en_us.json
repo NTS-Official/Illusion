@@ -2,7 +2,12 @@
   "dxr_mc.configuration.title": "Illusion Configs",
   "dxr_mc.configuration.section.dxr_mc.client.toml": "Illusion Configs",
   "dxr_mc.configuration.section.dxr_mc.client.toml.title": "Illusion Configs",
-  "dxr_mc.configuration.aaMode": "Anti-Aliasing",
-  "options.graphicsApi.dx12": "Prefer Direct3D 12 (Experimental)",
-  "options.graphicsApi.tooltip.dx12": "Experimental. Renders through DXRMC's Direct3D 12 backend instead of OpenGL or Vulkan. May reduce performance or cause instability on some systems."
+  "options.antiAliasing": "Anti-Aliasing",
+  "options.antiAliasing.tooltip": "Anti-aliasing applied by DXRMC's Direct3D 12 backend.",
+  "options.antiAliasing.mode.0": "Off",
+  "options.antiAliasing.mode.1": "FXAA",
+  "options.antiAliasing.mode.2": "SMAA",
+  "options.antiAliasing.mode.3": "TAA",
+  "options.graphicsApi.d3d12": "Prefer Direct3D 12 (Experimental)",
+  "options.graphicsApi.tooltip.d3d12": "Experimental. Renders through DXRMC's Direct3D 12 backend instead of OpenGL or Vulkan. May reduce performance or cause instability on some systems."
 }

@@ -46,6 +46,34 @@ base {
 // Mojang ships Java 25 to end users in 26.2, so mods should target Java 25.
 java.toolchain.languageVersion = JavaLanguageVersion.of(25)
 
+// DXRMC 自检开关：用 providers API 读取（可被配置缓存追踪），`-P` 与 `-D` 两种写法都接受。
+// Loom 的 run config 不会自动继承 Gradle 进程的系统属性，必须显式转发到游戏 JVM。
+def dxrmcSelfTestMesh = providers.gradleProperty('dxrmc.selfTestMesh')
+        .orElse(providers.systemProperty('dxrmc.selfTestMesh')).getOrElse('false')
+def dxrmcSelfTestSurface = providers.gradleProperty('dxrmc.selfTestSurface')
+        .orElse(providers.systemProperty('dxrmc.selfTestSurface')).getOrElse('false')
+def dxrmcFailDevice = providers.gradleProperty('dxrmc.failDevice')
+        .orElse(providers.systemProperty('dxrmc.failDevice')).getOrElse('false')
+// P74：致命错误弹窗抑制开关（自动化运行用；正常游玩不要设置，保持可见弹窗）。
+def dxrmcNoPopup = providers.gradleProperty('dxrmc.noPopup')
+        .orElse(providers.systemProperty('dxrmc.noPopup')).getOrElse('false')
+// P75：时间性渲染（TAAU 基础）开关：`gradlew runClient -Pdxrmc.temporal=true` 打开亚像素 jitter。
+// 默认 false —— 速度附件尚未接线，抖动了也没有 resolve 可消除它，只会让画面轻微发糊。
+def dxrmcTemporal = providers.gradleProperty('dxrmc.temporal')
+        .orElse(providers.systemProperty('dxrmc.temporal')).getOrElse('false')
+// P75 诊断开关：`-Pdxrmc.temporal.jitter=false` 只关掉**投影 jitter**、保留逐物体/相机捕获，
+// 用来把"画面异常"在 jitter 与捕获两条路径之间二分定位。默认 true（正常行为）。
+def dxrmcTemporalJitter = providers.gradleProperty('dxrmc.temporal.jitter')
+        .orElse(providers.systemProperty('dxrmc.temporal.jitter')).getOrElse('true')
+// P76a：速度（运动矢量）附件开关：`-Pdxrmc.temporal.velocity=true`。默认 false ——
+// 增量 1 只接通 MRT 基础设施（速度纹理 + 变体管线 + 地形 pass 多挂一路 RTV），
+// 还没有着色器写 SV_Target1，所以打开它只会多花两张 R16G16_FLOAT 纹理与每条地形管线一份 PSO。
+def dxrmcTemporalVelocity = providers.gradleProperty('dxrmc.temporal.velocity')
+        .orElse(providers.systemProperty('dxrmc.temporal.velocity')).getOrElse('false')
+// 自动化取证：`-Pdxrmc.quickPlayWorld=<存档名>` 让客户端启动后直接进单人世界（无人值守截图/复现用）。
+// 空字符串 = 不传（普通游玩保持手动进世界）。
+def dxrmcQuickPlayWorld = providers.gradleProperty('dxrmc.quickPlayWorld').getOrElse('')
+
 neoForge {
     // Specify the version of NeoForge to use.
     version = project.neo_version
@@ -60,6 +88,29 @@ neoForge {
             client()
             // Comma-separated list of namespaces to load gametests from. Empty = all namespaces.
             systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+            // P72 mesh shader 自检开关：`gradlew runClient -Ddxrmc.selfTestMesh=true`（或 -P 形式）。
+            // Loom 的 run config 不会自动继承 Gradle 进程的系统属性，必须显式转发。
+            systemProperty 'dxrmc.selfTestMesh', dxrmcSelfTestMesh
+            // 同理转发 surface 自检开关（真实窗口交换链自检，默认关闭）。
+            systemProperty 'dxrmc.selfTestSurface', dxrmcSelfTestSurface
+            // P73 失败策略的测试钩子：`gradlew runClient -Ddxrmc.failDevice=true` 让 D3D12 后端
+            // 在第一步失败，验证"不再回退 + 还原 preferredGraphicsBackend + 崩溃报告带说明"。
+            systemProperty 'dxrmc.failDevice', dxrmcFailDevice
+            // P74 致命错误弹窗：默认可见（用户要求，m02777）；自动化运行用 `-Pdxrmc.noPopup=true` 关掉，
+            // 否则 MessageBox 会一直阻塞等待点击。
+            systemProperty 'dxrmc.noPopup', dxrmcNoPopup
+            // P75 时间性渲染开关（亚像素 jitter 注入关卡投影矩阵）。
+            systemProperty 'dxrmc.temporal', dxrmcTemporal
+            // P75 诊断：只关 jitter、保留捕获（默认 true）。
+            systemProperty 'dxrmc.temporal.jitter', dxrmcTemporalJitter
+            // P76a：速度附件（默认 false，见上面的说明）。
+            systemProperty 'dxrmc.temporal.velocity', dxrmcTemporalVelocity
+            // 自动化取证：直接进指定存档（P75/P76 画面比对用；普通游玩不设置）。
+            // 注意 Loom 的 runClient **不支持** `--args=`，参数只能在这里追加。
+            if (!dxrmcQuickPlayWorld.isEmpty()) {
+                programArgument '--quickPlaySingleplayer'
+                programArgument dxrmcQuickPlayWorld
+            }
         }
 
         server {
@@ -156,9 +207,14 @@ dependencies {
     implementation 'thedarkcolour:kotlinforforge-neoforge:6.4.0'
 }
 
-// This block of code expands all declared replace properties in the specified resource targets.
-// A missing property will result in an error. Properties are expanded using ${} Groovy notation.
-var generateModMetadata = tasks.register("generateModMetadata", ProcessResources) {
+// Expands the declared replace properties in the resource targets below; a missing property
+// fails the build. Placeholders use Groovy's SimpleTemplateEngine (${}) notation.
+// META-INF/neoforge.mods.toml is the only resource in this project that carries placeholders,
+// and it lives in src/main/resources like every other resource: expanding it in place with
+// filesMatching keeps a single copy of that path in the resource set, whereas a separate
+// ProcessResources task feeding an extra resource srcDir fails with
+// "Entry META-INF/neoforge.mods.toml is a duplicate" as soon as both directories carry it.
+tasks.named('processResources', ProcessResources).configure {
     var replaceProperties = [
             minecraft_version      : minecraft_version,
             minecraft_version_range: minecraft_version_range,
@@ -167,20 +223,13 @@ var generateModMetadata = tasks.register("generateModMetadata", ProcessResources
             mod_name               : mod_name,
             mod_license            : mod_license,
             mod_version            : mod_version,
-            // KotlinForForge loader range — referenced by modLoader/loaderVersion
-            // and by the kotlinforforge dependency block in neoforge.mods.toml.
             kff_version_range      : kff_version_range,
     ]
     inputs.properties replaceProperties
-    expand replaceProperties
-    from "src/main/templates"
-    into "build/generated/sources/modMetadata"
+    filesMatching(['META-INF/neoforge.mods.toml']) {
+        expand replaceProperties
+    }
 }
-// Include the output of "generateModMetadata" as an input directory for the build
-// this works with both building through Gradle and the IDE.
-sourceSets.main.resources.srcDir generateModMetadata
-// To avoid having to run "generateModMetadata" manually, make it run on every project reload
-neoForge.ideSyncTask generateModMetadata
 
 // ---------------------------------------------------------------------------
 // copyNative — stage the MCDR native DLL into the mod resources
@@ -198,8 +247,8 @@ neoForge.ideSyncTask generateModMetadata
 //
 // Build the native half first (Visual Studio 2026 / MSVC v145, C++23):
 //   msbuild MCDR\MCDR.vcxproj /p:Configuration=Release /p:Platform=x64
-def mcdrNativeDir = file('../MCDR')
-def mcdrNativeConfigs = ['x64_Release', 'x64_Debug']
+def MCDRNativeDir = file('../MCDR')
+def MCDRNativeConfigs = ['x64_Release', 'x64_Debug']
 
 var copyNative = tasks.register('copyNative') {
     group = 'build'
@@ -213,7 +262,7 @@ var copyNative = tasks.register('copyNative') {
         try {
             var dir = outDir.get().asFile
             dir.mkdirs()
-            var candidates = mcdrNativeConfigs.collect { new File(mcdrNativeDir, "target/${it}/MCDR.dll") }
+            var candidates = MCDRNativeConfigs.collect { new File(MCDRNativeDir, "target/${it}/MCDR.dll") }
             var src = candidates.find { it.isFile() }
             if (src == null) {
                 logger.warn("[copyNative] MCDR.dll not found; looked in: ${candidates.join(', ')}. " +

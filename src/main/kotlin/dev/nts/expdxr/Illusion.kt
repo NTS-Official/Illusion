@@ -12,9 +12,9 @@ import org.slf4j.Logger
  * into the vanilla GPU-backend architecture (modelled on the official Vulkan
  * backend).
  *
- * The backend is installed by [dev.nts.expdxr.mixin.PreferredGraphicsApiMixin],
+ * The backend is installed by [dev.nts.expdxr.mixin.options.PreferredGraphicsApiMixin],
  * which rewrites `PreferredGraphicsApi.getBackendsToTry()` so that Minecraft's
- * own backend-selection loop constructs [dev.nts.expdxr.dx12.Dx12Backend]. All
+ * own backend-selection loop constructs [dev.nts.expdxr.d3d12.backend.D3D12Backend]. All
  * renderer work therefore happens inside the vanilla backend lifecycle, and
  * this class only has to register the mod's configuration.
  *
@@ -35,7 +35,9 @@ class Illusion(modEventBus: IEventBus, modContainer: ModContainer) {
     init {
         // The whole backend is client-only, so all of our configuration is
         // client-scoped (config/dxr_mc-client.toml).
-        modContainer.registerConfig(ModConfig.Type.CLIENT, DxrConfig.SPEC)
+        modContainer.registerConfig(
+            ModConfig.Type.CLIENT,
+            IllusionConfig.SPEC)
         LOGGER.info("Illusion constructing (DirectX 12 Ultimate backend)")
     }
 }
