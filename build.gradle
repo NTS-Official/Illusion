@@ -157,7 +157,7 @@ neoForge {
             // warning is scheduled to become a hard error. A mod cannot grant itself native
             // access at runtime, and NeoForge/FML does not set this flag anywhere, so it has
             // to come from the command line -- here for dev runs.
-            // End users must add the very same option to their launcher's JVM arguments:
+            // End users must add the very same options to their launcher's JVM arguments:
             //     --enable-native-access=ALL-UNNAMED
             jvmArgument '--enable-native-access=ALL-UNNAMED'
         }
@@ -241,7 +241,7 @@ tasks.named('processResources', ProcessResources).configure {
 // the build — it stages MCDR.dll when it can find one, and logs a warning and
 // skips when it cannot.
 //
-// The DLL is staged at the RESOURCE ROOT because McdrAbi.extractLibrary() looks
+// The DLL is staged at the RESOURCE ROOT because MCDR_ABI.extractLibrary() looks
 // it up as `/MCDR.dll` on the classpath — which resolves both from the packaged
 // mod JAR and from build/resources/main during `runClient`.
 //
@@ -284,6 +284,241 @@ var copyNative = tasks.register('copyNative') {
 // build/resources/main and inside the mod JAR.
 sourceSets.main.resources.srcDir copyNative
 
+// ---------------------------------------------------------------------------
+// Third-party SDK runtimes: what ships inside the JAR, and what does not
+// ---------------------------------------------------------------------------
+// MCDR_ABI.extractLibrary() writes MCDR.dll into `<user.dir>/dxrmc/`, and the
+// Windows loader resolves a native library's LoadLibrary calls from the
+// *application* directory first -- so anything MCDR.dll loads at run time has to
+// sit in that same `dxrmc/` folder. PATH is not enough: the application directory
+// and the system directory both precede it in the search order, which is why a
+// PATH-only experiment reports "not found" even with the files present on disk
+// (known_bugs.md B14).
+//
+// TWO LISTS, and the split is a licensing decision, not a size one:
+//
+//   vendorJarLibs  -- REDISTRIBUTABLE under this project's LGPL-2.1.
+//                     Staged as JAR resources and extracted to `dxrmc/` at
+//                     startup by MCDR_ABI.extractVendorResources(). Both licences
+//                     permit binary redistribution provided the copyright notice
+//                     and terms travel with the distribution, so each SDK's
+//                     licence text is packed alongside its binaries.
+//
+//   vendorDllSources -- NOT redistributable through this project.
+//                     NVIDIA's RTX SDKs licence (NRD and DLSS share it) clause
+//                     4(e) forbids using the SDK "in any manner that would cause
+//                     it to become subject to an open source software license",
+//                     listing as examples: disclosure in source form, licensing
+//                     for derivative works, and redistribution at no charge --
+//                     which is what LGPL-2.1 requires. So the NVIDIA runtime DLLs
+//                     are never packed; they are copied into `run/dxrmc/` only to
+//                     make the local dev environment match what the probe looks
+//                     for. End users obtain them from NVIDIA if they want them.
+//
+// License compatibility for the packaged two, verified against the shipped text:
+//   Intel XeSS      -- Intel Simplified Software License (October 2022), binary
+//                      redistribution permitted; requires the notice be reproduced.
+//   AMD FidelityFX  -- AMD binary-only redistribution grant in docs/license.md;
+//                      requires the copyright and permission notice be reproduced.
+def vendorJarLibs = [
+        [dir: file('../MCDR/external/xess/bin'), files: ['libxess.dll', 'libxess_fg.dll', 'libxell.dll'],
+         license: file('../MCDR/external/xess/LICENSE.txt')],
+        [dir: file('../MCDR/external/fidelityfx/bin'),
+         files: ['amd_fidelityfx_loader_dx12.dll', 'amd_fidelityfx_upscaler_dx12.dll',
+                 'amd_fidelityfx_denoiser_dx12.dll', 'amd_fidelityfx_radiancecache_dx12.dll',
+                 'amd_fidelityfx_framegeneration_dx12.dll'],
+         license: file('../MCDR/external/fidelityfx/LICENSE.md')],
+]
+
+// Dev-only. `nvngx_dlssd.dll` is Ray Reconstruction, `nvngx_dlssg.dll` is Frame
+// Generation. libxess_dx11.dll is deliberately absent: D3D11 flavour, and MCDR
+// is D3D12-only.
+def vendorDevLibs = [
+        [dir: file('../MCDR/external/dlss/bin/x64'), pattern: 'nvngx_*.dll'],
+]
+
+// Minimal glob -> regex, so `nvngx_*.dll` matches without pulling in a full
+// Ant-style matcher for a single fixed pattern.
+def vendorGlobToRegex = { String glob ->
+    '^' + glob.replace('.', '\\.').replace('*', '.*') + '$'
+}
+
+// ---------------------------------------------------------------------------
+// stageVendorLibs -- put the redistributable SDK runtimes INTO the mod JAR
+// ---------------------------------------------------------------------------
+// The mod JAR cannot reference these by path: a released mod is one file, and
+// `gradlew build` runs long before anything is unzipped. So the DLLs ride inside
+// the JAR as ordinary resources and MCDR_ABI pulls them out at startup.
+//
+// `vendor/manifest.txt` exists because a JAR directory cannot be enumerated
+// without knowing every name in advance, and hard-coding nine file names in two
+// places is how the two lists drift apart. The manifest is written here, at the
+// moment the files are staged, so it cannot disagree with what was packaged.
+//
+// The staging root is the *parent* of `vendor/`, and the resource-set srcDir
+// below points at that parent rather than at the module root: `processResources`
+// strips the srcDir prefix, so declaring the folder that directly holds the DLLs
+// would flatten ten files into the JAR root instead of nesting them under
+// `vendor/`. Flat also means they can never be found again -- the extractor looks
+// them up as `/vendor/<name>`.
+//
+// It must also be declared as an output DIRECTORY, not just `manifest.txt`:
+// `srcDir(taskProvider)` harvests exactly what the task declares, so a
+// manifest-only declaration silently shipped a manifest with no DLLs next to it.
+//
+// Like copyNative this NEVER fails the build: `MCDR\external\` is populated by
+// hand (the SDK archives are in neither repo), and a missing one just means the
+// matching SDK reports itself unavailable at run time.
+def vendorJarRoot = layout.buildDirectory.dir('generated/vendorJar')
+def vendorJarDir = vendorJarRoot.map { it.dir('vendor') }
+var stageVendorLibs = tasks.register('stageVendorLibs') {
+    group = 'build'
+    description = 'Stages the redistributable (XeSS / FidelityFX) SDK runtimes + licences as mod JAR resources.'
+    outputs.dir(vendorJarDir)
+    outputs.upToDateWhen { false }
+
+    doLast {
+        try {
+            var root = vendorJarDir.get().asFile
+            root.mkdirs()
+            // NOT `manifest`: a `doLast` closure delegates to the task, and Task
+            // already owns a `manifest` property, so `var manifest = []` resolves
+            // through the owner and dies with "Could not set unknown property
+            // 'manifest' for task ...". The catch-all below then reported that as
+            // a warning and shipped an empty JAR. Any name the task object already
+            // defines is a trap here.
+            var manifestEntries = []
+            var staged = 0
+            var missing = []
+            vendorJarLibs.each { entry ->
+                File srcDir = entry.dir
+                List<String> files = (entry.files ?: []) as List<String>
+                if (srcDir == null || !srcDir.isDirectory()) {
+                    missing << "${srcDir} (目录不存在)".toString()
+                    return
+                }
+                files.each { String name ->
+                    var src = new File(srcDir, name)
+                    if (!src.isFile()) {
+                        missing << src.toString()
+                        return
+                    }
+                    var dst = new File(root, name)
+                    if (!dst.isFile() || dst.length() != src.length()) {
+                        dst.bytes = src.bytes
+                        staged++
+                    }
+                    manifestEntries << ("vendor/" + name)
+                }
+                File lic = entry.license
+                if (lic != null && lic.isFile()) {
+                    var name = "LICENSE-" + srcDir.parentFile.name + ".txt"
+                    var dst = new File(root, name)
+                    if (!dst.isFile() || dst.length() != lic.length()) {
+                        dst.bytes = lic.bytes
+                        staged++
+                    }
+                    manifestEntries << ("vendor/" + name)
+                } else {
+                    missing << "licence for ${srcDir} (${lic})".toString()
+                }
+            }
+            var mf = new File(root, 'manifest.txt')
+            mf.setText(manifestEntries.join('\n') + '\n', 'UTF-8')
+            logger.lifecycle("[stageVendorLibs] ${manifestEntries.size()} resource(s) in the mod JAR " +
+                    "(${staged} copied, rest already current)")
+            if (!missing.isEmpty()) {
+                logger.warn("[stageVendorLibs] not staged (missing source): ${missing.join(', ')}. " +
+                        "The matching SDK will report itself unavailable at run time.")
+            }
+        } catch (Throwable t) {
+            logger.warn("[stageVendorLibs] skipped: ${t}")
+        }
+    }
+}
+// NOT `sourceSets.main.resources.srcDir stageVendorLibs`: a task provider added
+// that way contributes each file with no path prefix, so the SDK runtimes land in
+// the resource root and the extractor's `/vendor/<name>` lookups all miss. Two
+// rounds of trying to name the staged folder so the prefix would survive both
+// flattened instead, so the destination is stated outright here: the main resource
+// set is left alone, and `processResources` copies the staged files into `vendor/`
+// explicitly. `build/resources/main/vendor/` is then what `runClient` reads and
+// what `jar` packages, with neither step left to infer a path.
+//
+// `from(stageVendorLibs)` passes the TASK, not the directory property: that is
+// what wires the dependency and takes the task's declared outputs as the source.
+// `from(vendorJarDir)` compiles and silently adds nothing -- processResources ran,
+// reported success, and staged no vendor file at all.
+tasks.named('processResources', ProcessResources).configure {
+    from(stageVendorLibs) {
+        into('vendor')
+    }
+}
+
+// ---------------------------------------------------------------------------
+// copyVendorDlls -- dev-only SDK runtimes that must NOT ship
+// ---------------------------------------------------------------------------
+// Only the NVIDIA ones land here. The packaged SDKs (XeSS / FidelityFX) are
+// extracted from the JAR by the mod itself, so they do not need this task.
+def copyVendorDlls = tasks.register('copyVendorDlls') {
+    group = 'build'
+    description = 'Dev-only: stages the NVIDIA (non-redistributable) runtime DLLs into run/dxrmc.'
+    var dxrmcDir = layout.projectDirectory.dir('run/dxrmc')
+    outputs.dir(dxrmcDir)
+    // Never up-to-date on the task level; the per-file size check below is what
+    // keeps a no-op second run cheap. A task-level "up to date" would also skip
+    // the (cheap) reporting, which is the point of running it.
+    outputs.upToDateWhen { false }
+
+    doLast {
+        try {
+            var dir = dxrmcDir.asFile
+            dir.mkdirs()
+            var staged = 0
+            var alreadyThere = 0
+            var missing = []
+            vendorDevLibs.each { entry ->
+                File srcDir = entry.dir
+                String pattern = entry.pattern
+                if (srcDir == null || !srcDir.isDirectory()) {
+                    missing << "${srcDir} (目录不存在)".toString()
+                    return
+                }
+                var re = java.util.regex.Pattern.compile(vendorGlobToRegex(pattern))
+                var matched = (srcDir.listFiles() ?: new File[0]).findAll {
+                    it.isFile() && re.matcher(it.name).matches()
+                }
+                if (matched.isEmpty()) {
+                    missing << "${srcDir}${File.separator}${pattern}".toString()
+                    return
+                }
+                matched.each { File src ->
+                    var dst = new File(dir, src.name)
+                    if (dst.isFile() && dst.length() == src.length()) {
+                        alreadyThere++
+                        return
+                    }
+                    dst.bytes = src.bytes
+                    staged++
+                    logger.lifecycle("[copyVendorDlls] staged ${src.name} (${String.format('%,d', src.length())} bytes)")
+                }
+            }
+            logger.lifecycle("[copyVendorDlls] ${staged} copied, ${alreadyThere} already current")
+            if (!missing.isEmpty()) {
+                logger.warn("[copyVendorDlls] not staged (missing source): ${missing.join(', ')}. " +
+                        "The matching SDK will report itself unavailable at run time.")
+            }
+        } catch (Throwable t) {
+            logger.warn("[copyVendorDlls] skipped: ${t}")
+        }
+    }
+}
+
+// The packaged SDKs need no run-task hook: the mod extracts them from the JAR at
+// startup. Only the dev-only NVIDIA DLLs do, and those are staged on demand
+// (`gradlew copyVendorDlls`) rather than on every run -- a dev who does not care
+// about DLSS should not pay ~115 MB of copying for it.
+
 // Example configuration to allow publishing using the maven-publish plugin
 publishing {
     publications {
@@ -319,7 +554,7 @@ tasks.withType(JavaCompile).configureEach {
 //     compile error. It is fixed in 2.4.x, but there is no reason to use it.
 //
 // Kotlin source files are always read as UTF-8; unlike JavaCompile there is no
-// encoding option to set.
+// encoding options to set.
 tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_25)
