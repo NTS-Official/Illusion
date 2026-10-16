@@ -16,32 +16,32 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public class GameRendererProfMixin {
 
     @Inject(method = "extract", at = @At("HEAD"), remap = false)
-    private void dx12_profExtractHead(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
+    private void D3D12ProfExtractHead(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
         D3D12RenderProf.begin(D3D12RenderProf.EXTRACT);
     }
 
     @Inject(method = "extract", at = @At("RETURN"), remap = false)
-    private void dx12_profExtractReturn(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
+    private void D3D12ProfExtractReturn(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
         D3D12RenderProf.end(D3D12RenderProf.EXTRACT);
     }
 
     @Inject(method = "render", at = @At("HEAD"), remap = false)
-    private void dx12_profRenderHead(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
+    private void D3D12ProfRenderHead(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
         D3D12RenderProf.begin(D3D12RenderProf.RENDER);
     }
 
     @Inject(method = "render", at = @At("RETURN"), remap = false)
-    private void dx12_profRenderReturn(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
+    private void D3D12ProfRenderReturn(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
         D3D12RenderProf.end(D3D12RenderProf.RENDER);
     }
 
     @Inject(method = "renderLevel", at = @At("HEAD"), remap = false)
-    private void dx12_profRenderLevelHead(DeltaTracker deltaTracker, CallbackInfo ci) {
+    private void D3D12ProfRenderLevelHead(DeltaTracker deltaTracker, CallbackInfo ci) {
         D3D12RenderProf.begin(D3D12RenderProf.WORLD);
     }
 
     @Inject(method = "renderLevel", at = @At("RETURN"), remap = false)
-    private void dx12_profRenderLevelReturn(DeltaTracker deltaTracker, CallbackInfo ci) {
+    private void D3D12ProfRenderLevelReturn(DeltaTracker deltaTracker, CallbackInfo ci) {
         D3D12RenderProf.end(D3D12RenderProf.WORLD);
     }
 }

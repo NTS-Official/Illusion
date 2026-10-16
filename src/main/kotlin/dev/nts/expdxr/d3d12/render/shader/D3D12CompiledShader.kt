@@ -1,6 +1,6 @@
 package dev.nts.expdxr.d3d12.render.shader
 
-import dev.nts.expdxr.d3d12.render.draw.D3D12BindGroupEntry
+import dev.nts.expdxr.d3d12.backend.D3D12BindGroupEntry
 
 /**
  * 一条 {@link RenderPipeline} 的 DX12 编译产物：顶点/片元 HLSL 源码 +

@@ -17,13 +17,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public class MinecraftRenderFrameProfMixin {
 
     @Inject(method = "renderFrame", at = @At("HEAD"), remap = false)
-    private void dx12_profFrameHead(boolean advanceGameTime, CallbackInfo ci) {
+    private void D3D12ProfFrameHead(boolean advanceGameTime, CallbackInfo ci) {
         D3D12RenderProf.frameStart();
         D3D12RenderProf.begin(D3D12RenderProf.FRAME);
     }
 
     @Inject(method = "renderFrame", at = @At("RETURN"), remap = false)
-    private void dx12_profFrameReturn(boolean advanceGameTime, CallbackInfo ci) {
+    private void D3D12ProfFrameReturn(boolean advanceGameTime, CallbackInfo ci) {
         D3D12RenderProf.end(D3D12RenderProf.FRAME);
         D3D12RenderProf.frameEnd();
     }

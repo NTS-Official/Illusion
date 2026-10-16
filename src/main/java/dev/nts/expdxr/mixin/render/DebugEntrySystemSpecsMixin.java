@@ -30,7 +30,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(DebugEntrySystemSpecs.class)
 public abstract class DebugEntrySystemSpecsMixin {
     @Inject(method = "display", at = @At("TAIL"))
-    private void dxr_mc$appendDx12Lines(
+    private void dxr_mc$appendD3D12Lines(
             DebugScreenDisplayer displayer,
             Level serverOrClientLevel,
             LevelChunk clientChunk,
@@ -41,7 +41,9 @@ public abstract class DebugEntrySystemSpecsMixin {
             return;
         }
         List<String> lines = D3D12DebugInfo.extraSystemLines(
-                minecraft.getWindow().getWidth(), minecraft.getWindow().getHeight());
+                minecraft.getWindow().getWidth(),
+                minecraft.getWindow().getHeight()
+        );
         if (!lines.isEmpty()) {
             displayer.addToGroup(D3D12DebugInfo.SYSTEM_GROUP, lines);
         }

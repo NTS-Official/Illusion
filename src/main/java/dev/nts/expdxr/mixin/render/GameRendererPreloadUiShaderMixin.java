@@ -23,7 +23,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public class GameRendererPreloadUiShaderMixin {
 
     @Inject(method = "preloadUiShader", at = @At("HEAD"))
-    private void gl4dx12$captureVanillaShaderProvider(ResourceProvider resourceProvider, CallbackInfo ci) {
+    private void dxrmc$CaptureVanillaShaderProvider(ResourceProvider resourceProvider, CallbackInfo ci) {
         D3D12FallbackShaderSource.setProvider(resourceProvider);
     }
 }

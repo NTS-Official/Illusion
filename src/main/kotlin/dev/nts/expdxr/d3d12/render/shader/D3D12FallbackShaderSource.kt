@@ -32,7 +32,7 @@ import java.io.IOException
  * 首次资源重载完成后主源恢复可用，回退自然不再被触发。
  */
 object D3D12FallbackShaderSource {
-    private val LOGGER = LoggerFactory.getLogger("gl4dx12")
+    private val LOGGER = LoggerFactory.getLogger("dxrmc")
 
     @Volatile
     private var provider: ResourceProvider? = null
@@ -41,7 +41,7 @@ object D3D12FallbackShaderSource {
     @JvmStatic
     fun setProvider(value: ResourceProvider?) {
         if (value != null && this.provider == null) {
-            LOGGER.info("[d3d12-java] captured vanilla shader provider (pre-reload fallback armed)")
+            LOGGER.info("[backend-java] captured vanilla shader provider (pre-reload fallback armed)")
         }
         this.provider = value
     }

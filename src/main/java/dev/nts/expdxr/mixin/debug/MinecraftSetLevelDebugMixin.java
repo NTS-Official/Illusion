@@ -1,5 +1,7 @@
 package dev.nts.expdxr.mixin.debug;
 
+import dev.nts.expdxr.utils.IllusionLogger;
+
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import org.spongepowered.asm.mixin.Mixin;
@@ -15,14 +17,14 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * Possible causes:
  *   1. The login packet (ClientboundLoginPacket) is never received
  *   2. handleLogin() path is bypassed (e.g. direct level assignment)
- *   3. Mixin injection fails silently (check gl4dx12.mixins.json registration)
+ *   3. Mixin injection fails silently (check dxr_mc.mixins.json registration)
  */
 @Mixin(Minecraft.class)
 public class MinecraftSetLevelDebugMixin {
 
     @Inject(method = "setLevel", at = @At("HEAD"), remap = false)
     private void dx12_setLevelDebug(ClientLevel level, CallbackInfo ci) {
-        System.err.println("[d3d12-debug] Minecraft.setLevel() called: level=" + (level != null ? "non-null" : "NULL"));
+        IllusionLogger.debugMessage("[backend-debug] Minecraft.setLevel() called: level=" + (level != null ? "non-null" : "NULL"));
         System.err.flush();
     }
 }

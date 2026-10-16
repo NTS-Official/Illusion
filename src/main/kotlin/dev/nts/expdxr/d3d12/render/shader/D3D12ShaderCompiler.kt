@@ -5,11 +5,8 @@ import com.mojang.blaze3d.pipeline.RenderPipeline
 import com.mojang.blaze3d.preprocessor.GlslPreprocessor
 import com.mojang.blaze3d.shaders.ShaderType
 import com.mojang.blaze3d.vulkan.glsl.ShaderCompileException
-import dev.nts.expdxr.d3d12.render.draw.D3D12BindGroupEntry
-import dev.nts.expdxr.d3d12.extern.MCDR_ABI
-import java.util.ArrayList
-import java.util.Optional
-import java.util.regex.Pattern
+import dev.nts.expdxr.utils.IllusionLogger
+import dev.nts.expdxr.d3d12.backend.D3D12BindGroupEntry
 import net.minecraft.client.renderer.ShaderDefines
 import org.lwjgl.system.MemoryUtil
 import org.lwjgl.util.shaderc.Shaderc
@@ -17,8 +14,8 @@ import java.io.File
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
-import java.util.HashSet
-import java.util.Locale
+import java.util.*
+import java.util.regex.Pattern
 
 /**
  * DX12 着色器编译器：GLSL -> SPIR-V（shaderc）-> 反射 + rebind（spvc）->
@@ -27,13 +24,11 @@ import java.util.Locale
  * 原生层 D3DCompile 完成）。
  */
 class D3D12ShaderCompiler : AutoCloseable {
-    private val shaderCompiler: Long
-    private val shaderOptions: Long
+    private val shaderCompiler = Shaderc.shaderc_compiler_initialize()
+    private val shaderOptions = Shaderc.shaderc_compile_options_initialize()
     private val globalDefines: ShaderDefines
 
     init {
-        this.shaderCompiler = Shaderc.shaderc_compiler_initialize()
-        this.shaderOptions = Shaderc.shaderc_compile_options_initialize()
         Shaderc.shaderc_compile_options_set_target_env(this.shaderOptions, 0, 0x402000)  // Vulkan 1.2
         Shaderc.shaderc_compile_options_set_auto_bind_uniforms(this.shaderOptions, true)
         Shaderc.shaderc_compile_options_set_auto_map_locations(this.shaderOptions, true)
@@ -63,7 +58,7 @@ class D3D12ShaderCompiler : AutoCloseable {
             val status = Shaderc.shaderc_result_get_compilation_status(result)
             if (status != 0) {
                 throw ShaderCompileException(
-                    "Couldn't parse GLSL: " + Shaderc.shaderc_result_get_error_message(result))
+                    "Couldn't parse GLSL: ${Shaderc.shaderc_result_get_error_message(result)}")
             }
             val spirv = Shaderc.shaderc_result_get_bytes(result)!!
             val copy = MemoryUtil.memCalloc(spirv.remaining())
@@ -85,15 +80,15 @@ class D3D12ShaderCompiler : AutoCloseable {
     @Throws(ShaderCompileException::class)
     fun compile(pipeline: RenderPipeline, vertex: D3D12IntermediaryShaderModule,
                 fragment: D3D12IntermediaryShaderModule, flipY: Boolean): D3D12CompiledShader {
-        val entries = ArrayList<D3D12BindGroupEntry>()
+        val entries = mutableListOf<D3D12BindGroupEntry>()
         addToBindGroup(entries, vertex, pipeline)
         addToBindGroup(entries, fragment, pipeline)
 
-        val vertexOutputNames = ArrayList<String>()
+        val vertexOutputNames = mutableListOf<String>()
         for (variable in vertex.outputs()) {
             vertexOutputNames.add(variable.name())
         }
-        val vertexInputNames = ArrayList<String>()
+        val vertexInputNames = mutableListOf<String>()
         for (vertexFormat in pipeline.vertexFormatBindings) {
             if (vertexFormat == null) continue
             for (attribute in vertexFormat.elements) {
@@ -108,11 +103,18 @@ class D3D12ShaderCompiler : AutoCloseable {
 
         var vertexHlsl = vertexWork.toHlsl(true)
         var fragmentHlsl = fragmentWork.toHlsl(false)
-        // P31：在 GUI 离屏 pass（flipY=true，仅 GuiItemAtlas / PictureInPicture 离屏图集）
-        // 中，对 entity_cutout / item_cutout / animate_sprite 管线注入 gl_Position.y 翻转，
-        // 抵消这些 pass 的 invertY=true 正交投影在 D3D12（NDC Y 向上）下多出的一次 Y 镜像。
-        // scissor 由 D3D12RenderPassBackend 原样直通，无需再翻转。
-        // 注意：这些管线在 flipY=false 时保持原始着色器，主世界 3D 渲染方向不受影响。
+        // P31 / P101b：在 GUI 离屏 pass（flipY=true，即 usage==13 且带深度附件的
+        // GuiItemAtlas / PictureInPicture 图集）中，pass 的正交投影是 invertY=true
+        // （GL 底左约定），而 D3D12 的 NDC Y 向上、纹理 v=0 在顶部 ⇒ 该 pass 里渲染的
+        // **任何**几何都会被多镜像一次。因此判据必须是"整个 pass 一起翻"，而不是按
+        // 管线名逐个打补丁：needsYFlip = isAtlasBake || flipY。
+        // P101 实测（2026-10-14，`[P101] pass census` 13 条 + `[P28]` 注入日志）：
+        // 物品栏里的玩家模型走 minecraft:pipeline/entity_translucent
+        // （PlayerModel.java:36 `super(root, RenderTypes::entityTranslucent)`），
+        // 旧的 entity_cutout|item_cutout 白名单漏掉它 ⇒ 该 pass 里模型上下颠倒，
+        // 正是用户报的"头在底下 腿在上面"。needsYFlip 是单个布尔，与 isAtlasBake
+        // 同时命中时也只注入一次（不会翻两次回到原样）。
+        // 这些管线在 flipY=false 时保持原始着色器，主世界 3D 渲染方向不受影响。
         //
         // Fix ATLAS-BAKE-VFLIP（图集烘制 Y 镜像）：ANIMATE_SPRITE_BLIT /
         // ANIMATE_SPRITE_INTERPOLATE 仅在 TextureAtlas.uploadInitialContents /
@@ -125,54 +127,52 @@ class D3D12ShaderCompiler : AutoCloseable {
         // 仅用于图集烘制的管线**无条件**注入 gl_Position.y 翻转。
         val pipelineLocation = pipeline.location.toString()
         val isAtlasBake = pipelineLocation.contains("animate_sprite")
-        val needsYFlip = isAtlasBake
-            || (flipY && (pipelineLocation.contains("entity_cutout")
-                || pipelineLocation.contains("item_cutout")))
-        // P28 诊断：打印 pipelineLocation + flipY + needsYFlip，便于追踪注入路径（P29：仅 verbose 输出）
-        if (MCDR_ABI.LOG_VERBOSE) {
-            System.err.println("[d3d12-java] [P28] " + pipelineLocation + " flipY=" + flipY + " needsYFlip=" + needsYFlip)
-            System.err.flush()
-        }
+        // P101b：flipY 的 pass 里**所有**管线都要翻（白名单是历史遗留的补丁式写法，
+        // 已实证漏掉 entity_translucent ⇒ 玩家模型颠倒）。
+        val needsYFlip = isAtlasBake || flipY
+        // P28 诊断：打印 pipelineLocation + flipY + needsYFlip，便于追踪注入路径。
+        // P101c：改为**无条件** stderr —— 每条管线只在编译时打 1 行（整轮 ~100 行），
+        // 不再要求 verbose。理由：静默模式（不喷 60 MB 日志）下也必须能确认
+        // entity_translucent 有没有被注入 Y 翻转，否则验证只能靠开 verbose 把 CPU 吃满。
+        System.err.println("[backend-java] [P28] $pipelineLocation flipY=$flipY needsYFlip=$needsYFlip")
         if (needsYFlip) {
             val before = vertexHlsl
             vertexHlsl = injectVertexYFlip(vertexHlsl)
             if (before == vertexHlsl) {
-                System.err.println("[d3d12-java] [P28] WARN: no gl_Position assignment found in " + pipelineLocation
+                IllusionLogger.warnMessage("[backend-java] [P28] WARN: no gl_Position assignment found in ${pipelineLocation}"
                     + " vertex HLSL, Y-flip NOT injected")
                 System.err.flush()
             } else {
-                System.err.println("[d3d12-java] [P28] inject Y-flip into " + pipelineLocation + " vertex HLSL")
-                System.err.flush()
+                System.err.println("[backend-java] [P28] inject Y-flip into $pipelineLocation vertex HLSL")
             }
         }
         if (DIAG_GREEN || DIAG_WHITE) {
             // P6 诊断：强制输出纯绿/纯白，区分"管线问题"vs"数据问题"
             // 屏幕变绿/白 => 管线通路正常，问题在纹理数据；仍红 => 管线根本问题。
             val loc = pipeline.location.toString()
-            System.err.println("[d3d12-java] [DIAG] " + loc
-                + " frag before= " + fragmentHlsl.length + " bytes")
+            IllusionLogger.debugMessage("[backend-java] [DIAG] ${loc}"
+                + " frag before= ${fragmentHlsl.length} bytes")
             val oldLenStr = fragmentHlsl.length.toString()
             fragmentHlsl = if (DIAG_GREEN)
                 stripFragMainAndReplace(fragmentHlsl)
             else
                 stripFragMainAndWhite(fragmentHlsl)
-            System.err.println("[d3d12-java] [DIAG] " + loc
-                + " frag after= " + fragmentHlsl.length + " bytes"
-                + " changed=" + (fragmentHlsl.length != Integer.parseInt(oldLenStr)))
+            IllusionLogger.debugMessage("[backend-java] [DIAG] ${loc}"
+                + " frag after= ${fragmentHlsl.length} bytes"
+                + " changed=${fragmentHlsl.length != oldLenStr.toInt()}")
             val head = if (fragmentHlsl.length > 120)
-                fragmentHlsl.substring(0, 120) + "..."
+                "${fragmentHlsl.substring(0, 120)}..."
             else
                 fragmentHlsl
-            System.err.println("[d3d12-java] [DIAG] " + loc + " frag head=" + head)
-            System.err.println("[d3d12-java] [DIAG] " + loc
-                + " frag forced " + (if (DIAG_GREEN) "GREEN" else "WHITE") + " (all pipelines)")
+            IllusionLogger.debugMessage("[backend-java] [DIAG] $loc frag head=$head")
+            IllusionLogger.debugMessage("[backend-java] [DIAG] $loc frag forced ${if (DIAG_GREEN) "GREEN" else "WHITE"} (all pipelines)")
         }
         // 中灰诊断：只覆盖地形管线（solid/cutout/translucent_terrain），保留 GUI/天空
         // 不受影响，便于同帧对比。用于区分"光照乘积变暗"vs"主世界合成/呈现链压暗"。
         if (DIAG_GRAY >= 0.0f && pipeline.location.toString().contains("terrain")) {
             fragmentHlsl = stripFragMainAndGray(fragmentHlsl, DIAG_GRAY)
-            System.err.println("[d3d12-java] [DIAG] " + pipeline.location
-                + " frag forced gray=" + DIAG_GRAY + " (terrain only, via " + DIAG_GRAY_SRC + ")")
+            IllusionLogger.debugMessage("[backend-java] [DIAG] ${pipeline.location}"
+                + " frag forced gray=${DIAG_GRAY} (terrain only, via ${DIAG_GRAY_SRC})")
         }
         // Fix LIGHTMAP-VFLIP（正式修复，替代已确认的 lmflip 探针）：16×16 readback 证明
         // 光贴图内容亮暗渐变正确，但 sky=15 亮行写在与 terrain 采样端相反的一侧，导致白天
@@ -183,13 +183,13 @@ class D3D12ShaderCompiler : AutoCloseable {
         // 探针实测白天地形恢复明亮。用 !flipY 排除潜在 P31 变体的重复注入。
         if (pipelineLocation.contains("lightmap") && !flipY) {
             val needle = "void frag_main()\n{"
-            val repl = needle + "\n    texCoord.y = 1.0f - texCoord.y;"
+            val repl = "$needle\n    texCoord.y = 1.0f - texCoord.y;"
             if (fragmentHlsl.contains(needle)) {
                 fragmentHlsl = fragmentHlsl.replace(needle, repl)
-                System.err.println("[d3d12-java] [FIX] " + pipeline.location
+                IllusionLogger.debugMessage("[backend-java] [FIX] ${pipeline.location}"
                     + " lightmap frag texCoord.y mirrored (LIGHTMAP-VFLIP)")
             } else {
-                System.err.println("[d3d12-java] [FIX] WARN: frag_main needle not found for "
+                IllusionLogger.warnMessage("[backend-java] [FIX] WARN: frag_main needle not found for "
                     + pipeline.location)
             }
             System.err.flush()
@@ -200,9 +200,9 @@ class D3D12ShaderCompiler : AutoCloseable {
         // "lightmap" 的管线（pipeline/lightmap），不影响 GUI/天空。
         if (DIAG_WHITE_LIGHT && pipelineLocation.contains("lightmap")) {
             fragmentHlsl = stripFragMainAndWhite(fragmentHlsl)
-            System.err.println("[d3d12-java] [DIAG] " + pipeline.location
+            IllusionLogger.debugMessage("[backend-java] [DIAG] ${pipeline.location}"
                 + " frag forced WHITE on lightmap pass (light=1.0 probe, via "
-                + DIAG_WHITE_LIGHT_SRC + ")")
+                + "${DIAG_WHITE_LIGHT_SRC})")
             System.err.flush()
         }
         // UV2 可视化探针：把 terrain VS 里的"光照乘积"一行替换为直接发射 UV2 自身数值
@@ -217,26 +217,26 @@ class D3D12ShaderCompiler : AutoCloseable {
             val uv2Repl = "vertexColor = float4((float2(UV2) / 240.0f), 1.0f, 0.0f);"
             if (vertexHlsl.contains(uv2Needle)) {
                 vertexHlsl = vertexHlsl.replace(uv2Needle, uv2Repl)
-                System.err.println("[d3d12-java] [DIAG] " + pipeline.location
-                    + " UV2-viz injected (vertexColor=UV2/240) via " + UV2_VIZ_FLAG_NAME)
+                IllusionLogger.debugMessage("[backend-java] [DIAG] ${pipeline.location}"
+                    + " UV2-viz injected (vertexColor=UV2/240) via ${UV2_VIZ_FLAG_NAME}")
             } else {
-                System.err.println("[d3d12-java] [DIAG] WARN: UV2-viz needle not found in "
-                    + pipeline.location + " vertex HLSL")
+                IllusionLogger.debugMessage("[backend-java] [DIAG] WARN: UV2-viz needle not found in "
+                    + "${pipeline.location} vertex HLSL")
             }
             System.err.flush()
         }
         // Lightmap 可视化探针：直接输出 terrain 对 Sampler2 的原始采样值，用于确认
-        // 地形 draw 时真正读到的那张 16×16 光贴图内容是否正常（uv2viz 已证明 UV2 正确）。
+        // 地形 core 时真正读到的那张 16×16 光贴图内容是否正常（uv2viz 已证明 UV2 正确）。
         if (DIAG_LIGHTMAP_VIZ && pipelineLocation.contains("terrain")) {
             val lmNeedle = "vertexColor = Color * sample_lightmap(Sampler2, _Sampler2_sampler, param_2);"
             val lmRepl = "vertexColor = float4(sample_lightmap(Sampler2, _Sampler2_sampler, param_2).rgb, 1.0f);"
             if (vertexHlsl.contains(lmNeedle)) {
                 vertexHlsl = vertexHlsl.replace(lmNeedle, lmRepl)
-                System.err.println("[d3d12-java] [DIAG] " + pipeline.location
-                    + " lightmap-viz injected (vertexColor=sample_lightmap) via " + LIGHTMAP_VIZ_FLAG_NAME)
+                IllusionLogger.debugMessage("[backend-java] [DIAG] ${pipeline.location}"
+                    + " lightmap-viz injected (vertexColor=sample_lightmap) via ${LIGHTMAP_VIZ_FLAG_NAME}")
             } else {
-                System.err.println("[d3d12-java] [DIAG] WARN: lightmap-viz needle not found in "
-                    + pipeline.location + " vertex HLSL")
+                IllusionLogger.debugMessage("[backend-java] [DIAG] WARN: lightmap-viz needle not found in "
+                    + "${pipeline.location} vertex HLSL")
             }
             System.err.flush()
         }
@@ -247,20 +247,20 @@ class D3D12ShaderCompiler : AutoCloseable {
             val tag = pipelineLocation.substring(pipelineLocation.lastIndexOf('/') + 1)
             if (gDumpedTerrainShaders.add(tag)) {
                 try {
-                    Files.writeString(Path.of(tag + "_frag.hlsl"), fragmentHlsl)
-                    Files.writeString(Path.of(tag + "_vert.hlsl"), vertexHlsl)
-                    System.err.println("[d3d12-java] [DIAG] dumped HLSL for " + pipelineLocation)
+                    Files.writeString(Path.of("${tag}_frag.hlsl"), fragmentHlsl)
+                    Files.writeString(Path.of("${tag}_vert.hlsl"), vertexHlsl)
+                    IllusionLogger.debugMessage("[backend-java] [DIAG] dumped HLSL for $pipelineLocation")
                 } catch (e: IOException) {
-                    System.err.println("[d3d12-java] [DIAG] dump failed for " + pipelineLocation + ": " + e)
+                    IllusionLogger.debugMessage("[backend-java] [DIAG] dump failed for $pipelineLocation: $e")
                 }
             }
         }
         // Fix S2：语义名称由 toHlsl() 通过 spvc_compiler_hlsl_add_vertex_attribute_remap 注入，
         // 基准 é vertex.inputs() (SPIR-V unique inputs após rebind), não vertexInputNames (formato).
         // BUG-01 fix: usar vertex.inputs().size() garante alinhamento com spvc remap count.
-        val semanticNames = ArrayList<String>()
+        val semanticNames = mutableListOf<String>()
         for (i in 0 until vertex.inputs().size) {
-            semanticNames.add(if (i == 0) "POSITION" else ("TEXCOORD" + (i - 1)))
+            semanticNames.add(if (i == 0) "POSITION" else ("TEXCOORD${i - 1}"))
         }
         return D3D12CompiledShader(vertexHlsl, fragmentHlsl, entries, vertexInputNames, semanticNames)
     }
@@ -316,7 +316,7 @@ class D3D12ShaderCompiler : AutoCloseable {
 
         // Lightmap 可视化探针：terrain 顶点着色器不乘以顶点色，而是把 sample_lightmap(...)
         // 对 Sampler2 的"原始采样结果"直接当作 vertexColor 输出 → 画面颜色 = terrain 在
-        // draw 时真正读到的光贴图纹素值。判读：向阳顶面若亮（接近白/暖）说明内容与绑定都
+        // core 时真正读到的光贴图纹素值。判读：向阳顶面若亮（接近白/暖）说明内容与绑定都
         // 正常，变暗在更下游；若大片暗 → 地形实际采样到的 16×16 内容本身是暗的/绑定错了。
         // 触发：运行目录存在空文件 dx12_diag_lightmapviz.flag。
         private const val LIGHTMAP_VIZ_FLAG_NAME: String = "dx12_diag_lightmapviz.flag"
@@ -335,7 +335,7 @@ class D3D12ShaderCompiler : AutoCloseable {
             if (env != null) {
                 try {
                     val v = env.trim().toFloat()
-                    if (v >= 0.0f && v <= 1.0f) {
+                    if (v in 0.0f..1.0f) {
                         f = v
                         src = "env"
                     }
@@ -401,9 +401,9 @@ class D3D12ShaderCompiler : AutoCloseable {
                 uniformDescription = BindGroupLayout.flattenUniforms(pipeline.bindGroupLayouts).stream()
                     .filter { d -> d.name() == name }.findFirst()
                 if (uniformDescription.isEmpty) {
-                    System.err.printf("[d3d12-java] addToBindGroup: uniform '%s' not found in %s%n",
+                    IllusionLogger.debugFormat("[backend-java] addToBindGroup: uniform '%s' not found in %s%n",
                         name, pipeline.location)
-                    throw ShaderCompileException("Unable to find shader defined uniform (" + name + ")")
+                    throw ShaderCompileException("Unable to find shader defined uniform ($name)")
                 }
                 if (!entries.stream().noneMatch { e ->
                         e.type == D3D12BindGroupEntry.Type.UNIFORM_BUFFER && e.name == name
@@ -416,9 +416,9 @@ class D3D12ShaderCompiler : AutoCloseable {
                     .filter { d -> d.name() == name }.findFirst()
                 if (uniformDescription.isPresent) {
                     if (sampler.dimensions() != 5) {
-                        System.err.printf("[d3d12-java] addToBindGroup: UTB '%s' in %s has dim %d (expected 5)%n",
+                        IllusionLogger.debugFormat("[backend-java] addToBindGroup: UTB '%s' in %s has dim %d (expected 5)%n",
                             name, pipeline.location, sampler.dimensions())
-                        throw ShaderCompileException("UTB (" + name + ") must have type of SpvDimBuffer")
+                        throw ShaderCompileException("UTB ($name) must have type of SpvDimBuffer")
                     }
                     if (!entries.stream().noneMatch { e ->
                             e.type == D3D12BindGroupEntry.Type.TEXEL_BUFFER && e.name == name
@@ -432,15 +432,16 @@ class D3D12ShaderCompiler : AutoCloseable {
                     continue
                 }
                 if (BindGroupLayout.flattenSamplers(pipeline.bindGroupLayouts).stream().noneMatch { s -> s == name }) {
-                    System.err.printf("[d3d12-java] addToBindGroup: sampler '%s' not found in %s%n",
+                    IllusionLogger.debugFormat("[backend-java] addToBindGroup: sampler '%s' not found in %s%n",
                         name, pipeline.location)
-                    throw ShaderCompileException("Unable to find shader defined uniform (" + name + ")")
+                    throw ShaderCompileException("Unable to find shader defined uniform ($name)")
                 }
                 if (sampler.dimensions() != 1 && sampler.dimensions() != 3) {
-                    System.err.printf("[d3d12-java] addToBindGroup: sampled texture '%s' in %s has dim %d (expected 1 or 3)%n",
+                    IllusionLogger.debugFormat("[backend-java] addToBindGroup: sampled texture '%s' in %s has dim %d (expected 1 or 3)%n",
                         name, pipeline.location, sampler.dimensions())
                     throw ShaderCompileException(
-                        "Sampled texture (" + name + ") must have type of SpvDim2D or SpvDimCube")
+                        "Sampled texture ($name) must have type of SpvDim2D or SpvDimCube"
+                    )
                 }
                 if (!entries.stream().noneMatch { e ->
                         e.type == D3D12BindGroupEntry.Type.SAMPLED_IMAGE && e.name == name
@@ -452,7 +453,7 @@ class D3D12ShaderCompiler : AutoCloseable {
         /** 精确匹配含嵌套花括号（for/条件块等）的 frag_main 函数体并替换为纯绿色输出 */
         private fun stripFragMainAndReplace(hlsl: String): String {
             val lines = splitKeepTrailing(hlsl)
-            val sb = StringBuilder()
+            return buildString {
             var i = 0
             while (i < lines.size) {
                 val trimmed = lines[i].trim()
@@ -472,7 +473,7 @@ class D3D12ShaderCompiler : AutoCloseable {
                             else if (c == '}') braceCount--
                         }
                     }
-                    sb.append("void frag_main() { fragColor = float4(0.0, 1.0, 0.0, 1.0); }\n")
+                    append("void frag_main() { fragColor = float4(0.0, 1.0, 0.0, 1.0); }\n")
                     i++
                     // 继续读行直到平衡所有括号
                     while (i < lines.size && braceCount > 0) {
@@ -484,10 +485,10 @@ class D3D12ShaderCompiler : AutoCloseable {
                     }
                     continue
                 }
-                sb.append(lines[i]).append('\n')
+                append(lines[i]).append('\n')
                 i++
             }
-            return sb.toString()
+            }
         }
 
         /** 同 stripFragMainAndReplace，但输出纯白色（用于诊断 mojang_logo 管线）。 */
@@ -497,14 +498,14 @@ class D3D12ShaderCompiler : AutoCloseable {
 
         /** 同 stripFragMainAndWhite，但输出恒定灰度（用于诊断主世界合成/呈现链路是否压暗中灰）。 */
         private fun stripFragMainAndGray(hlsl: String, gray: Float): String {
-            val c = String.format(Locale.ROOT, "%.4f", gray)
-            return stripFragMainWithColor(hlsl, c + ", " + c + ", " + c + ", 1.0")
+            val c = "%.4f".format(Locale.ROOT, gray)
+            return stripFragMainWithColor(hlsl, "$c, $c, $c, 1.0")
         }
 
         /** 通用：把 spvc 生成的 frag_main 函数体替换为输出指定颜色常量。 */
         private fun stripFragMainWithColor(hlsl: String, colorExpr: String): String {
             val lines = splitKeepTrailing(hlsl)
-            val sb = StringBuilder()
+            return buildString {
             var i = 0
             while (i < lines.size) {
                 val trimmed = lines[i].trim()
@@ -521,7 +522,7 @@ class D3D12ShaderCompiler : AutoCloseable {
                             else if (c == '}') braceCount--
                         }
                     }
-                    sb.append("void frag_main() { fragColor = float4(").append(colorExpr).append("); }\n")
+                    append("void frag_main() { fragColor = float4(").append(colorExpr).append("); }\n")
                     i++
                     while (i < lines.size && braceCount > 0) {
                         for (c in lines[i].toCharArray()) {
@@ -532,18 +533,18 @@ class D3D12ShaderCompiler : AutoCloseable {
                     }
                     continue
                 }
-                sb.append(lines[i]).append('\n')
+                append(lines[i]).append('\n')
                 i++
+                }
             }
-            return sb.toString()
         }
-
-        private val FRAG_MAIN_RE: Regex = Regex("void\\s+frag_main\\(\\).*")
 
         /**
          * 等价于 Java `hlsl.split("\n", -1)`：保留末尾空串（原实现依赖它维持行数不变）。
          * Kotlin 的 `String.split(delimiter, limit = 0)` 与 Java 的 limit=-1 语义一致。
          */
+        private val FRAG_MAIN_RE: Regex = Regex("void\\s+frag_main\\(\\).*")
+        
         private fun splitKeepTrailing(hlsl: String): List<String> {
             return hlsl.split("\n", limit = 0)
         }

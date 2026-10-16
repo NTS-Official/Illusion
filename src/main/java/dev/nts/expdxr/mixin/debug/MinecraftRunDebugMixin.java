@@ -1,5 +1,7 @@
 package dev.nts.expdxr.mixin.debug;
 
+import dev.nts.expdxr.utils.IllusionLogger;
+
 import net.minecraft.client.Minecraft;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -19,7 +21,7 @@ public class MinecraftRunDebugMixin {
         Minecraft mc = (Minecraft) (Object) this;
         // Shadow fields are not directly accessible from mixin without @Shadow,
         // but we can use reflection on the target object to read them.
-        System.err.println("[d3d12-debug] Minecraft.run() HEAD");
+        IllusionLogger.debugMessage("[backend-debug] Minecraft.run() HEAD");
         System.err.flush();
     }
 }

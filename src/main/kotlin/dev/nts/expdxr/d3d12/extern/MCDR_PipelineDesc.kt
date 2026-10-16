@@ -29,7 +29,7 @@ import java.nio.charset.StandardCharsets
  * </ul>
  *
  * <p>Instances are single-use builders: fill the lists, then hand the object to
- * [MCDR_ABI.dx12CreateGraphicsPipeline].
+ * [MCDR_ABI.D3D12CreateGraphicsPipeline].
  *
  * 互操作：`ColorTarget` / `InputElement` / `Binding` 是**嵌套类**（Kotlin 默认即 Java 的
  * static nested class，不能写成 `inner class`），调用方按 `McdrPipelineDesc.ColorTarget(...)`
@@ -96,7 +96,7 @@ class MCDRPipelineDesc {
             try {
                 return layout.byteOffset(MemoryLayout.PathElement.groupElement(name))
             } catch (e: IllegalArgumentException) {
-                throw IllegalStateException("no field " + name + " in " + layout, e)
+                throw IllegalStateException("no field ${name} in ${layout}", e)
             }
         }
     }
@@ -220,15 +220,9 @@ class MCDRPipelineDesc {
      * downcall inside a try-with-resources.
      */
     fun pack(arena: Arena): MemorySegment {
-        if (colorTargets.size > MAX_COLOR_TARGETS) {
-            throw IllegalArgumentException("too many colour targets: " + colorTargets.size)
-        }
-        if (inputElements.size > MAX_INPUT_ELEMENTS) {
-            throw IllegalArgumentException("too many input elements: " + inputElements.size)
-        }
-        if (bindings.size > MAX_BINDINGS) {
-            throw IllegalArgumentException("too many bindings: " + bindings.size)
-        }
+        require(colorTargets.size <= MAX_COLOR_TARGETS) { "too many colour targets: ${colorTargets.size}" }
+        require(inputElements.size <= MAX_INPUT_ELEMENTS) { "too many input elements: ${inputElements.size}" }
+        require(bindings.size <= MAX_BINDINGS) { "too many bindings: ${bindings.size}" }
 
         val desc = arena.allocate(MCDRLayout.PIPELINE_DESC)
 
@@ -240,7 +234,7 @@ class MCDRPipelineDesc {
         desc.set(MCDRLayout.I32, OFF_PS_LEN, byteLength(psBytes))
 
         desc.set(MCDRLayout.I32, OFF_COLOR_COUNT, colorTargets.size)
-        if (!colorTargets.isEmpty()) {
+        if (colorTargets.isNotEmpty()) {
             val array = arena.allocate(MCDRLayout.COLOR_TARGET, colorTargets.size.toLong())
             for (i in 0 until colorTargets.size) {
                 writeColorTarget(array, i * MCDRLayout.COLOR_TARGET.byteSize(), colorTargets[i])
@@ -261,7 +255,7 @@ class MCDRPipelineDesc {
         desc.set(MCDRLayout.I32, OFF_POLYGON, polygonMode)
 
         desc.set(MCDRLayout.I32, OFF_ELEM_COUNT, inputElements.size)
-        if (!inputElements.isEmpty()) {
+        if (inputElements.isNotEmpty()) {
             val array = arena.allocate(MCDRLayout.INPUT_ELEMENT, inputElements.size.toLong())
             val stride = MCDRLayout.INPUT_ELEMENT.byteSize()
             for (i in 0 until inputElements.size) {
@@ -271,7 +265,7 @@ class MCDRPipelineDesc {
         }
 
         desc.set(MCDRLayout.I32, OFF_BINDING_COUNT, bindings.size)
-        if (!bindings.isEmpty()) {
+        if (bindings.isNotEmpty()) {
             val array = arena.allocate(MCDRLayout.PIPELINE_BINDING, bindings.size.toLong())
             val stride = MCDRLayout.PIPELINE_BINDING.byteSize()
             for (i in 0 until bindings.size) {
@@ -336,9 +330,7 @@ class MCDRPipelineDesc {
             return MemorySegment.NULL
         }
         val bytes = s.toByteArray(StandardCharsets.UTF_8)
-        if (bytes.size > MAX_SEMANTIC_NAME_BYTES) {
-            throw IllegalArgumentException("semantic name too long (" + bytes.size + "): " + s)
-        }
+        require(bytes.size <= MAX_SEMANTIC_NAME_BYTES) { "semantic name too long (${bytes.size}): ${s}" }
         val seg = arena.allocate(bytes.size + 1L)
         MemorySegment.copy(bytes, 0, seg, BYTE, 0, bytes.size)
         seg.set(BYTE, bytes.size.toLong(), 0.toByte())

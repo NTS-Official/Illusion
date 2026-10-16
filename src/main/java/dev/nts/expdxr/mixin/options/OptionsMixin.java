@@ -1,6 +1,6 @@
 package dev.nts.expdxr.mixin.options;
 
-import dev.nts.expdxr.d3d12.render.backend.D3D12GraphicsApi;
+import dev.nts.expdxr.d3d12.backend.D3D12GraphicsApi;
 import java.util.ArrayList;
 import net.minecraft.client.OptionInstance;
 import net.minecraft.client.Options;
@@ -27,10 +27,10 @@ import org.spongepowered.asm.mixin.injection.ModifyArg;
  * the same restart-notice / description / experimental-note structure vanilla uses.
  *
  * <p>The injection point is the seven-parameter constructor because that is the overload
- * the graphics option uses. <b>Many other options share it</b>, so the wrapper is deliberately
+ * the graphics options uses. <b>Many other options share it</b>, so the wrapper is deliberately
  * erased (raw {@code TooltipSupplier}, {@code Object} parameter): a {@code TooltipSupplier<T>}
  * lambda would emit a {@code checkcast} on the incoming value and blow up with a
- * {@code ClassCastException} the first time a non-graphics option such as render distance
+ * {@code ClassCastException} the first time a non-graphics options such as render distance
  * asked for its tooltip.
  */
 @Mixin(Options.class)
@@ -60,7 +60,7 @@ public abstract class OptionsMixin {
                             "Lnet/minecraft/client/OptionInstance$ValueUpdateListener;)V"),
             index = 1)
     @SuppressWarnings({"rawtypes", "unchecked"})
-    private OptionInstance.TooltipSupplier dxr_mc$dx12Tooltip(OptionInstance.TooltipSupplier original) {
+    private OptionInstance.TooltipSupplier dxr_mc$D3D12Tooltip(OptionInstance.TooltipSupplier original) {
         return (Object value) -> {
             if (!D3D12GraphicsApi.isDx12(value)) {
                 return original.apply(value);

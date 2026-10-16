@@ -1,8 +1,7 @@
 package dev.nts.expdxr.d3d12.render.shader
 
-import java.util.ArrayList
-import java.util.Comparator
-import java.util.Locale
+import dev.nts.expdxr.Illusion.Companion.CLASSPATH
+import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.LongAdder
 
@@ -17,7 +16,7 @@ import java.util.concurrent.atomic.LongAdder
  *
  * 本类用一个后台线程每 {@link #INTERVAL_MS} 毫秒抓一次渲染线程的调用栈，统计
  * 栈顶（跳过本分析器与埋点方法）落点。这样可以直接回答：渲染线程的时间究竟花在
- * {@code McdrAbi.d3d12*}（我们的前端/JNI）还是 {@code net.minecraft.*} /
+ * {@code McdrAbi.backend*}（我们的前端/JNI）还是 {@code net.minecraft.*} /
  * {@code com.mojang.blaze3d.*}（MC/Blaze3D 自身逻辑）里。
  *
  * 输出为"类名.方法名"（不再只有方法名，避免 writeBytes 这类 JDK/日志方法无法
@@ -56,7 +55,7 @@ object D3D12StackSampler {
             return
         }
         started = true
-        sampler = Thread(D3D12StackSampler::loop, "d3d12-stack-sampler")
+        sampler = Thread(D3D12StackSampler::loop, "backend-stack-sampler")
         sampler!!.isDaemon = true
         sampler!!.priority = Thread.MAX_PRIORITY
         sampler!!.start()
@@ -74,10 +73,10 @@ object D3D12StackSampler {
                     }
                     if (i < stack.size) {
                         val top = stack[i]
-                        val key = simpleName(top.className) + "." + top.methodName
+                        val key = "${simpleName(top.className)}.${top.methodName}"
                         COUNTS.computeIfAbsent(key) { LongAdder() }.increment()
                         TOTAL.increment()
-                        if (top.className.startsWith("com.xgdt.d3d12.")) {
+                        if (top.className.startsWith("$CLASSPATH.")) {
                             OURS.increment()
                         }
                         if (STACKS.size < STACK_CAP) {
@@ -99,11 +98,11 @@ object D3D12StackSampler {
     /** 跳过本分析器自身与 P50~P52 的埋点方法，露出下面真正的业务方法。 */
     private fun skip(e: StackTraceElement): Boolean {
         val cn = e.className
-        if (cn.startsWith("com.xgdt.d3d12.d3d12.D3D12StackSampler")
-            || cn.startsWith("com.xgdt.d3d12.d3d12.D3D12RenderProf")) {
+        if (cn.startsWith("$CLASSPATH.backend.render.shader.D3D12StackSampler")
+            || cn.startsWith("$CLASSPATH.backend.render.adapter.D3D12RenderProf")) {
             return true
         }
-        return e.methodName.startsWith("dx12_prof")
+        return e.methodName.startsWith("D3D12Prof")
     }
 
     /** 输出本区间采样直方图、top3 调用链（各自一行）并清零。 */
@@ -123,48 +122,36 @@ object D3D12StackSampler {
         }
         COUNTS.clear()
         if (entries.isEmpty()) {
-            return "[d3d12-java] P53 sample: no samples yet"
+            return "[backend-java] P53 sample: no samples yet"
         }
         entries.sortWith(Comparator.comparingLong<Map.Entry<String, LongAdder>> { it.value.sum() }.reversed())
-        val sb = StringBuilder(256)
-        sb.append("[d3d12-java] P53 sample n=").append(total)
-          .append(" ours=").append(String.format(
-                Locale.ROOT, "%.0f%%",
-              if (total == 0L) 0.0 else 100.0 * ours / total))
-          .append(" mc=").append(String.format(
-                Locale.ROOT, "%.0f%%",
-              if (total == 0L) 0.0 else 100.0 * (total - ours) / total))
-          .append(" |")
-        val n = Math.min(topN, entries.size)
-        for (i in 0 until n) {
-            val e = entries[i]
-            sb.append(' ').append(e.key).append('=').append(e.value.sum())
-        }
-        // top3 调用链：热点 <- 调用者 <- 再上层 ...（定位真实归属）
-        val nt = Math.min(3, entries.size)
-        for (i in 0 until nt) {
-            val key = entries[i].key
-            val ex = STACKS[key]
-            if (ex != null) {
-                sb.append("\n[d3d12-java] P53 trace ").append(key).append(" <= ").append(ex)
+        return buildString {
+            append("[backend-java] P53 sample n=").append(total)
+              .append(" ours=").append("%.0f%%".format(Locale.ROOT, if (total == 0L) 0.0 else 100.0 * ours / total))
+              .append(" mc=").append("%.0f%%".format(Locale.ROOT, if (total == 0L) 0.0 else 100.0 * (total - ours) / total))
+              .append(" |")
+            val n = topN.coerceAtMost(entries.size)
+            for (i in 0 until n) {
+                val e = entries[i]
+                append(' ').append(e.key).append('=').append(e.value.sum())
             }
+            // top3 调用链：热点 <- 调用者 <- 再上层 ...（定位真实归属）
+            val nt = 3.coerceAtMost(entries.size)
+            for (i in 0 until nt) {
+                val key = entries[i].key
+                val ex = STACKS[key]
+                if (ex != null) {
+                    append("\n[backend-java] P53 trace ").append(key).append(" <= ").append(ex)
+                }
+            }
+            STACKS.clear()
         }
-        STACKS.clear()
-        return sb.toString()
     }
 
     /** 从采样栈的第 from 层起，拼接 STACK_DEPTH 层 "类.方法" 摘要。 */
     private fun excerpt(stack: Array<StackTraceElement>, from: Int): String {
-        val sb = StringBuilder(192)
-        val end = Math.min(stack.size, from + STACK_DEPTH)
-        for (i in from until end) {
-            if (i > from) {
-                sb.append(" <= ")
-            }
-            sb.append(simpleName(stack[i].className)).append('.')
-              .append(stack[i].methodName)
-        }
-        return sb.toString()
+        val end = stack.size.coerceAtMost(from + STACK_DEPTH)
+        return (from until end).joinToString(" <= ") { "${simpleName(stack[it].className)}.${stack[it].methodName}" }
     }
 
     private fun simpleName(fq: String): String {

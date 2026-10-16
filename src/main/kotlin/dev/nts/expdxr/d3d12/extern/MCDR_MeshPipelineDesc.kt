@@ -12,12 +12,12 @@ import java.lang.foreign.ValueLayout
  * shader blobs are **DXIL bytecode**, not HLSL source. D3DCompile stops at shader
  * model 5.1, so nothing on the graphics path can produce an amplification or mesh
  * shader; the native side compiles the HLSL through DXC
- * ([MCDR_ABI.dx12CompileShaderDxc]) and this descriptor carries the result. There
+ * ([MCDR_ABI.D3D12CompileShaderDxc]) and this descriptor carries the result. There
  * is also no input layout and no topology: a mesh pipeline has no input assembler,
  * so `PrimitiveTopologyType` is fixed to TRIANGLE (meshlets are always triangles).
  *
  * <p>Instances are single-use builders: fill the fields, then hand the object to
- * [MCDR_ABI.dx12CreateMeshPipeline]. The colour-target and binding lists reuse
+ * [MCDR_ABI.D3D12CreateMeshPipeline]. The colour-target and binding lists reuse
  * [MCDRPipelineDesc.ColorTarget] / [MCDRPipelineDesc.Binding] because the native
  * layout contract is intentionally identical, so `mcdr_dx12PushDescriptors` needs
  * no mesh-specific variant.
@@ -71,7 +71,7 @@ class MCDRMeshPipelineDesc {
             try {
                 return layout.byteOffset(MemoryLayout.PathElement.groupElement(name))
             } catch (e: IllegalArgumentException) {
-                throw IllegalStateException("no field " + name + " in " + layout, e)
+                throw IllegalStateException("no field ${name} in ${layout}", e)
             }
         }
 
@@ -143,15 +143,9 @@ class MCDRMeshPipelineDesc {
      * stays valid exactly as long as the arena does.
      */
     fun pack(arena: Arena): MemorySegment {
-        if (msDxil == null || msDxil!!.isEmpty()) {
-            throw IllegalArgumentException("mesh shader bytecode (msDxil) is required")
-        }
-        if (colorTargets.size > MAX_COLOR_TARGETS) {
-            throw IllegalArgumentException("too many colour targets: " + colorTargets.size)
-        }
-        if (bindings.size > MAX_BINDINGS) {
-            throw IllegalArgumentException("too many bindings: " + bindings.size)
-        }
+        require(msDxil?.isNotEmpty() == true) { "mesh shader bytecode (msDxil) is required" }
+        require(colorTargets.size <= MAX_COLOR_TARGETS) { "too many colour targets: ${colorTargets.size}" }
+        require(bindings.size <= MAX_BINDINGS) { "too many bindings: ${bindings.size}" }
 
         val desc = arena.allocate(MCDRLayout.MESH_PIPELINE_DESC)
 
@@ -166,7 +160,7 @@ class MCDRMeshPipelineDesc {
         desc.set(MCDRLayout.I32, OFF_PS_LEN, byteLength(psDxil))
 
         desc.set(MCDRLayout.I32, OFF_COLOR_COUNT, colorTargets.size)
-        if (!colorTargets.isEmpty()) {
+        if (colorTargets.isNotEmpty()) {
             val array = arena.allocate(MCDRLayout.COLOR_TARGET, colorTargets.size.toLong())
             for (i in 0 until colorTargets.size) {
                 writeColorTarget(array, i * MCDRLayout.COLOR_TARGET.byteSize(), colorTargets[i])
@@ -186,7 +180,7 @@ class MCDRMeshPipelineDesc {
         desc.set(MCDRLayout.I32, OFF_POLYGON, polygonMode)
 
         desc.set(MCDRLayout.I32, OFF_BINDING_COUNT, bindings.size)
-        if (!bindings.isEmpty()) {
+        if (bindings.isNotEmpty()) {
             val array = arena.allocate(MCDRLayout.PIPELINE_BINDING, bindings.size.toLong())
             val stride = MCDRLayout.PIPELINE_BINDING.byteSize()
             for (i in 0 until bindings.size) {

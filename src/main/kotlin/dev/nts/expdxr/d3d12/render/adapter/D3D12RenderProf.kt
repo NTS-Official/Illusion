@@ -1,5 +1,7 @@
 package dev.nts.expdxr.d3d12.render.adapter
 
+import dev.nts.expdxr.utils.IllusionLogger
+
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.shader.D3D12StackSampler
 import java.lang.management.ManagementFactory
@@ -8,7 +10,7 @@ import java.util.Locale
 /**
  * P50：渲染线程分段计时。
  *
- * 目的：定位 frameInterval 中除 d3d12 后端（P3 已覆盖）之外的 CPU 开销分布——
+ * 目的：定位 frameInterval 中除 backend 后端（P3 已覆盖）之外的 CPU 开销分布——
  * 是 MC 的渲染状态提取（extract）、命令录制（render）、世界渲染（renderLevel）、
  * GUI，还是 Present/提交。
  *
@@ -17,7 +19,7 @@ import java.util.Locale
  * 只是一次 static final boolean 判断，运行期无额外开销。
  *
  * 输出示例：
- *   [d3d12-java] P50 render n=300 frameInterval=4.05ms frame=3.98ms extract=1.10ms
+ *   [backend-java] P50 render n=300 frameInterval=4.05ms frame=3.98ms extract=1.10ms
  *     render=2.40ms[world=2.10 gui=0.25]ms blit=0.05ms present=0.16ms
  *
  * 注：frame − (extract + render + blit + present) 即 update/executePendingTasks/
@@ -142,8 +144,8 @@ object D3D12RenderProf {
             return
         }
         val inv = 1.0 / INTERVAL
-        System.err.println(
-            "[d3d12-java] P50 render n=$INTERVAL" +
+        IllusionLogger.debugMessage(
+            "[backend-java] P50 render n=$INTERVAL" +
                 " frameInterval=${ms(accIntervalNs * inv)}ms" +
                 " frame=${ms(acc[FRAME] * inv)}ms" +
                 " extract=${ms(acc[EXTRACT] * inv)}ms" +
@@ -152,8 +154,8 @@ object D3D12RenderProf {
                 " blit=${ms(acc[BLIT] * inv)}ms" +
                 " present=${ms(acc[PRESENT] * inv)}ms"
         )
-        System.err.println(
-            "[d3d12-java] P51 world n=$INTERVAL" +
+        IllusionLogger.debugMessage(
+            "[backend-java] P51 world n=$INTERVAL" +
                 " submitFeatures=${ms(acc[SUBMIT_FEATURES] * inv)}ms" +
                 " prepareChunks=${ms(acc[PREPARE_CHUNKS] * inv)}ms" +
                 " renderGroup=${ms(acc[RENDER_GROUP] * inv)}ms" +
@@ -161,20 +163,20 @@ object D3D12RenderProf {
                 " uploadTerrain=${ms(acc[UPLOAD_TERRAIN] * inv)}ms" +
                 " occlusion=${ms(acc[OCCLUSION] * inv)}ms"
         )
-        System.err.println(
-            "[d3d12-java] P52 world2 n=$INTERVAL" +
+        IllusionLogger.debugMessage(
+            "[backend-java] P52 world2 n=$INTERVAL" +
                 " prepareFeatures=${ms(acc[PREPARE_FEATURES] * inv)}ms" +
                 " execFrameGraph=${ms(acc[EXECUTE_FRAMEGRAPH] * inv)}ms" +
                 " [execFeaturesSolid=${ms(acc[EXEC_FEATURES] * inv)}ms]" +
-                " " + gcStats()
+                " ${gcStats()}"
         )
-        System.err.println(D3D12StackSampler.report(10))
+        IllusionLogger.debugMessage(D3D12StackSampler.report(10))
         System.err.flush()
         acc.fill(0L)
         accIntervalNs = 0L
     }
 
-    private fun ms(ns: Double): String = String.format(Locale.ROOT, "%.2f", ns / 1_000_000.0)
+    private fun ms(ns: Double): String = "%.2f".format(Locale.ROOT, ns / 1_000_000.0)
 
     private fun gcStats(): String {
         var count = 0L
@@ -198,6 +200,6 @@ object D3D12RenderProf {
         gcCountBase = count
         gcTimeBase = time
         val usedMb = (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) shr 20
-        return String.format(Locale.ROOT, "gc(per%dF)=%d/%.1fms heap=%dMB", INTERVAL, dc, dt.toDouble(), usedMb)
+        return "gc(per%dF)=%d/%.1fms heap=%dMB".format(Locale.ROOT, INTERVAL, dc, dt.toDouble(), usedMb)
     }
 }

@@ -1,7 +1,8 @@
 package dev.nts.expdxr.mixin.render;
 
+import dev.nts.expdxr.utils.IllusionLogger;
+
 import dev.nts.expdxr.d3d12.render.adapter.D3D12Device;
-import dev.nts.expdxr.d3d12.extern.MCDR_ABI;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GameRenderer;
@@ -19,7 +20,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * Debug mixin injected at GameRenderer.render(DeltaTracker, boolean) HEAD.
  * Prints resourcesLoaded / levelNotNull / gameTime so we can confirm whether
  * the official per-frame render pipeline actually fires when launched via
- * fabric-262-26.2.jar / gl4dx12-0.1.0.jar.
+ * fabric-262-26.2.jar / gl4dx12-0.1.0.jar（旧 Fabric 版的构建产物；本仓库现名 dxr_mc）.
  *
  * P15 enhancement: adds frame counter + advanceGameTime + pause state.
  * advanceGameTime controls whether renderLevel() is called (must be true for world rendering).
@@ -38,14 +39,14 @@ public class GameRendererRenderDebugMixin {
     private void dx12_renderDebug(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
         // P50：默认关闭。此前每帧无条件 stderr println + flush（单会话 ~1.7 万行），
         // 是渲染线程最大的 CPU 开销之一。改为仅 DX12_LOG_VERBOSE=1 时启用。
-        if (!MCDR_ABI.LOG_VERBOSE) {
+        if (!IllusionLogger.debugEnabled()) {
             return;
         }
         // Always print on every frame so we can confirm GameRenderer.render() fires
         boolean resourcesLoaded = this.minecraft.isGameLoadFinished();
         boolean levelNotNull = this.minecraft.level != null;
         long gameTime = levelNotNull ? this.minecraft.level.getGameTime() : -1L;
-        System.err.println("[DX12] GameRenderer.render() called frame=" + dx12_renderFrameCount
+        IllusionLogger.debugMessage("[DX12] GameRenderer.render() called frame=" + dx12_renderFrameCount
             + " window=" + (this.minecraft.getWindow().getWidth() + "x" + this.minecraft.getWindow().getHeight())
             + " level=" + (levelNotNull ? "non-null" : "NULL")
             + " paused=" + this.minecraft.isPaused()
@@ -65,7 +66,7 @@ public class GameRendererRenderDebugMixin {
         // P15: sample every 30 frames to reduce log noise, always print frame 1
         boolean sample = (dx12_renderFrameCount == 1) || (dx12_renderFrameCount % 30 == 0);
         if (sample) {
-            System.err.println("[d3d12-debug] render(): frame=" + dx12_renderFrameCount
+            IllusionLogger.debugMessage("[backend-debug] render(): frame=" + dx12_renderFrameCount
                 + " resourcesLoaded=" + rlInt
                 + " advanceGameTime=" + advanceGameTime
                 + " levelNotNull=" + lnInt
@@ -75,7 +76,7 @@ public class GameRendererRenderDebugMixin {
             System.err.flush();
             // P38: 打印 Lightmap renderState 数值，供与读回的 16×16 lightmap 内容对照。
             LightmapRenderState s = this.gameRenderState.lightmapRenderState;
-            System.err.println("[d3d12-debug] lightmapState needsUpdate=" + s.needsUpdate
+            IllusionLogger.debugMessage("[backend-debug] lightmapState needsUpdate=" + s.needsUpdate
                 + " skyFactor=" + s.skyFactor
                 + " blockFactor=" + s.blockFactor
                 + " brightness=" + s.brightness
@@ -92,7 +93,7 @@ public class GameRendererRenderDebugMixin {
 
         // Always print the decision path on frame 1 (loading → loaded transition)
         if (dx12_renderFrameCount == 1) {
-            System.err.println("[d3d12-debug] render() frame=1: willRenderLevel="
+            IllusionLogger.debugMessage("[backend-debug] render() frame=1: willRenderLevel="
                 + (resourcesLoaded && advanceGameTime && levelNotNull));
             System.err.flush();
         }

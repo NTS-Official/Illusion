@@ -28,9 +28,9 @@ import java.util.*
  * header and this mirror have drifted apart, and it is reported as a hard failure rather
  * than silently corrupting matrices the way the JNI version could.
  *
- * 互操作：`McdrAbi.java` 用 `import static dev.nts.expdxr.dx12.McdrLayout.{I32,I64,F32,F64,PTR}`
+ * 互操作：`MCDR_ABI.kt` 用 `import dev.nts.expdxr.d3d12.extern.MCDRLayout.{I32,I64,F32,F64,PTR}`
  * 直接引用下面的标量布局，因此这些 `val` 必须标 `@JvmField`（生成真正的静态字段），
- * 不能写成普通 `val`（那会生成 `McdrLayout.INSTANCE.getI32()` 形式的访问器，
+ * 不能写成普通 `val`（那会生成 `MCDRLayout.INSTANCE.getI32()` 形式的访问器，
  * Java 的 static import 解析不到）。
  */
 object MCDRLayout {
@@ -55,7 +55,7 @@ object MCDRLayout {
     val PTR: AddressLayout = ValueLayout.ADDRESS
 
     // ------------------------------------------------------------------
-    // mcdr_binding_slot — one pipeline binding slot for one draw.
+    // mcdr_binding_slot — one pipeline binding slot for one core.
     // type: 0 = CBV (root descriptor), 1 = SRV (texture view), 2 = SRV (texel buffer).
     // ------------------------------------------------------------------
     @JvmField
@@ -69,7 +69,7 @@ object MCDRLayout {
     ).withByteAlignment(8).withName("mcdr_binding_slot")
 
     // ------------------------------------------------------------------
-    // mcdr_partition_draw — one draw's geometry + vertex/index binding.
+    // mcdr_partition_draw — one core's geometry + vertex/index binding.
     // Replaces the JNI hot path's 9 parallel arrays.
     // ------------------------------------------------------------------
     @JvmField
@@ -88,6 +88,40 @@ object MCDRLayout {
     ).withByteAlignment(8).withName("mcdr_partition_draw")
 
     // ------------------------------------------------------------------
+    // ------------------------------------------------------------------
+    // Named field offsets for the two hot aggregation structs. Resolved from the
+    // layouts above — never written as literals. MCDR_ABI's descriptor packers used
+    // to say `base + 4` / `base + 8` / `base + 24`, which is exactly the silent-drift
+    // class this mirror exists to remove: a field added on the C side would have
+    // shifted every later one with no compile error and no exception.
+    // ------------------------------------------------------------------
+
+    @JvmStatic
+    fun offset(layout: MemoryLayout, field: String): Long {
+        try {
+            return layout.byteOffset(MemoryLayout.PathElement.groupElement(field))
+        } catch (e: IllegalArgumentException) {
+            throw IllegalStateException("no field ${field} in ${layout}", e)
+        }
+    }
+
+    @JvmField val BINDING_SLOT_TYPE: Long = offset(BINDING_SLOT, "type")
+    @JvmField val BINDING_SLOT_TEXEL_FORMAT: Long = offset(BINDING_SLOT, "texelFormat")
+    @JvmField val BINDING_SLOT_BUFFER: Long = offset(BINDING_SLOT, "buffer")
+    @JvmField val BINDING_SLOT_VIEW: Long = offset(BINDING_SLOT, "view")
+    @JvmField val BINDING_SLOT_OFFSET: Long = offset(BINDING_SLOT, "offset")
+    @JvmField val BINDING_SLOT_LENGTH: Long = offset(BINDING_SLOT, "length")
+
+    @JvmField val PARTITION_DRAW_INDEX_BUFFER: Long = offset(PARTITION_DRAW, "indexBuffer")
+    @JvmField val PARTITION_DRAW_VERTEX_BUFFER: Long = offset(PARTITION_DRAW, "vertexBuffer")
+    @JvmField val PARTITION_DRAW_VERTEX_OFFSET: Long = offset(PARTITION_DRAW, "vertexOffset")
+    @JvmField val PARTITION_DRAW_INDEX_TYPE: Long = offset(PARTITION_DRAW, "indexType")
+    @JvmField val PARTITION_DRAW_INDEX_COUNT: Long = offset(PARTITION_DRAW, "indexCount")
+    @JvmField val PARTITION_DRAW_FIRST_INDEX: Long = offset(PARTITION_DRAW, "firstIndex")
+    @JvmField val PARTITION_DRAW_BASE_VERTEX: Long = offset(PARTITION_DRAW, "baseVertex")
+    @JvmField val PARTITION_DRAW_VERTEX_SLOT: Long = offset(PARTITION_DRAW, "vertexSlot")
+    @JvmField val PARTITION_DRAW_VERTEX_STRIDE: Long = offset(PARTITION_DRAW, "vertexStride")
+    @JvmField val PARTITION_DRAW_PAD0: Long = offset(PARTITION_DRAW, "_pad0")
     // mcdr_color_target_desc — format == -1 means an unused attachment slot.
     // ------------------------------------------------------------------
     @JvmField
@@ -202,9 +236,42 @@ object MCDRLayout {
     // The size the C compiler produces for each aggregate above, written out by hand.
     // Asserted while this class initialises, so a drift in the mirror fails immediately,
     // before any native call and even when no DLL is present. (Field offsets cannot be
-    // checked this way; McdrAbi.verifyAbi() compares those against the running DLL.)
+    // checked this way; MCDR_ABI.verifyABI() compares those against the running DLL.)
     // ------------------------------------------------------------------
+    // mcdr_dlss_input — P108. 每帧 DLSS Evaluate 的参数包（C sizeof = 112）。
+    // 字段顺序/名字必须与 MCDR\include\mcdr_abi.h 的 typedef 逐字一致；_pad0/_pad1 是两个
+    // 隐式对齐填充位置（C 里它们无名，这里给名字只为让 describe() 能枚举到）。
+    // ------------------------------------------------------------------
+    @JvmField
+    val DLSS_INPUT: MemoryLayout = MemoryLayout.structLayout(
+        I32.withName("renderWidth"),
+        I32.withName("renderHeight"),
+        I32.withName("targetWidth"),
+        I32.withName("targetHeight"),
+        F32.withName("jitterOffsetX"),
+        F32.withName("jitterOffsetY"),
+        F32.withName("mvScaleX"),
+        F32.withName("mvScaleY"),
+        F32.withName("preExposure"),
+        F32.withName("exposureScale"),
+        I32.withName("exposureMode"),
+        I32.withName("alphaUpscaling"),
+        F32.withName("nearZ"),
+        F32.withName("farZ"),
+        I32.withName("depthInverted"),
+        I32.withName("reset"),
+        I32.withName("depthFormatOrdinal"),
+        I32.withName("_pad0"),
+        PTR.withName("pInColor"),
+        PTR.withName("pInDepth"),
+        PTR.withName("pInMotionVectors"),
+        PTR.withName("pInOutput"),
+        I32.withName("_pad1"),
+        I32.withName("_pad2")
+    ).withName("mcdr_dlss_input")
+
     private val EXPECTED_C_SIZES: Array<Array<Any>> = arrayOf(
+    // ------------------------------------------------------------------
         arrayOf<Any>("mcdr_binding_slot",         BINDING_SLOT,        40L),
         arrayOf<Any>("mcdr_partition_draw",       PARTITION_DRAW,      56L),
         arrayOf<Any>("mcdr_color_target_desc",    COLOR_TARGET,        12L),
@@ -213,6 +280,7 @@ object MCDRLayout {
         arrayOf<Any>("mcdr_pipeline_binding_desc", PIPELINE_BINDING,    2L),
         arrayOf<Any>("mcdr_pipeline_desc",        PIPELINE_DESC,       96L),
         arrayOf<Any>("mcdr_mesh_pipeline_desc",   MESH_PIPELINE_DESC,  96L),
+        arrayOf<Any>("mcdr_dlss_input",          DLSS_INPUT,        112L),
         arrayOf<Any>("mcdr_abi_field",            ABI_FIELD,           24L),
     )
 
@@ -222,9 +290,9 @@ object MCDRLayout {
             val expected = row[2] as Long
             if (actual != expected) {
                 throw IllegalStateException(
-                    "MCDR ABI struct size mismatch for " + row[0] +
-                        ": java=" + actual + " c=" + expected +
-                        " — fix the mirror in McdrLayout.java against MCDR/include/mcdr_abi.h"
+                    "MCDR ABI struct size mismatch for ${row[0]}" +
+                        ": java=${actual} c=${expected}" +
+                        " — fix the mirror in MCDR_Layout.kt against MCDR/include/mcdr_abi.h"
                 )
             }
         }
@@ -244,12 +312,13 @@ object MCDRLayout {
         STRUCTS["mcdr_pipeline_binding_desc"] = PIPELINE_BINDING
         STRUCTS["mcdr_pipeline_desc"] = PIPELINE_DESC
         STRUCTS["mcdr_mesh_pipeline_desc"] = MESH_PIPELINE_DESC
+        STRUCTS["mcdr_dlss_input"] = DLSS_INPUT
     }
 
     /** Named top-level members of every mirrored struct, as `"Struct.field" -> {offset, size}`. */
     @JvmStatic
     fun describe(): Map<String, LongArray> {
-        val out = LinkedHashMap<String, LongArray>()
+        val out = linkedMapOf<String, LongArray>()
         for (e in STRUCTS.entries) {
             val structName = e.key
             val layout = e.value
@@ -260,7 +329,7 @@ object MCDRLayout {
                 }
                 val field = nameOpt.get()
                 val offset = layout.byteOffset(PathElement.groupElement(field))
-                out[structName + "." + field] = longArrayOf(offset, member.byteSize())
+                out["${structName}.${field}"] = longArrayOf(offset, member.byteSize())
             }
         }
         return out
@@ -275,32 +344,32 @@ object MCDRLayout {
     @JvmStatic
     fun verify(nativeFields: Map<String, LongArray>) {
         val javaFields = describe()
-        val problems = ArrayList<String>()
+        val problems = mutableListOf<String>()
 
         for (e in javaFields.entries) {
             val nativeValue = nativeFields[e.key]
             if (nativeValue == null) {
-                problems.add(e.key + ": missing from the native layout report")
+                problems.add("${e.key}: missing from the native layout report")
                 continue
             }
             if (nativeValue[0] != e.value[0]) {
-                problems.add(e.key + ": offset java=" + e.value[0] + " native=" + nativeValue[0])
+                problems.add("${e.key}: offset java=${e.value[0]} native=${nativeValue[0]}")
             }
             if (nativeValue[1] != e.value[1]) {
-                problems.add(e.key + ": size java=" + e.value[1] + " native=" + nativeValue[1])
+                problems.add("${e.key}: size java=${e.value[1]} native=${nativeValue[1]}")
             }
         }
         for (name in nativeFields.keys) {
             if (!javaFields.containsKey(name)) {
-                problems.add(name + ": reported by native but absent from the Java mirror")
+                problems.add("${name}: reported by native but absent from the Java mirror")
             }
         }
 
-        if (!problems.isEmpty()) {
+        if (problems.isNotEmpty()) {
             throw IllegalStateException(
-                "MCDR ABI layout mismatch (" + problems.size +
-                    " field(s)); the Java mirror in dev.nts.expdxr.d3d12.McdrLayout" +
-                    " disagrees with MCDR/include/mcdr_abi.h:\n  " + problems.joinToString("\n  ")
+                "MCDR ABI layout mismatch (${problems.size}" +
+                    " field(s)); the Kotlin mirror in dev.nts.expdxr.d3d12.extern.MCDRLayout" +
+                    " disagrees with MCDR/include/mcdr_abi.h:\n  ${problems.joinToString("\n  ")}"
             )
         }
     }
@@ -308,13 +377,6 @@ object MCDRLayout {
     /** Struct sizes only, for a compact startup log line. */
     @JvmStatic
     fun describeSizes(): String {
-        val sb = StringBuilder()
-        for (e in STRUCTS.entries) {
-            if (sb.length > 0) {
-                sb.append(", ")
-            }
-            sb.append(e.key).append('=').append(e.value.byteSize())
-        }
-        return sb.toString()
+        return STRUCTS.entries.joinToString(", ") { "${it.key}=${it.value.byteSize()}" }
     }
 }

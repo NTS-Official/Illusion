@@ -14,12 +14,12 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public class GuiRendererProfMixin {
 
     @Inject(method = "render", at = @At("HEAD"), remap = false)
-    private void dx12_profGuiHead(CallbackInfo ci) {
+    private void D3D12ProfGuiHead(CallbackInfo ci) {
         D3D12RenderProf.begin(D3D12RenderProf.GUI);
     }
 
     @Inject(method = "render", at = @At("RETURN"), remap = false)
-    private void dx12_profGuiReturn(CallbackInfo ci) {
+    private void D3D12ProfGuiReturn(CallbackInfo ci) {
         D3D12RenderProf.end(D3D12RenderProf.GUI);
     }
 }

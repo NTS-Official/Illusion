@@ -16,13 +16,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 public class FeatureRenderDispatcherProfMixin {
 
     @Inject(method = "prepareFrame", at = @At("HEAD"), remap = false)
-    private void dx12_profPrepareFeaturesHead(SubmitNodeStorage submitNodeStorage,
+    private void D3D12ProfPrepareFeaturesHead(SubmitNodeStorage submitNodeStorage,
                                               CallbackInfoReturnable<FeatureRenderDispatcher.PreparedFrame> cir) {
         D3D12RenderProf.begin(D3D12RenderProf.PREPARE_FEATURES);
     }
 
     @Inject(method = "prepareFrame", at = @At("RETURN"), remap = false)
-    private void dx12_profPrepareFeaturesReturn(SubmitNodeStorage submitNodeStorage,
+    private void D3D12ProfPrepareFeaturesReturn(SubmitNodeStorage submitNodeStorage,
                                                 CallbackInfoReturnable<FeatureRenderDispatcher.PreparedFrame> cir) {
         D3D12RenderProf.end(D3D12RenderProf.PREPARE_FEATURES);
     }

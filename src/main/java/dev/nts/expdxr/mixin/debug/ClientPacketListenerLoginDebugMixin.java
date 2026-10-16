@@ -1,5 +1,7 @@
 package dev.nts.expdxr.mixin.debug;
 
+import dev.nts.expdxr.utils.IllusionLogger;
+
 import net.minecraft.client.multiplayer.ClientPacketListener;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -18,7 +20,7 @@ public class ClientPacketListenerLoginDebugMixin {
 
     @Inject(method = "handleLogin", at = @At("HEAD"), remap = false)
     private void dx12_handleLoginDebug(CallbackInfo ci) {
-        System.err.println("[d3d12-debug] ClientPacketListener.handleLogin() called — login packet received");
+        IllusionLogger.debugMessage("[backend-debug] ClientPacketListener.handleLogin() called — login packet received");
         System.err.flush();
     }
 }

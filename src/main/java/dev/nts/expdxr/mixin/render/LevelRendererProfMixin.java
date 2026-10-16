@@ -21,38 +21,38 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 public class LevelRendererProfMixin {
 
     @Inject(method = "submitFeatures", at = @At("HEAD"), remap = false)
-    private void dx12_profSubmitFeaturesHead(LevelRenderState levelRenderState,
+    private void D3D12ProfSubmitFeaturesHead(LevelRenderState levelRenderState,
                                              SubmitNodeCollector submitNodeCollector,
                                              boolean renderOutline, CallbackInfo ci) {
         D3D12RenderProf.begin(D3D12RenderProf.SUBMIT_FEATURES);
     }
 
     @Inject(method = "submitFeatures", at = @At("RETURN"), remap = false)
-    private void dx12_profSubmitFeaturesReturn(LevelRenderState levelRenderState,
+    private void D3D12ProfSubmitFeaturesReturn(LevelRenderState levelRenderState,
                                                SubmitNodeCollector submitNodeCollector,
                                                boolean renderOutline, CallbackInfo ci) {
         D3D12RenderProf.end(D3D12RenderProf.SUBMIT_FEATURES);
     }
 
     @Inject(method = "prepareChunkRenders", at = @At("HEAD"), remap = false)
-    private void dx12_profPrepareChunksHead(Matrix4fc modelViewMatrix,
+    private void D3D12ProfPrepareChunksHead(Matrix4fc modelViewMatrix,
                                             CallbackInfoReturnable<ChunkSectionsToRender> cir) {
         D3D12RenderProf.begin(D3D12RenderProf.PREPARE_CHUNKS);
     }
 
     @Inject(method = "prepareChunkRenders", at = @At("RETURN"), remap = false)
-    private void dx12_profPrepareChunksReturn(Matrix4fc modelViewMatrix,
+    private void D3D12ProfPrepareChunksReturn(Matrix4fc modelViewMatrix,
                                               CallbackInfoReturnable<ChunkSectionsToRender> cir) {
         D3D12RenderProf.end(D3D12RenderProf.PREPARE_CHUNKS);
     }
 
     @Inject(method = "compileSections", at = @At("HEAD"), remap = false)
-    private void dx12_profCompileSectionsHead(CameraRenderState camera, CallbackInfo ci) {
+    private void D3D12ProfCompileSectionsHead(CameraRenderState camera, CallbackInfo ci) {
         D3D12RenderProf.begin(D3D12RenderProf.COMPILE_SECTIONS);
     }
 
     @Inject(method = "compileSections", at = @At("RETURN"), remap = false)
-    private void dx12_profCompileSectionsReturn(CameraRenderState camera, CallbackInfo ci) {
+    private void D3D12ProfCompileSectionsReturn(CameraRenderState camera, CallbackInfo ci) {
         D3D12RenderProf.end(D3D12RenderProf.COMPILE_SECTIONS);
     }
 }

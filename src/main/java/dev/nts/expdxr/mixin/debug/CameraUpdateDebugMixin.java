@@ -1,5 +1,7 @@
 package dev.nts.expdxr.mixin.debug;
 
+import dev.nts.expdxr.utils.IllusionLogger;
+
 import dev.nts.expdxr.d3d12.render.adapter.D3D12Device;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
@@ -52,7 +54,7 @@ public class CameraUpdateDebugMixin {
             renderDistance = -1;
         }
 
-        System.err.printf("[d3d12-p32] Camera.update: depthFar=%.1f renderDistance(chunks)=%d depthFar/farPlaneRatio=%.1f backend=%s%n",
+        IllusionLogger.debugFormat("[backend-p32] Camera.update: depthFar=%.1f renderDistance(chunks)=%d depthFar/farPlaneRatio=%.1f backend=%s%n",
                 depthFar, renderDistance,
                 renderDistance > 0 ? depthFar / (float)(renderDistance * 16) : -1.0f,
                 D3D12Device.isInitialized() ? "DX12" : "NONE");

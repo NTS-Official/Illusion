@@ -1,5 +1,7 @@
 package dev.nts.expdxr.mixin.debug;
 
+import dev.nts.expdxr.utils.IllusionLogger;
+
 import net.minecraft.client.Minecraft;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -17,7 +19,7 @@ public class MinecraftDoWorldLoadDebugMixin {
 
     @Inject(method = "doWorldLoad", at = @At("HEAD"), remap = false)
     private void dx12_doWorldLoadDebug(CallbackInfo ci) {
-        System.err.println("[d3d12-debug] Minecraft.doWorldLoad() ENTERED — world loading started");
+        IllusionLogger.debugMessage("[backend-debug] Minecraft.doWorldLoad() ENTERED — world loading started");
         System.err.flush();
     }
 }

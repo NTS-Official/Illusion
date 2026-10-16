@@ -1,18 +1,16 @@
 package dev.nts.expdxr.d3d12.render.shader
 
+import dev.nts.expdxr.utils.IllusionLogger
+
 import com.mojang.blaze3d.vulkan.glsl.ShaderCompileException
-import dev.nts.expdxr.d3d12.render.draw.D3D12BindGroupEntry
-import dev.nts.expdxr.d3d12.extern.MCDR_ABI
+import dev.nts.expdxr.d3d12.backend.D3D12BindGroupEntry
 import java.nio.ByteBuffer
 import java.nio.IntBuffer
-import java.util.ArrayList
-import java.util.HashSet
 import org.lwjgl.system.MemoryStack
 import org.lwjgl.system.MemoryUtil
 import org.lwjgl.util.spvc.Spvc
 import org.lwjgl.util.spvc.SpvcHlslVertexAttributeRemap
 import org.lwjgl.util.spvc.SpvcReflectedResource
-import java.util.Collections
 
 /**
  * 镜像官方 `com.mojang.blaze3d.vulkan.glsl.IntermediaryShaderModule`。
@@ -84,9 +82,9 @@ class D3D12IntermediaryShaderModule(
             throw IllegalStateException("Attempt to use invalid shader")
         }
         val spvAsIntBuffer = this.spirv.asIntBuffer()
-        val remainingInputs = HashSet<String>()
-        val remainingSamplers = HashSet<String>()
-        val remainingUniformBuffers = HashSet<String>()
+        val remainingInputs = mutableSetOf<String>()
+        val remainingSamplers = mutableSetOf<String>()
+        val remainingUniformBuffers = mutableSetOf<String>()
         for (input in this.inputs) {
             remainingInputs.add(input.name())
         }
@@ -102,7 +100,7 @@ class D3D12IntermediaryShaderModule(
             val variableName = inputVariables[i]
             val inputVariable = this.getInputVariable(variableName)
             if (inputVariable == null) continue
-            if (!variableName.equals(previousName)) {
+            if (variableName != previousName) {
                 spvAsIntBuffer.put(inputVariable.locationOffset(), attribLocation)
                 remainingInputs.remove(variableName)
             }
@@ -123,8 +121,8 @@ class D3D12IntermediaryShaderModule(
                     val sampler = this.getSampler(entry.name)
                     if (sampler != null) {
                         if (sampler.dimensions() != 1 && sampler.dimensions() != 3) {
-                            throw ShaderCompileException("Unsupported texture dimensions '" + sampler.dimensions()
-                                + "' for sampler " + entry.name)
+                            throw ShaderCompileException("Unsupported texture dimensions '${sampler.dimensions()}"
+                                + "' for sampler ${entry.name}")
                         }
                         spvAsIntBuffer.put(sampler.bindingOffset(), i)
                         remainingSamplers.remove(entry.name)
@@ -135,7 +133,7 @@ class D3D12IntermediaryShaderModule(
                     if (sampler != null) {
                         if (sampler.dimensions() != 5) {
                             throw ShaderCompileException("Unsupported texel buffer dimensions '"
-                                + sampler.dimensions() + "' for sampler " + entry.name)
+                                + "${sampler.dimensions()}' for sampler ${entry.name}")
                         }
                         spvAsIntBuffer.put(sampler.bindingOffset(), i)
                         remainingSamplers.remove(entry.name)
@@ -143,17 +141,17 @@ class D3D12IntermediaryShaderModule(
                 }
             }
         }
-        if (!remainingInputs.isEmpty()) {
+        if (remainingInputs.isNotEmpty()) {
             throw ShaderCompileException(
-                "Shader expects input variables which are not being provided: " + remainingInputs)
+                "Shader expects input variables which are not being provided: ${remainingInputs}")
         }
-        if (!remainingUniformBuffers.isEmpty()) {
+        if (remainingUniformBuffers.isNotEmpty()) {
             throw ShaderCompileException(
-                "Shader expects uniform buffers which are not being provided: " + remainingUniformBuffers)
+                "Shader expects uniform buffers which are not being provided: ${remainingUniformBuffers}")
         }
-        if (!remainingSamplers.isEmpty()) {
+        if (remainingSamplers.isNotEmpty()) {
             throw ShaderCompileException(
-                "Shader expects samplers which are not being provided: " + remainingSamplers)
+                "Shader expects samplers which are not being provided: ${remainingSamplers}")
         }
     }
 
@@ -200,7 +198,7 @@ class D3D12IntermediaryShaderModule(
                     "Couldn't install compiler options")
                 // Fix S2：为顶点着色器输入注入 D3D12 语义，避免 spvc 后端不生成正确语义导致
                 // CreateGraphicsPipelineState E_INVALIDARG。location 0 → POSITION，其余 → TEXCOORD<n>。
-                if (isVertex && !this.inputs.isEmpty()) {
+                if (isVertex && this.inputs.isNotEmpty()) {
                     var inputIdx = 0
                     var prevLoc = -1
                     for (input in this.inputs) {
@@ -213,7 +211,7 @@ class D3D12IntermediaryShaderModule(
                             // Position,UV0,Color）→ Color 得 TEXCOORD0、UV0 得 TEXCOORD1，
                             // 与 input layout 互换：TEXCOORD0 读 UV0 数据、TEXCOORD1 读 Color
                             // 数据 → 字形采样坐标错误（GUI 文字消失/错乱）。
-                            val semantic = if (loc == 0) "POSITION" else "TEXCOORD" + (loc - 1)
+                            val semantic = if (loc == 0) "POSITION" else "TEXCOORD${loc - 1}"
                             val remap = SpvcHlslVertexAttributeRemap.calloc(stack)
                             remap.location(loc)
                             remap.semantic(stack.UTF8(semantic))
@@ -230,17 +228,17 @@ class D3D12IntermediaryShaderModule(
                     // 便于定位剩余管线编译失败的具体原因。
                     val detail = Spvc.spvc_context_get_last_error_string(context)
                     throwIfError(compileResult, "Couldn't compile HLSL"
-                        + (if (detail != null && !detail.isEmpty()) ": " + detail else ""))
+                        + (if (detail != null && detail.isNotEmpty()) ": ${detail}" else ""))
                 }
                 val address = pointer.get(0)
                 val hlsl = MemoryUtil.memUTF8(address)
                 // P7 诊断：打印 raw spvc 输出，确认 }}; 来自 spvc 还是注入逻辑
                 // P29：全量 HLSL dump 是同步 I/O 洪泛（每帧数千行），仅 verbose 模式输出。
-                if (MCDR_ABI.LOG_VERBOSE
+                if (IllusionLogger.debugEnabled()
                         && (name.contains("gui") || name.contains("debug") || name.contains("position")
                         || name.contains("animate") || name.contains("sprite") || name.contains("text")
                         || name.contains("entity") || name.contains("item"))) {
-                    System.err.println("[d3d12-java] [" + name + "] RAW spvc HLSL:\n" + hlsl)
+                    IllusionLogger.debugMessage("[backend-java] [${name}] RAW spvc HLSL:\n${hlsl}")
                 }
                 // Fix S2：语义通过 spvc_compiler_hlsl_add_vertex_attribute_remap 在编译前注入，
                 // 确保 spvc HLSL 后端输出正确的 D3D12 语义（POSITION/TEXCOORD<n>）。
@@ -248,11 +246,11 @@ class D3D12IntermediaryShaderModule(
                 // P7 诊断：打印 raw spvc 输出，确认语义已正确生成
                 // P27：条件同步包含 animate/sprite，确保 animate_sprite_blit 的完整 HLSL 也输出
                 // P29：同 RAW dump，全量 HLSL 仅 verbose 模式输出，避免同步 I/O 洪泛。
-                if (MCDR_ABI.LOG_VERBOSE
+                if (IllusionLogger.debugEnabled()
                         && (name.contains("gui") || name.contains("debug") || name.contains("position")
                         || name.contains("animate") || name.contains("sprite") || name.contains("text")
                         || name.contains("entity") || name.contains("item"))) {
-                    System.err.println("[d3d12-java] [" + name + "] spvc HLSL (no inject):\n" + result)
+                    IllusionLogger.debugMessage("[backend-java] [${name}] spvc HLSL (no inject):\n${result}")
                 }
                 result
             } finally {
@@ -308,13 +306,7 @@ class D3D12IntermediaryShaderModule(
             D3D12IntermediaryShaderModule("invalid", null, listOf(), listOf(), listOf(), listOf())
 
         /** static 关键字后允许的字符集合（区分 static float4 与 static_cast）。 */
-        private val AFTER_STATIC_ALLOWED: Set<Char>
-
-        init {
-            val s = HashSet<Char>()
-            s.add(' '); s.add('\t'); s.add('\n'); s.add('\r')
-            AFTER_STATIC_ALLOWED = Collections.unmodifiableSet(s)
-        }
+        private val AFTER_STATIC_ALLOWED: Set<Char> = setOf(' ', '\t', '\n', '\r')
 
         /**
          * 用 spvc 解析 SPIR-V 并反射出 UBO/sampler/输出/输入绑定信息，
@@ -323,10 +315,10 @@ class D3D12IntermediaryShaderModule(
         @JvmStatic
         @Throws(ShaderCompileException::class)
         fun createFromSpirv(filename: String, spirv: ByteBuffer): D3D12IntermediaryShaderModule {
-            val uniformBuffers = ArrayList<SpvUniformBuffer>()
-            val samplers = ArrayList<SpvSampler>()
-            val outputs = ArrayList<SpvVariable>()
-            val inputs = ArrayList<SpvVariable>()
+            val uniformBuffers = mutableListOf<SpvUniformBuffer>()
+            val samplers = mutableListOf<SpvSampler>()
+            val outputs = mutableListOf<SpvVariable>()
+            val inputs = mutableListOf<SpvVariable>()
             MemoryStack.stackPush().use { stack ->
                 val pointer = stack.callocPointer(1)
                 val intReturnBuffer = stack.callocInt(1)
@@ -416,9 +408,9 @@ class D3D12IntermediaryShaderModule(
                     -2 -> "SPVC_ERROR_UNSUPPORTED_SPIRV"
                     -3 -> "SPVC_ERROR_OUT_OF_MEMORY"
                     -4 -> "SPVC_ERROR_INVALID_ARGUMENT"
-                    else -> Integer.toString(result)
+                    else -> result.toString()
                 }
-                throw ShaderCompileException(message + " (" + name + ")")
+                throw ShaderCompileException("${message} (${name})")
             }
         }
 
@@ -429,7 +421,7 @@ class D3D12IntermediaryShaderModule(
             if (!Spvc.spvc_compiler_get_binary_offset_for_decoration(compiler, resource.id(),
                 decoration, returnBuffer)) {
                 throw ShaderCompileException(
-                    "Couldn't find byte offset for location decoration of " + resource.nameString())
+                    "Couldn't find byte offset for location decoration of ${resource.nameString()}")
             }
             return returnBuffer.get(0)
         }

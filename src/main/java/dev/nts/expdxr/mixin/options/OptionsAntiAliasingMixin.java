@@ -1,6 +1,6 @@
 package dev.nts.expdxr.mixin.options;
 
-import dev.nts.expdxr.d3d12.render.backend.D3D12AntiAliasing;
+import dev.nts.expdxr.d3d12.render.advanced.D3D12AntiAliasing;
 import net.minecraft.client.Options;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -10,7 +10,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 /**
  * Persists DXRMC's anti-aliasing mode in vanilla's own {@code options.txt}.
  *
- * <p>The option is a real {@code OptionInstance} (see {@link D3D12AntiAliasing})
+ * <p>The options is a real {@code OptionInstance} (see {@link D3D12AntiAliasing})
  * but it is not a field of {@code Options}, so vanilla's
  * {@code processDumpedOptions} pass cannot see it. Rather than reach into that
  * pass - its argument type, {@code Options.OptionAccess}, is a private nested

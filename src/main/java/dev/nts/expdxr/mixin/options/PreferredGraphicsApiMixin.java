@@ -2,8 +2,9 @@ package dev.nts.expdxr.mixin.options;
 
 import com.mojang.blaze3d.systems.GpuBackend;
 import com.mojang.serialization.Codec;
-import dev.nts.expdxr.d3d12.render.backend.D3D12Backend;
-import dev.nts.expdxr.d3d12.render.backend.D3D12GraphicsApi;
+import dev.nts.expdxr.d3d12.debug.D3D12Fatal;
+import dev.nts.expdxr.d3d12.backend.D3D12Backend;
+import dev.nts.expdxr.d3d12.backend.D3D12GraphicsApi;
 import net.minecraft.client.PreferredGraphicsApi;
 import net.minecraft.util.StringRepresentable;
 import org.spongepowered.asm.mixin.Final;
@@ -92,7 +93,7 @@ public abstract class PreferredGraphicsApiMixin {
      * into a silent OpenGL launch - the user watched an OpenGL frame while the setting
      * still read "Direct3D 12". With one entry there is nothing left to fall back to;
      * the failure is handled by
-     * {@link dev.nts.expdxr.d3d12.render.backend.Dx12Fatal}, which resets
+     * {@link D3D12Fatal}, which resets
      * {@code preferredGraphicsBackend} to {@code default} and crashes the game with an
      * explanatory crash report.
      */

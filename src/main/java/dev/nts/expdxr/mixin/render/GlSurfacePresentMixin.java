@@ -2,6 +2,7 @@ package dev.nts.expdxr.mixin.render;
 
 import com.mojang.blaze3d.opengl.GlSurface;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -22,6 +23,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(GlSurface.class)
 public class GlSurfacePresentMixin {
 
+    @Unique
     private static int dxr_mc$presentCount = 0;
 
     @Inject(method = "present", at = @At("HEAD"), cancellable = true)

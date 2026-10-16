@@ -1,5 +1,7 @@
 package dev.nts.expdxr.mixin.render;
 
+import dev.nts.expdxr.utils.IllusionLogger;
+
 import dev.nts.expdxr.d3d12.render.adapter.D3D12Device;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.client.renderer.chunk.CompiledSectionMesh;
@@ -19,22 +21,22 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 @Mixin(SectionRenderDispatcher.class)
 public class SectionRenderDispatcherGetSliceDebugMixin {
 
-    @Unique private int dx12_sliceCheckCount = 0;
-    @Unique private int dx12_nullSliceCount = 0;
+    @Unique private int D3D12_SliceCheckCount = 0;
+    @Unique private int D3D12_NullSliceCount = 0;
 
     @Inject(method = "getRenderSectionSlice", at = @At("TAIL"), remap = false)
     private void dx12_getSliceDebug(SectionMesh sectionMesh, ChunkSectionLayer layer,
             CallbackInfoReturnable<SectionRenderDispatcher.RenderSectionBufferSlice> cir) {
-        dx12_sliceCheckCount++;
+        D3D12_SliceCheckCount++;
         SectionRenderDispatcher.RenderSectionBufferSlice slice = cir.getReturnValue();
         if (slice == null) {
-            dx12_nullSliceCount++;
+            D3D12_NullSliceCount++;
             // Log first 3 nulls, then sample every 60 checks to avoid spam
-            if (dx12_nullSliceCount <= 3 || dx12_sliceCheckCount % 60 == 0) {
+            if (D3D12_NullSliceCount <= 3 || D3D12_SliceCheckCount % 60 == 0) {
                 String meshStatus = (sectionMesh == null) ? "null"
                         : (sectionMesh == CompiledSectionMesh.UNCOMPILED) ? "UNCOMPILED" : "compiled";
-                System.err.printf("[d3d12-p32] getRenderSectionSlice: NULL slice (layer=%s mesh=%s) totalChecks=%d nullCount=%d backend=%s%n",
-                        layer, meshStatus, dx12_sliceCheckCount, dx12_nullSliceCount,
+                IllusionLogger.debugFormat("[backend-p32] getRenderSectionSlice: NULL slice (layer=%s mesh=%s) totalChecks=%d nullCount=%d backend=%s%n",
+                        layer, meshStatus, D3D12_SliceCheckCount, D3D12_NullSliceCount,
                         D3D12Device.isInitialized() ? "DX12" : "NONE");
                 System.err.flush();
             }

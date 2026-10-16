@@ -1,5 +1,7 @@
 package dev.nts.expdxr.d3d12.render.adapter
 
+import dev.nts.expdxr.utils.IllusionLogger
+
 import com.mojang.blaze3d.GpuFormat
 import com.mojang.blaze3d.buffers.GpuBuffer
 import com.mojang.blaze3d.pipeline.ColorTargetState
@@ -13,17 +15,17 @@ import com.mojang.blaze3d.shaders.ShaderType
 import com.mojang.blaze3d.systems.*
 import com.mojang.blaze3d.textures.*
 import com.mojang.blaze3d.vulkan.glsl.ShaderCompileException
-import dev.nts.expdxr.d3d12.render.backend.D3D12CommandEncoderBackend
-import dev.nts.expdxr.d3d12.render.backend.D3D12GpuQueryPool
-import dev.nts.expdxr.d3d12.render.backend.D3D12GpuSurface
-import dev.nts.expdxr.d3d12.render.draw.D3D12AsyncContext
-import dev.nts.expdxr.d3d12.render.draw.D3D12BindGroupEntry
-import dev.nts.expdxr.d3d12.render.draw.D3D12CompiledRenderPipeline
+import dev.nts.expdxr.d3d12.backend.D3D12CommandEncoderBackend
+import dev.nts.expdxr.d3d12.render.core.D3D12GpuQueryPool
+import dev.nts.expdxr.d3d12.render.core.D3D12GpuSurface
+import dev.nts.expdxr.d3d12.render.core.D3D12AsyncContext
+import dev.nts.expdxr.d3d12.backend.D3D12BindGroupEntry
+import dev.nts.expdxr.d3d12.backend.D3D12CompiledRenderPipeline
 import dev.nts.expdxr.d3d12.render.shader.D3D12CompiledShader
 import dev.nts.expdxr.d3d12.render.shader.D3D12FallbackShaderSource
-import dev.nts.expdxr.d3d12.render.draw.D3D12GpuBuffer
-import dev.nts.expdxr.d3d12.render.draw.D3D12GpuTexture
-import dev.nts.expdxr.d3d12.render.draw.D3D12GpuTextureView
+import dev.nts.expdxr.d3d12.render.core.D3D12GpuBuffer
+import dev.nts.expdxr.d3d12.render.core.D3D12GpuTexture
+import dev.nts.expdxr.d3d12.render.core.D3D12GpuTextureView
 import dev.nts.expdxr.d3d12.extern.MCDRPipelineDesc
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.shader.D3D12GpuSampler
@@ -57,6 +59,9 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
     // 新建的空 ctx B → GPU 每帧执行空命令列表 → backbuffer 呈现未初始化垃圾
     // （疯狂闪烁）。改为懒加载共享单例复现官方语义。
     private var sharedCommandEncoder: D3D12CommandEncoderBackend? = null
+    // P104b：同一实例登记到伴生对象，供**帧中**需要往当前命令列表追加后处理的地方取用
+    // （世界层 SMAA：`D3D12SMAAWorld` 在 GameRenderer 画完世界、GUI 之前调用一次）。
+    // 官方 GpuDevice 不暴露 backend，Java 侧也拿不到 CommandEncoderBackend，所以留这个出口。
 
     // P4: pipeline + shader caches（镜像官方 VulkanDevice）
     private val pipelineCache: MutableMap<RenderPipeline, D3D12CompiledRenderPipeline> = IdentityHashMap()
@@ -71,22 +76,22 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
     private var glslCompiler: D3D12ShaderCompiler? = null
 
     init {
-        val probe = MCDR_ABI.dx12CreateDevice()
-        LOGGER.info("[d3d12] Device probe + resource self-test: {}", probe)
-        val frequency = MCDR_ABI.dx12GetTimestampFrequency()
+        val probe = MCDR_ABI.ID3D12CreateDevice()
+        LOGGER.info("[backend] Device probe + resource self-test: {}", probe)
+        val frequency = MCDR_ABI.D3D12GetTimestampFrequency()
         if (frequency == 0L) {
-            LOGGER.warn("[d3d12] GetTimestampFrequency returned 0; timestampPeriod=1.0")
+            LOGGER.warn("[backend] GetTimestampFrequency returned 0; timestampPeriod=1.0")
         }
         // P34: real adapter facts from DXGI/DXCore replace the previously hardcoded
         // "D3D12" / "D3D12 driver" / DeviceType.DISCRETE. D3D12AdapterInfo.current is what
         // the F3 mixin and the mod-supplied system-specs lines read; it stays null when
         // the query fails so the F3 block falls back to the vanilla-looking constants.
-        val nativeInfo = D3D12AdapterInfo.parse(MCDR_ABI.dx12GetAdapterInfo())
+        val nativeInfo = D3D12AdapterInfo.parse(MCDR_ABI.ID3D12GetAdapterInfo())
         if (nativeInfo !== D3D12AdapterInfo.UNKNOWN) {
             D3D12AdapterInfo.current = nativeInfo
-            LOGGER.info("[d3d12] Adapter: {}", nativeInfo.summary())
+            LOGGER.info("[backend] Adapter: {}", nativeInfo.summary())
         } else {
-            LOGGER.warn("[d3d12] Adapter info unavailable; keeping the probe-derived fallback")
+            LOGGER.warn("[backend] Adapter info unavailable; keeping the probe-derived fallback")
         }
         this.deviceInfo = buildDeviceInfo(parseAdapterName(probe), nativeInfo, frequency)
         // P33：启动独立渲染线程（异步流水线：渲染线程负责 acquire/present/fence-wait，
@@ -95,9 +100,9 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         // 录制/回读」与「渲染线程并发使用全局帧 RTV 堆（gNextFrameRtv 是全局计数器、
         // 每次 beginCommandList 会清零）」之间的相互干扰——只在取证时使用。
         if (System.getenv("DX12_NO_ASYNC") != "1") {
-            MCDR_ABI.dx12InitAsyncRenderer(1)
+            MCDR_ABI.D3D12InitAsyncRenderer(1)
         } else {
-            LOGGER.warn("[d3d12] async renderer disabled (DX12_NO_ASYNC=1) — diagnostic mode only")
+            LOGGER.warn("[backend] async renderer disabled (DX12_NO_ASYNC=1) — diagnostic mode only")
         }
         // P33：初始化 CPU/GPU 并行录制上下文（分区描述符堆 + bundle 池 + worker 池）。
         // 失败会自动退回单线程录制，不影响功能。
@@ -138,9 +143,9 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
                                      width: Int, height: Int): GpuTexture {
         if (debugLightmapHandle == 0L && "Lightmap" == name
             && width == 16 && height == 16) {
-            debugLightmapHandle = tex.handle()
-            System.err.println("[d3d12-java] P38 capture Lightmap texture handle=0x"
-                + java.lang.Long.toHexString(debugLightmapHandle) + " usage=" + tex.usage())
+            debugLightmapHandleValue = tex.handle()
+            IllusionLogger.debugMessage("[backend-java] P38 capture Lightmap texture handle=0x"
+                + "${debugLightmapHandle.toULong().toString(16)} usage=${tex.usage()}")
             System.err.flush()
         }
         return tex
@@ -181,7 +186,7 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
     override fun createSurface(windowHandle: Long): GpuSurfaceBackend {
         val hwnd = GLFWNativeWin32.glfwGetWin32Window(windowHandle)
         if (hwnd == 0L) {
-            throw IllegalStateException("glfwGetWin32Window returned null for window " + windowHandle)
+            throw IllegalStateException("glfwGetWin32Window returned null for window ${windowHandle}")
         }
         return D3D12GpuSurface(hwnd)
     }
@@ -193,21 +198,13 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
             encoder = D3D12CommandEncoderBackend(this)
             this.sharedCommandEncoder = encoder
         }
+        // P104b：登记到伴生对象（见 sharedCommandEncoder() 的注释）。
+        sharedEncoderForFrame = encoder
         return encoder
     }
 
     /** P31：管线+flipY 的组合缓存键。 */
-    private class FlipYKey(val pipeline: RenderPipeline, val flipY: Boolean) {
-        override fun hashCode(): Int {
-            return Objects.hash(pipeline, flipY)
-        }
-
-        override fun equals(other: Any?): Boolean {
-            if (this === other) return true
-            if (other !is FlipYKey) return false
-            return pipeline === other.pipeline && flipY == other.flipY
-        }
-    }
+    private data class FlipYKey(val pipeline: RenderPipeline, val flipY: Boolean)
 
     fun getOrCompilePipeline(pipeline: RenderPipeline, flipY: Boolean): D3D12CompiledRenderPipeline {
         if (!flipY) {
@@ -241,12 +238,12 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
     override fun getTimestampNow(): Long {
         // The native call needs a command context; keep one lazily for timestamps.
         if (this.timestampCtx == 0L) {
-            this.timestampCtx = MCDR_ABI.dx12CreateCommandEncoder()
+            this.timestampCtx = MCDR_ABI.D3D12CreateCommandEncoder()
             if (this.timestampCtx == 0L) {
                 throw IllegalStateException("dx12CreateCommandEncoder returned a null handle")
             }
         }
-        return MCDR_ABI.dx12GetTimestampNow(this.timestampCtx)
+        return MCDR_ABI.D3D12GetTimestampNow(this.timestampCtx)
     }
 
     override fun getLastDebugMessages(): MutableList<String> {
@@ -262,7 +259,7 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
     }
     override fun close() {
         // P12b 诊断：看门狗线程——若 close() 5 秒未完成，dump 全部线程栈到
-        // %TEMP%\d3d12-java.log（System.err 在 Worker shutdown 后不再写入
+        // %TEMP%\backend-java.log（System.err 在 Worker shutdown 后不再写入
         // debug.log，卡死时只有独立文件能看到渲染线程卡在哪一行）。
         val watchdog = Thread({
             try {
@@ -270,16 +267,17 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
             } catch (e: InterruptedException) {
                 return@Thread
             }
-            val sb = StringBuilder("[d3d12-java] WATCHDOG: device.close() hung >5s\n")
-            for (en in Thread.getAllStackTraces().entries) {
-                val t = en.key
-                sb.append("Thread ").append(t.name).append(" [").append(t.state).append("]\n")
-                for (el in en.value) {
-                    sb.append("    at ").append(el).append('\n')
+            appendJavaLog(buildString {
+                append("[backend-java] WATCHDOG: device.close() hung >5s\n")
+                for (en in Thread.getAllStackTraces().entries) {
+                    val t = en.key
+                    append("Thread ").append(t.name).append(" [").append(t.state).append("]\n")
+                    for (el in en.value) {
+                        append("    at ").append(el).append('\n')
+                    }
                 }
-            }
-            appendJavaLog(sb.toString())
-        }, "d3d12-close-watchdog")
+            })
+        }, "backend-close-watchdog")
         watchdog.isDaemon = true
         watchdog.start()
 
@@ -290,9 +288,10 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         val encoder = this.sharedCommandEncoder
         if (encoder != null) {
             encoder.close()
-            MCDR_ABI.dx12DestroyCommandEncoder(encoder.nativeHandle())
+            MCDR_ABI.D3D12DestroyCommandEncoder(encoder.nativeHandle())
             this.sharedCommandEncoder = null
         }
+        sharedEncoderForFrame = null  // P104b：别再让帧中后处理摸到已销毁的 ctx
         appendJavaLog("device.close: after sharedEncoder.close")
         this.clearPipelineCache()
         appendJavaLog("device.close: after clearPipelineCache")
@@ -305,12 +304,12 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         D3D12AsyncContext.shutdown()
         appendJavaLog("device.close: after asyncContext.shutdown")
         // P33：销毁独立渲染线程。
-        MCDR_ABI.dx12DestroyAsyncRenderer()
+        MCDR_ABI.D3D12DestroyAsyncRenderer()
         // P31：趁 DXGI/D3D12 仍然存活，显式释放设备上下文。若留给
         // DLL_PROCESS_DETACH 去析构，ComPtr::Release() 会在 dxgi.dll 已 detach
         // 之后执行 → 原生异常，进程退出码变成 2170（渲染本身无错，是退出路径的
         // 析构顺序问题）。
-        MCDR_ABI.dx12DestroyDevice()
+        MCDR_ABI.D3D12DestroyDevice()
         // The F3 mixin and the mod system-specs lines key off this being non-null;
         // clear it once the backend is gone so a GL/Vulkan fallback shows no DX12 rows.
         D3D12AdapterInfo.current = null
@@ -337,12 +336,12 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         val fragmentShader = this.getOrCompileShader(
             pipeline.fragmentShader, ShaderType.FRAGMENT, pipeline.shaderDefines, shaderSource)
         if (vertexShader === D3D12IntermediaryShaderModule.INVALID) {
-            LOGGER.error("[d3d12-java] {} COMPILE FAILED (vertex): shader {} invalid",
+            LOGGER.error("[backend-java] {} COMPILE FAILED (vertex): shader {} invalid",
                 pipeName, pipeline.vertexShader)
             return D3D12CompiledRenderPipeline(pipeline, 0L, vertexShader, fragmentShader, "", "")
         }
         if (fragmentShader === D3D12IntermediaryShaderModule.INVALID) {
-            LOGGER.error("[d3d12-java] {} COMPILE FAILED (fragment): shader {} invalid",
+            LOGGER.error("[backend-java] {} COMPILE FAILED (fragment): shader {} invalid",
                 pipeName, pipeline.fragmentShader)
             return D3D12CompiledRenderPipeline(pipeline, 0L, vertexShader, fragmentShader, "", "")
         }
@@ -350,19 +349,19 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
             val compiled = this.getOrCreateCompiler()
                 .compile(pipeline, vertexShader, fragmentShader, flipY)
             val desc = buildNativeDesc(compiled, pipeline, flipY)
-            val handle = MCDR_ABI.dx12CreateGraphicsPipeline(desc)
+            val handle = MCDR_ABI.D3D12CreateGraphicsPipeline(desc)
             if (handle == 0L) {
-                LOGGER.error("[d3d12-java] {} COMPILE FAILED (native): dx12CreateGraphicsPipeline returned 0",
+                LOGGER.error("[backend-java] {} COMPILE FAILED (native): dx12CreateGraphicsPipeline returned 0",
                     pipeName)
                 return D3D12CompiledRenderPipeline(pipeline, 0L, vertexShader, fragmentShader, "", "")
             }
-            LOGGER.info("[d3d12-java] {} COMPILE OK (handle={})", pipeName, handle)
+            LOGGER.info("[backend-java] {} COMPILE OK (handle={})", pipeName, handle)
             return D3D12CompiledRenderPipeline(
                 pipeline, handle,
                 vertexShader, fragmentShader, compiled.vertexHlsl, compiled.fragmentHlsl
             )
         } catch (e: ShaderCompileException) {
-            LOGGER.error("[d3d12-java] {} COMPILE FAILED (compile): {}", pipeName, e.message)
+            LOGGER.error("[backend-java] {} COMPILE FAILED (compile): {}", pipeName, e.message)
             return D3D12CompiledRenderPipeline(pipeline, 0L, vertexShader, fragmentShader, "", "")
         }
     }
@@ -414,18 +413,14 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         var attribLocation = 0
         val bindings = pipeline.vertexFormatBindings
         if (bindings == null || bindings.size == 0) {
-            LOGGER.warn("[d3d12-java] {}: formatBindings={} inputs={}",
+            LOGGER.warn("[backend-java] {}: formatBindings={} inputs={}",
                 pipeline.location, if (bindings == null) "null" else bindings.size, vertexShaderInputs)
             if (bindings != null) {
                 for (i in bindings.indices) {
                     val fmt = bindings[i] ?: continue
-                    val sb = StringBuilder()
-                    for (e in fmt.elements) {
-                        if (sb.length > 0) sb.append(',')
-                        sb.append(e.name()).append('(').append(e.format()).append(')')
-                    }
-                    LOGGER.warn("[d3d12-java]   slot[{}] stride={} elements=[{}]", i,
-                        fmt.vertexSize, sb)
+                    val text = fmt.elements.joinToString(",") { e -> "${e.name()}(${e.format()})" }
+                    LOGGER.warn("[backend-java]   slot[{}] stride={} elements=[{}]", i,
+                        fmt.vertexSize, text)
                 }
             }
         }
@@ -436,7 +431,7 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
             for (element in format.elements) {
                 if (!vertexShaderInputs.contains(element.name())) continue
                 val fmtOrd = element.format().ordinal
-                System.err.printf("[d3d12-java] [DIAG] %s slot[%d] elem: name=%s format=%s ord=%d offset=%d stride=%d%n",
+                IllusionLogger.debugFormat("[backend-java] [DIAG] %s slot[%d] elem: name=%s format=%s ord=%d offset=%d stride=%d%n",
                     pipeline.location, i, element.name(), element.format(), fmtOrd, element.offset(), stride)
                 elements.add(intArrayOf(
                     attribLocation, i, fmtOrd,
@@ -455,7 +450,7 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
      * `putInt`/`putU8`），布局只存在于 Javadoc 里，两端随时可能静默漂移；
      * native 侧的语义名字段还单独占一段，靠位置回填。
      * FFM 下改为填充 [MCDRPipelineDesc]，与 native 的 `mcdr_pipeline_desc`
-     * 共享同一份字段定义（[dev.nts.expdxr.d3d12.extern.MCDRLayout.PIPELINE_DESC]），启动自检会直接抛出任何漂移。
+     * 共享同一份字段定义（[dev.nts.expdxr.d3d12.extern.PIPELINE_DESC]），启动自检会直接抛出任何漂移。
      */
     private fun buildNativeDesc(compiled: D3D12CompiledShader,
                                 pipeline: RenderPipeline, flipY: Boolean): MCDRPipelineDesc {
@@ -467,12 +462,12 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         // 补齐：semanticNames 数量可能少于 inputElements（如 gui 管线 HLSL 只有 1 个输入，
         // 但顶点格式有 2 个元素）。多余的元素自动生成 TEXCOORDn 语义。
         while (semanticNames.size < inputElements.size) {
-            semanticNames.add("TEXCOORD" + semanticNames.size)
+            semanticNames.add("TEXCOORD${semanticNames.size}")
         }
         // P21 diagnóstico: validar que semanticNames e inputElements estão alinhados após BUG-01 fix.
-        System.err.println("[d3d12-java] [DIAG] " + pipeline.location
-            + " inputElems=" + inputElements.size
-            + " sems=" + Arrays.toString(semanticNames.toTypedArray()))
+        IllusionLogger.debugMessage("[backend-java] [DIAG] ${pipeline.location}"
+            + " inputElems=${inputElements.size}"
+            + " sems=${semanticNames.joinToString(", ", "[", "]")}")
         val entries = compiled.entries
 
         val desc = MCDRPipelineDesc()
@@ -488,26 +483,30 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
 
         val loc = pipeline.location.toString()
         if (hasDepth) {
-            // P31：item_cutout 继承自 ITEM_SNIPPET 的 DepthStencilState.DEFAULT（depthTest=NEVER_PASS），
-            // 在有深度缓冲的 GUI atlas pass（flipY=true）中使用时，depthFunc=NEVER 导致所有 fragment
-            // 深度测试失败 → 物品全黑消失。覆盖为 GREATER_EQUAL。
+            // P31 遗留 hack（P101b 复核后确认在 26.2 上是**死代码**，保留仅为不改变行为）：
+            // 26.2 的 `DepthStencilState.DEFAULT` 是 `(LESS_THAN_OR_EQUAL, true)`
+            // （blaze3d/pipeline/DepthStencilState.java:9），而 `CompareOp.NEVER_PASS` 在
+            // 整个客户端源码里只出现在枚举定义与 GlConst.java:153（`case NEVER_PASS -> 512`），
+            // 没有任何管线使用它 ⇒ 这条分支永远不成立。真正会导致"物品整块消失"的
+            // 深度测试问题若再次出现，要从 DepthStencilState 的实际取值与深度清屏值查起。
             var dss = pipeline.depthStencilState!!
             if (flipY && loc.contains("/item_cutout") && dss.depthTest() == CompareOp.NEVER_PASS) {
                 dss = DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, dss.writeDepth())
-                System.err.println("[d3d12-java] [P31] item_cutout depthTest: NEVER_PASS→GREATER_EQUAL (flipY)")
+                IllusionLogger.debugMessage("[backend-java] [P31] item_cutout depthTest: NEVER_PASS→GREATER_EQUAL (flipY)")
                 System.err.flush()
             }
             desc.depth(GpuFormat.D32_FLOAT.ordinal, dss.writeDepth(), dss.depthTest().ordinal)
         }
 
-        // P31：shader Y-flip 会反转三角形绕序（CCW→CW），若仍按 CullMode=BACK 剔除，所有三角形被判为背面。
-        // animate_sprite / entity_cutout / item_cutout 三类管线在 flipY=true 时均需关闭剔除。
         var cull = pipeline.isCull
-        if (loc.contains("animate_sprite")
-            || (flipY && (loc.contains("/entity_cutout") || loc.contains("/item_cutout")))) {
+        // P101b：shader Y-flip 会反转三角形绕序（CCW→CW）。flipY 的 pass 里**每一条**管线
+        // 都被注入了 Y 翻转 ⇒ 该 pass 内必须整体关闭剔除，白名单（animate_sprite /
+        // entity_cutout / item_cutout）漏掉的管线会被背面剔除吃掉（玩家模型 entity_translucent
+        // 就属于这一类）。这里只可能"多画"，不会少画。
+        if (loc.contains("animate_sprite") || flipY) {
             cull = false
-            System.err.println("[d3d12-java] [P31] cull=false for " + loc + " (flipY=" + flipY + ")")
-            System.err.flush()
+            // P101c：无条件 stderr（每条管线仅编译时 1 行，整轮 ~100 行），静默模式也能核对。
+            System.err.println("[backend-java] [P31] cull=false for ${loc} (flipY=${flipY})")
         }
         desc.topology(pipeline.primitiveTopology.ordinal, cull,
             pipeline.polygonMode.ordinal)
@@ -559,8 +558,8 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
     /** 着色器编译缓存键：id + 阶段 + defines（镜像官方 VulkanDevice.ShaderCompilationKey）。 */
     private class ShaderCompilationKey(val id: Identifier, val type: ShaderType, val defines: ShaderDefines) {
         override fun toString(): String {
-            val s = this.id.toString() + " (" + this.type + ")"
-            return if (this.defines.isEmpty) s else s + " with " + this.defines
+            val s = "${this.id.toString()} (${this.type})"
+            return if (this.defines.isEmpty) s else "${s} with ${this.defines}"
         }
     }
     // -----------------------------------------------------------------------
@@ -568,7 +567,7 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
     // -----------------------------------------------------------------------
 
     companion object {
-        private val LOGGER: Logger = LoggerFactory.getLogger("gl4dx12")
+        private val LOGGER: Logger = LoggerFactory.getLogger("dxrmc")
 
         /** P15 诊断：标记 DX12 后端是否已成功初始化。 */
         @Volatile
@@ -579,18 +578,34 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
             return initialized
         }
 
-        /** P38 诊断：捕获 "Lightmap" 标签的 16×16 纹理（世界 + UI 光照贴图），供 submit() 后读回验证内容与朝向。 */
+        /**
+         * P104b：整帧共享的 CommandEncoder（[createCommandEncoder] 里登记，device.close() 里清空）。
+         *
+         * 为什么需要这个出口：世界层 SMAA 必须在**帧中间**（世界画完、GUI 未画）往本帧那条
+         * 命令列表追加三阶段后处理，而官方 `GpuDevice` 不暴露它的 backend、
+         * `CommandEncoder.backend()` 是 protected，Java 侧拿不到 `CommandEncoderBackend`。
+         * 返回 null = 设备还没起来（或已销毁），调用方直接跳过。
+         */
         @Volatile
-        private var debugLightmapHandle: Long = 0L
+        private var sharedEncoderForFrame: D3D12CommandEncoderBackend? = null
 
         @JvmStatic
-        fun getDebugLightmapHandle(): Long {
-            return debugLightmapHandle
+        fun sharedCommandEncoder(): D3D12CommandEncoderBackend? {
+            return sharedEncoderForFrame
         }
 
+        /** P38 诊断：捕获 "Lightmap" 标签的 16×16 纹理（世界 + UI 光照贴图），供 submit() 后读回验证内容与朝向。 */
+        @Volatile
+        private var debugLightmapHandleValue: Long = 0L
+
+        /** 最近捕获的 lightmap 纹理句柄（0 = 本帧未捕获）。`@get:JvmStatic` 让 Java mixin 仍能按
+         *  `D3D12Device.getDebugLightmapHandle()` 读取。 */
+        @get:JvmStatic
+        val debugLightmapHandle: Long get() = debugLightmapHandleValue
+
         /** P38 诊断：lightmap dump 帧计数器和状态。 */
-        private var dx12DebugLightmapTick: Int = 0
-        private var dx12DebugLightmapDumps: Int = 0
+        private var D3D12DebugLightmapTick: Int = 0
+        private var D3D12DebugLightmapDumps: Int = 0
         private const val MAX_LIGHTMAP_DUMPS: Int = 5
         private const val LIGHTMAP_DUMP_INTERVAL: Int = 120
 
@@ -599,27 +614,27 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         fun dumpDebugLightmap() {
             val h = debugLightmapHandle
             if (h == 0L) return
-            dx12DebugLightmapTick++
-            if (dx12DebugLightmapTick % LIGHTMAP_DUMP_INTERVAL == 0
-                && dx12DebugLightmapDumps < MAX_LIGHTMAP_DUMPS) {
-                dx12DebugLightmapDumps++
-                System.err.println("[d3d12-java] P38 dump lightmap at tick="
-                    + dx12DebugLightmapTick + " handle=0x"
-                    + java.lang.Long.toHexString(h))
+            D3D12DebugLightmapTick++
+            if (D3D12DebugLightmapTick % LIGHTMAP_DUMP_INTERVAL == 0
+                && D3D12DebugLightmapDumps < MAX_LIGHTMAP_DUMPS) {
+                D3D12DebugLightmapDumps++
+                IllusionLogger.debugMessage("[backend-java] P38 dump lightmap at tick="
+                    + "${D3D12DebugLightmapTick} handle=0x"
+                    + h.toULong().toString(16))
                 System.err.flush()
-                MCDR_ABI.dx12DumpTextureToFile(h, "lightmap_tick" + dx12DebugLightmapTick)
+                MCDR_ABI.D3D12DumpTextureToFile(h, "lightmap_tick${D3D12DebugLightmapTick}")
             }
         }
 
-        /** P12b：关闭流程日志双写（System.err -> debug.log + 文件 %TEMP%\d3d12-java.log）。 */
+        /** P12b：关闭流程日志双写（System.err -> debug.log + 文件 %TEMP%\backend-java.log）。 */
         private fun appendJavaLog(msg: String) {
-            System.err.println("[d3d12-java] " + msg)
+            IllusionLogger.debugMessage("[backend-java] ${msg}")
             System.err.flush()
             try {
                 var path = System.getProperty("java.io.tmpdir")
                 if (path == null) path = "."
-                val fw = FileWriter(path + "\\d3d12-java.log", true)
-                fw.write("[d3d12-java] " + msg + "\n")
+                val fw = FileWriter("${path}\\backend-java.log", true)
+                fw.write("[backend-java] ${msg}\n")
                 fw.close()
             } catch (ignored: Exception) {
             }
@@ -649,10 +664,10 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
             val name = if (haveNative && nativeInfo.name.isNotEmpty()) nativeInfo.name else adapterName
             return DeviceInfo(
                 name,                                                        // name
-                if (haveNative) nativeInfo.vendorName() else "D3D12",        // vendorName
-                if (haveNative) nativeInfo.driverInfo() else "D3D12 driver", // driverInfo
+                if (haveNative) nativeInfo.vendorName() else "D3D12 Unknown",        // vendorName
+                if (haveNative) nativeInfo.driverInfo() else "MCDR D3D12 Driver", // driverInfo
                 true,                                                        // isZZeroToOne: D3D12 NDC depth is 0..1
-                if (haveNative) nativeInfo.backendName() else "DX12",        // backendName
+                if (haveNative) nativeInfo.backendName() else "DirectX 12",        // backendName
                 timestampPeriod,
                 DeviceLimits(16, 256, 16384, Long.MAX_VALUE, 4096, 8),
                 DeviceFeatures(true, true, false, true, true, true, true),

@@ -1,6 +1,9 @@
 package dev.nts.expdxr
 
-import dev.nts.expdxr.client.debug.D3D12ExitWatchdog
+import dev.nts.expdxr.Illusion.Companion.MODID
+import dev.nts.expdxr.Illusion.Companion.MOD_NAME
+import dev.nts.expdxr.d3d12.debug.D3D12ExitWatchdog
+import dev.nts.expdxr.utils.IllusionLogger
 import net.neoforged.api.distmarker.Dist
 import net.neoforged.fml.ModContainer
 import net.neoforged.fml.common.Mod
@@ -14,20 +17,17 @@ import net.neoforged.neoforge.client.gui.IConfigScreenFactory
  * makes FML skip it entirely, so the client-only classes it references are
  * never touched server-side.
  */
-@Mod(value = Illusion.MODID, dist = [Dist.CLIENT])
+@Mod(value = MODID, dist = [Dist.CLIENT])
 class IllusionClient(container: ModContainer) {
     init {
-        // Gives NeoForge's built-in ConfigurationScreen to this mod, replacing
-        // the Fabric build's ModMenu entrypoint + hand-written settings screen.
+        // Apply log level in the init stage in order to correctly start the logger.
+        IllusionLogger.applyDefaults()
         container.registerExtensionPoint(
             IConfigScreenFactory::class.java,
             IConfigScreenFactory { modContainer, parent -> ConfigurationScreen(modContainer, parent) }
         )
 
-        Illusion.LOGGER.info(
-            "Illusion client setup: DX12 backend is registered via PreferredGraphicsApiMixin; "
-                + "creation is driven by the vanilla backend-selection loop"
-        )
+        Illusion.LOGGER.info("[$MODID] $MOD_NAME Client setup: D3D12 backend is registered via PreferredGraphicsApiMixin; creation is driven by the vanilla backend-selection loop")
         D3D12ExitWatchdog.start()
     }
 }

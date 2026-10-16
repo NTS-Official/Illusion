@@ -1,5 +1,7 @@
 package dev.nts.expdxr.mixin.debug;
 
+import dev.nts.expdxr.utils.IllusionLogger;
+
 import net.minecraft.client.GameLoadCookie;
 import net.minecraft.client.Minecraft;
 import org.spongepowered.asm.mixin.Mixin;
@@ -16,13 +18,13 @@ public class MinecraftResourceLoadDebugMixin {
 
     @Inject(method = "onResourceLoadFinished", at = @At("HEAD"), remap = false)
     private void dx12_onResourceLoadFinishedDebug(GameLoadCookie loadCookie, CallbackInfo ci) {
-        System.err.println("[d3d12-debug] onResourceLoadFinished() called");
+        IllusionLogger.debugMessage("[backend-debug] onResourceLoadFinished() called");
         System.err.flush();
     }
 
     @Inject(method = "onGameLoadFinished", at = @At("HEAD"), remap = false)
     private void dx12_onGameLoadFinishedDebug(GameLoadCookie cookie, CallbackInfo ci) {
-        System.err.println("[d3d12-debug] onGameLoadFinished() called — gameLoadFinished flips to true");
+        IllusionLogger.debugMessage("[backend-debug] onGameLoadFinished() called — gameLoadFinished flips to true");
         System.err.flush();
     }
 }

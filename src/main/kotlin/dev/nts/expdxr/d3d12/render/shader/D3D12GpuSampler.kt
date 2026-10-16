@@ -25,7 +25,7 @@ class D3D12GpuSampler(
 
     init {
         val lod = maxLod.orElse(16.0).toFloat()
-        this.handle = MCDR_ABI.dx12CreateSampler(addressModeU.ordinal, addressModeV.ordinal,
+        this.handle = MCDR_ABI.ID3D12CreateSampler(addressModeU.ordinal, addressModeV.ordinal,
             minFilter.ordinal, magFilter.ordinal, maxAnisotropy, lod)
         if (this.handle == 0L) {
             throw IllegalStateException("dx12CreateSampler returned a null handle")
@@ -66,6 +66,6 @@ class D3D12GpuSampler(
             return
         }
         this.closed = true
-        MCDR_ABI.dx12DestroyResource(this.handle)
+        MCDR_ABI.ID3D12DestroyResource(this.handle)
     }
 }

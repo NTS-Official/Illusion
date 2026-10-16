@@ -5,7 +5,7 @@ import java.util.*
 
 /**
  * Real adapter facts reported by the native backend through
- * [dev.nts.expdxr.d3d12.extern.MCDR_ABI.dx12GetAdapterInfo] (`mcdr_dx12GetAdapterInfo` in `mcdr_abi.h`).
+ * [dev.nts.expdxr.d3d12.extern.ID3D12GetAdapterInfo] (`mcdr_dx12GetAdapterInfo` in `mcdr_abi.h`).
  *
  * Before this class existed [D3D12Device] hardcoded `"D3D12"` / `"D3D12 driver"` /
  * [DeviceType.DISCRETE], so the F3 system block showed the same three strings on
@@ -38,8 +38,8 @@ class D3D12AdapterInfo private constructor(
     val luid: String,
     val isHardware: Boolean,
     val isDetachable: Boolean,
-    /** Whether DXCore contributed [driverVersion] and [deviceType]. */
-    val dxcore: Boolean
+    /** Whether D3DCore contributed [driverVersion] and [deviceType]. */
+    val d3dcore: Boolean
 ) {
     /**
      * Vanilla-style driver string, i.e. what [com.mojang.blaze3d.systems.DeviceInfo.driverInfo]
@@ -79,10 +79,10 @@ class D3D12AdapterInfo private constructor(
     fun sharedMiB(): Long = sharedBytes shr 20
 
     /** One-line summary for the startup log. */
-    fun summary(): String = name + " [" + vendorName() + " " + deviceType + "]" +
-        " backend=" + backendName() + " driver=" + driverInfo() +
-        " vram=" + vramMiB() + "MiB shared=" + sharedMiB() + "MiB" +
-        " luid=" + luid + " dxcore=" + dxcore
+    fun summary(): String = "${name} [${vendorName()} ${deviceType}]" +
+        " backend=${backendName()} driver=${driverInfo()}" +
+        " vram=${vramMiB()}MiB shared=${sharedMiB()}MiB" +
+        " luid=${luid} d3dcore=${d3dcore}"
 
     companion object {
         /**
@@ -126,6 +126,29 @@ class D3D12AdapterInfo private constructor(
         }
 
         /**
+         * Parse the JSON **array** returned by `mcdr_dx12EnumerateAdapters`
+         * (`[{"name":…}, …]`), one element at a time through [parse].
+         *
+         * That export walks DXGI in preference order and lists every adapter that can create a
+         * D3D12 12_0 device, each entry carrying `feature_level` / `feature_level_value`
+         * (probed with a throw-away device). It is what [dev.nts.expdxr.Illusion] reads at mod
+         * construction, i.e. before the live device exists.
+         */
+        fun parseList(json: String?): List<D3D12AdapterInfo> {
+            if (json == null) {
+                return emptyList()
+            }
+            val open = json.indexOf('[')
+            val close = json.lastIndexOf(']')
+            if (open < 0 || close <= open) {
+                return emptyList()
+            }
+            return splitTopLevel(json.substring(open + 1, close))
+                .map { parse(it) }
+                .filter { it.name.isNotEmpty() || it.featureLevelValue > 0 }
+        }
+
+        /**
          * Flat `{"key": value, ...}` reader. The native side never emits nested
          * objects or arrays, so a single scan is enough; handling it here instead
          * of pulling in Gson keeps this usable from the mod's standalone
@@ -140,7 +163,7 @@ class D3D12AdapterInfo private constructor(
             if (open < 0 || close <= open) {
                 return emptyMap()
             }
-            val out = HashMap<String, String>()
+            val out = mutableMapOf<String, String>()
             for (field in splitTopLevel(json.substring(open + 1, close))) {
                 val colon = field.indexOf(':')
                 if (colon < 0) {

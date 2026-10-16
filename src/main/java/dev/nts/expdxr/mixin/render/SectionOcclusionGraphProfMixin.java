@@ -14,13 +14,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public class SectionOcclusionGraphProfMixin {
 
     @Inject(method = "update", at = @At("HEAD"), remap = false)
-    private void dx12_profOcclusionHead(CameraRenderState camera, int fov,
+    private void D3D12ProfOcclusionHead(CameraRenderState camera, int fov,
                                         ChunkLoadingRenderState chunkLoadingRenderState, CallbackInfo ci) {
         D3D12RenderProf.begin(D3D12RenderProf.OCCLUSION);
     }
 
     @Inject(method = "update", at = @At("RETURN"), remap = false)
-    private void dx12_profOcclusionReturn(CameraRenderState camera, int fov,
+    private void D3D12ProfOcclusionReturn(CameraRenderState camera, int fov,
                                           ChunkLoadingRenderState chunkLoadingRenderState, CallbackInfo ci) {
         D3D12RenderProf.end(D3D12RenderProf.OCCLUSION);
     }

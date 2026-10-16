@@ -1,5 +1,7 @@
 package dev.nts.expdxr.mixin.debug;
 
+import dev.nts.expdxr.utils.IllusionLogger;
+
 import dev.nts.expdxr.d3d12.render.adapter.D3D12Device;
 import net.minecraft.client.renderer.fog.FogData;
 import net.minecraft.client.renderer.fog.FogRenderer;
@@ -39,7 +41,7 @@ public class FogRendererUpdateDebugMixin {
             ee = eeField.getFloat(fog);
         } catch (Exception ignored) {}
 
-        System.err.printf("[d3d12-p32] FogRenderer.updateBuffer: renderDistStart=%.1f renderDistEnd=%.1f envStart=%.1f envEnd=%.1f backend=%s%n",
+        IllusionLogger.debugFormat("[backend-p32] FogRenderer.updateBuffer: renderDistStart=%.1f renderDistEnd=%.1f envStart=%.1f envEnd=%.1f backend=%s%n",
                 rs, re, es, ee, D3D12Device.isInitialized() ? "DX12" : "NONE");
         System.err.flush();
     }
