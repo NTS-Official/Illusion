@@ -9,6 +9,10 @@ plugins {
     id 'org.jetbrains.kotlin.jvm' version '2.4.0'
 }
 
+// 为 Gradle 10 做的修改
+def gprops = providers
+def modId = gprops.gradleProperty('mod_id').get()
+
 tasks.named('wrapper', Wrapper).configure {
     distributionType = Wrapper.DistributionType.BIN
 }
@@ -59,11 +63,17 @@ def dxrmcTemporal = providers.gradleProperty('dxrmc.temporal')
 // 用来把"画面异常"在 jitter 与捕获两条路径之间二分定位。默认 true（正常行为）。
 def dxrmcTemporalJitter = providers.gradleProperty('dxrmc.temporal.jitter')
         .orElse(providers.systemProperty('dxrmc.temporal.jitter')).getOrElse('true')
+// P76e 实验开关：`-Pdxrmc.temporal.jitter.dlss=on` 让 **DLSS 期间也注入**亚像素 jitter。
+// 默认 off —— P108d 记录过"替换关卡投影上传会让整帧塌成常量清屏色"，这里要先验证那条结论
+// 是不是只对"返回替换缓冲"成立（就地改写上传的字节属于另一条语义）。off 时行为与改动前逐字节一致。
+def dxrmcTemporalJitterDlss = providers.gradleProperty('dxrmc.temporal.jitter.dlss')
+        .orElse(providers.systemProperty('dxrmc.temporal.jitter.dlss')).getOrElse('off')
 // P76a：速度（运动矢量）附件开关：`-Pdxrmc.temporal.velocity=true`。默认 false ——
 // 增量 1 只接通 MRT 基础设施（速度纹理 + 变体管线 + 地形 pass 多挂一路 RTV），
 // 还没有着色器写 SV_Target1，所以打开它只会多花两张 R16G16_FLOAT 纹理与每条地形管线一份 PSO。
 def dxrmcTemporalVelocity = providers.gradleProperty('dxrmc.temporal.velocity')
         .orElse(providers.systemProperty('dxrmc.temporal.velocity')).getOrElse('false')
+// P76f 判别实验：给上一帧视图矩阵人为加固定旋转（静止也能测出 mv 是否真的在写）。
 // 自动化取证：`-Pdxrmc.quickPlayWorld=<存档名>` 让客户端启动后直接进单人世界（无人值守截图/复现用）。
 // 空字符串 = 不传（普通游玩保持手动进世界）。
 def dxrmcQuickPlayWorld = providers.gradleProperty('dxrmc.quickPlayWorld').getOrElse('')
@@ -81,8 +91,8 @@ def dxrmcDlssOutput = providers.gradleProperty('dxrmc.dlssOutput')
 
 neoForge {
     // Specify the version of NeoForge to use.
-    version = project.neo_version
-    accessTransformers = project.files('src/main/resources/META-INF/accesstransformer.cfg')
+    version = gprops.gradleProperty('neo_version').get()
+    accessTransformers = files('src/main/resources/META-INF/accesstransformer.cfg')
 
     // Default run configurations.
     // These can be tweaked, removed, or duplicated as needed.
@@ -90,7 +100,7 @@ neoForge {
         client {
             client()
             // Comma-separated list of namespaces to load gametests from. Empty = all namespaces.
-            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+            systemProperty 'neoforge.enabledGameTestNamespaces', modId
             // P72 mesh shader 自检开关：`gradlew runClient -Ddxrmc.selfTestMesh=true`（或 -P 形式）。
             // Loom 的 run config 不会自动继承 Gradle 进程的系统属性，必须显式转发。
             systemProperty 'dxrmc.selfTestMesh', dxrmcSelfTestMesh
@@ -106,22 +116,47 @@ neoForge {
             systemProperty 'dxrmc.temporal', dxrmcTemporal
             // P75 诊断：只关 jitter、保留捕获（默认 true）。
             systemProperty 'dxrmc.temporal.jitter', dxrmcTemporalJitter
+            // P76e 实验：DLSS 期间也注入 jitter（默认 off）。
+            systemProperty 'dxrmc.temporal.jitter.dlss', dxrmcTemporalJitterDlss
             // P76a：速度附件（默认 false，见上面的说明）。
             systemProperty 'dxrmc.temporal.velocity', dxrmcTemporalVelocity
             // P108z 验收：DLSS 输出纹理交接（默认 off；handover 只用于验证 NGX 是否真的写入）。
             systemProperty 'dxrmc.dlssOutput', dxrmcDlssOutput
 
+            // DXRMC：native 侧的诊断环境变量。必须显式转发 —— Loom 的 run config 不继承
+            // shell 环境（实测 `$env:DX12_NATIVE_LOG_FILE` 到不了客户端）。
+            //   -Pdxrmc.nativeLog=<path>   -> DX12_NATIVE_LOG_FILE（逐行 fflush 的 native 日志镜像）
+            //   -Pdxrmc.nativeVerbose=1    -> DX12_LOG_VERBOSE=1（打印每条 resourceBarrier: res X -> Y）
+            //   -Pdxrmc.debugLayer=1       -> DX12_DEBUG_LAYER=1（D3D12 调试层 + InfoQueue，慢）
+            // DXRMC：DLSS 诊断 dump 的门控（**危险开关**，会读 GPU 纹理；迁移到模块读回路径后才是安全的）。
+            //   -Pdxrmc.p108xDump=1     -> DXRMC_P108X_DUMP（7 项 settled 读数）
+            //   -Pdxrmc.p108xTestfill=1 -> DXRMC_P108X_TESTFILL（写侧二分；历史上造成过 #944/#525/#527/TDR）
+            if (gprops.gradleProperty('dxrmc.p108xDump').isPresent()) {
+                environment 'DXRMC_P108X_DUMP', gprops.gradleProperty('dxrmc.p108xDump').get()
+            }
+            if (gprops.gradleProperty('dxrmc.p108xTestfill').isPresent()) {
+                environment 'DXRMC_P108X_TESTFILL', gprops.gradleProperty('dxrmc.p108xTestfill').get()
+            }
+            if (gprops.gradleProperty('dxrmc.nativeLog').isPresent()) {
+                environment 'DX12_NATIVE_LOG_FILE', gprops.gradleProperty('dxrmc.nativeLog').get()
+            }
+            if (gprops.gradleProperty('dxrmc.nativeVerbose').isPresent()) {
+                environment 'DX12_LOG_VERBOSE', gprops.gradleProperty('dxrmc.nativeVerbose').get()
+            }
+            if (gprops.gradleProperty('dxrmc.debugLayer').isPresent()) {
+                environment 'DX12_DEBUG_LAYER', gprops.gradleProperty('dxrmc.debugLayer').get()
+            }
             // DXRMC：把选定的环境变量显式转给 runClient 的 JVM。Loom 的 run config **不继承**
             // shell 环境（Gradle 守护进程持有它自己启动时的环境），所以 `$env:X=…` 常常到不了
             // JavaExec 子进程 —— `-P` 走 Gradle 命令行则一定生效。
             // `-Pdxrmc.dxcDir=<空目录>` 可用来验证"三站都找不到 DXC"时的降级路径（P67）。
             // `-Pdxrmc.dxcDisable=1` 让 native 的 DXC 探测直接返回空（三站全不查），
             // 用来实机验证"找不到 DXC 时回退 D3DCompile、不变成砖"这条路径（P67）。
-            if (project.hasProperty('dxrmc.dxcDisable')) {
-                environment 'MCDR_DXC_DISABLE', project.property('dxrmc.dxcDisable').toString()
+            if (gprops.gradleProperty('dxrmc.dxcDisable').isPresent()) {
+                environment 'MCDR_DXC_DISABLE', gprops.gradleProperty('dxrmc.dxcDisable').get()
             }
-            if (project.hasProperty('dxrmc.dxcDir')) {
-                environment 'MCDR_DXC_DIR', project.property('dxrmc.dxcDir').toString()
+            if (gprops.gradleProperty('dxrmc.dxcDir').isPresent()) {
+                environment 'MCDR_DXC_DIR', gprops.gradleProperty('dxrmc.dxcDir').get()
             }
             // 自动化取证：直接进指定存档（P75/P76 画面比对用；普通游玩不设置）。
             // 注意 Loom 的 runClient **不支持** `--args=`，参数只能在这里追加。
@@ -134,7 +169,7 @@ neoForge {
         server {
             server()
             programArgument '--nogui'
-            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+            systemProperty 'neoforge.enabledGameTestNamespaces', modId
         }
 
         // This run config launches GameTestServer and runs all registered gametests, then exits.
@@ -142,7 +177,7 @@ neoForge {
         // The gametest system is also enabled by default for other run configs under the /test command.
         gameTestServer {
             type = "gameTestServer"
-            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+            systemProperty 'neoforge.enabledGameTestNamespaces', modId
         }
 
         data {
@@ -151,7 +186,7 @@ neoForge {
             // gameDirectory = project.file('run-data')
 
             // Specify the modid for data generation, where to output the resulting resource, and where to look for existing resources.
-            programArguments.addAll '--mod', project.mod_id, '--all', '--output', file('src/generated/resources/').getAbsolutePath(), '--existing', file('src/main/resources/').getAbsolutePath()
+            programArguments.addAll '--mod', modId, '--all', '--output', file('src/generated/resources/').getAbsolutePath(), '--existing', file('src/main/resources/').getAbsolutePath()
         }
 
         // applies to all the run configs above
@@ -546,7 +581,9 @@ publishing {
     }
     repositories {
         maven {
-            url "file://${project.projectDir}/repo"
+            // Gradle 9.8 起，"属性 = 值" 必须用赋值语法；`url "…"` 这种
+            // Groovy 方法调用式赋值已被弃用（Gradle 10 移除），故改成 `url = …`。
+            url = "file://${projectDir}/repo"
         }
     }
 }
