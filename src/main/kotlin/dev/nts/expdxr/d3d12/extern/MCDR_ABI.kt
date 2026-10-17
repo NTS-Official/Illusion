@@ -108,6 +108,8 @@ object MCDR_ABI {
     private var MH_snapshotdlssdepth: MethodHandle? = null
     /** P108y：DLSS 挡位（Performance/Balanced/Quality，见 [dx12SetDlssQuality]）。 */
     private var MH_setdlssquality: MethodHandle? = null
+    /** P108z：把 JVM 建的输出纹理交给 native（见 [dx12SetDlssOutput]）。 */
+    private var MH_setdlssoutput: MethodHandle? = null
 
     private var MH_createdevice: MethodHandle? = null
     private var MH_createtexture: MethodHandle? = null
@@ -773,6 +775,36 @@ object MCDR_ABI {
      */
     fun dx12SnapshotDlssDepth(ctx: Long, depth: Long): Int =
         dlssCall(MH_snapshotdlssdepth, "[backend-java] dx12SnapshotDlssDepth failed: ", ctx, ptr(depth))
+
+    /**
+     * P108z（用户 m11203）：把一张**由 JVM 创建**的纹理指定为 DLSS 的输出
+     * （`mcdr_dx12SetDlssOutput`）。控制组结论是"native 自建的 `CreateCommittedResource` 纹理存不住
+     * 写入，模块 `createTexture` 建的可以"，所以 DLSS 的输出必须由 JVM 建、再由这条交给 native；
+     * native 会把 `pInOutput` 直接指到它（`MCDR\src\advanced\d3d12_dlss.cpp` 的 `s.externalOutput`
+     * 分支），而不是用它私有的 `s.dlssOutput`。
+     *
+     * <p>传的必须是 **`Dx12Object*` 句柄**（就是 `D3D12GpuTexture.handle()` 那个值）—— 不要让 native
+     * 的 DLSS 实现单元去 `reinterpret_cast` 资源，那是 D.3(1) 空指针崩溃的根源；native 在模块侧
+     * 自己解包。传 0 = "撤销指定，回到你自己的私有 UAV"。
+     *
+     * <p>走 [skipOptional] 绑定：本地 DLL 还没有这条导出时返回 [Int.MIN_VALUE]，调用方静默容忍并
+     * 只打一次 INFO，`MCDR_ABI_VERSION` 保持 2。
+     *
+     * @return 1 = 已记录（下一帧评价用它），0 = 接受但本机 DLSS 不可用/纹理不可用，-1 = 参数非法，
+     *     [Int.MIN_VALUE] = 本地 DLL 没有这个导出。Never throws.
+     */
+    fun dx12SetDlssOutput(textureHandle: Long): Int {
+        if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_setdlssoutput ?: return Int.MIN_VALUE
+        return try {
+            handle.invokeExact(ptr(textureHandle)) as Int
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12SetDlssOutput failed: $t")
+            Int.MIN_VALUE
+        }
+    }
 
     private fun dlssCall(handle: MethodHandle?, what: String, ctx: Long, input: MemorySegment): Int {
         if (LOAD_FAILURE != null) {
@@ -2613,6 +2645,11 @@ object MCDR_ABI {
         // 于是**native 还没实现这条导出**时只是返回 MIN_VALUE、JVM 侧打一次 INFO 说明仍由 native
         // 按比例就近选择，不会把游戏挡在启动之外，MCDR_ABI_VERSION 保持 2。
         MH_setdlssquality = skipOptional("mcdr_dx12SetDlssQuality", fd(MCDRLayout.I32, MCDRLayout.I32))
+        // P108z（用户 m11203）：DLSS 的输出纹理改由 JVM 建、经这条交给 native（两个指针风格：
+        // 一个 Dx12Object* 句柄）。同样走 skipOptional —— native 还没实现时只是返回 MIN_VALUE、
+        // JVM 侧打一次 INFO 然后继续用 native 私有的 UAV 路径，MCDR_ABI_VERSION 保持 2。
+        MH_setdlssoutput = skipOptional("mcdr_dx12SetDlssOutput",
+            fd(MCDRLayout.I32, MCDRLayout.PTR))
 
         MH_createdevice = skip("mcdr_dx12CreateDevice", fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.I32))
         MH_destroydevice = skip("mcdr_dx12DestroyDevice", fdv())

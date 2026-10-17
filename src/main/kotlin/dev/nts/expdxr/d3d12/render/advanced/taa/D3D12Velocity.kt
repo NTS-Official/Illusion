@@ -47,7 +47,7 @@ import org.slf4j.LoggerFactory
  *
  * P76b 增量：在上面这条**相机重投影**之上叠加**逐物体修正**。相机重投影对静态几何严格正确，
  * 但它把移动实体也当成静止世界，于是走动中的猪/玩家/掉落物会拖影。修正数据由
- * [D3D12ObjectMotion] 在 extract 阶段采集（**公共 API，无 mixin**），以「行 = 上一帧每个可见
+ * [D3D12ObjectMotion] 在帧起用公共 API 采集（**无 mixin、无 AT**），以「行 = 本帧每个物体的
  * 物体的世界 AABB + 它相对再上一帧的屏幕位移」的形式经 `t2` 的结构化缓冲送进来：像素的世界
  * 位置落在某个物体的上一帧 AABB 内，就用**该物体的屏幕位移**替换相机重投影的结果。
  *
@@ -154,7 +154,7 @@ object D3D12Velocity {
     /** P76b 的逐物体行缓冲（UPLOAD 堆，每帧按 `t2` 绑定；native 侧当 R32_FLOAT texel buffer 建 SRV）。 */
     private var objects: D3D12GpuBuffer? = null
 
-    /** 复用同一份数组喂 [D3D12ObjectMotion.writeRows]，避免每帧 16 KB 垃圾。 */
+    /** 复用同一份数组喂 [D3D12ObjectMotion.writeWorldRows]，避免每帧 16 KB 垃圾。 */
     private val objectScratch: FloatArray = FloatArray(D3D12ObjectMotion.MAX_OBJECTS * D3D12ObjectMotion.ROW_FLOATS)
 
     /** 本帧真正绑定的物体行数（0 = 这一帧没有逐物体修正）。 */

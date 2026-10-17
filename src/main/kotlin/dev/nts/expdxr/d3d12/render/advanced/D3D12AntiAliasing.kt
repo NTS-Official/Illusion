@@ -99,6 +99,10 @@ object D3D12AntiAliasing {
     /** 加锁的是不是"本类自己"：是才说明有快照可还原。 */
     private var dlssLockApplied = false
 
+    /** P108aa：DLAA 抢占 DLSS 的"这行日志只打一次"。 */
+    @Volatile
+    private var dlaaOwnsDlssReported = false
+
     /** 加锁前玩家自己选的模式，解冻时还回去；[OFF] 表示当初没必要存快照。 */
     private var dlssModeSnapshot = OFF
 
@@ -109,6 +113,19 @@ object D3D12AntiAliasing {
      */
     @JvmStatic
     fun setDlssLock(locked: Boolean) {
+        // P108aa（用户 m11796）：DLAA 由抗锯齿选项**自己**接管 DLSS，绝不能被"DLSS 开关打开就
+        // 把抗锯齿锁成 OFF"这条规则清掉 —— 实测过：`options.txt` 里 AA=DLAA、DLSS=true 时，
+        // DLSS 那条 TAIL 注入晚于 AA 那条，于是刚 engaged 的 DLAA 在 3 秒后被改成 OFF
+        //（`anti-aliasing = OFF` + `DLSS 已开启：抗锯齿锁为 OFF`），缩放随之从 100 掉回 90。
+        if (locked && OPTION.get() == DLAA) {
+            if (!dlaaOwnsDlssReported) {
+                dlaaOwnsDlssReported = true
+                Illusion.LOGGER.info(
+                    "[dxrmc] DLSS is on, but anti-aliasing is DLAA — DLAA owns the DLSS feature, "
+                        + "so the anti-aliasing option is left untouched")
+            }
+            return
+        }
         dlssLock = locked
         if (locked) {
             if (!dlssLockApplied) {
@@ -203,16 +220,26 @@ object D3D12AntiAliasing {
         // DLSS 锁定期内这是**回推 native** 的路径，不是"玩家改了设置"的路径：必须仍然下发，
         // 否则 native 的设备上下文会停在旧模式上（尤其关掉 DLSS、还原玩家选择的这一次）。
         // 玩家能不能改由界面置灰 + [validateLocked] 负责。
-        when (val status = MCDR_ABI.D3D12SetAntiAliasing(mode)) {
-            1 -> Illusion.LOGGER.info("[dxrmc] anti-aliasing = {}", modeName(mode))
-            0 -> Illusion.LOGGER.warn(
+        //
+        // P108aa（用户 m11796）：**DLAA 由 DLSS 特性实现，不走 SMAA 通道** —— native 的
+        // `mcdrSetAntiAliasing` 只实现 SMAA，把 3 传下去会被降级成 OFF 并 WARN。所以这里把
+        // DLAA 映射成 OFF 再下发；真正的 DLAA 由 `DeepLearningSuperSampling` 那条链路
+        //（render == target + 挡位 3 + handover）接管，它每帧从 [current] 读到这个 3。
+        val pushed = if (mode == DLAA) OFF else mode
+        // 返回值契约（`d3d12_mc::setAntiAliasing`）：成功时**返回生效的模式本身**（0=OFF 也合法），
+        // 2/3（TAA/DLAA）会被降级成 OFF 并返回 0，非法值返回 -1。所以"0"必须按模式区分 ——
+        // 对 OFF 而言 0 就是成功（旧代码会误报 "OFF is not implemented yet"）。
+        val status = MCDR_ABI.D3D12SetAntiAliasing(pushed)
+        when {
+            status == pushed -> Illusion.LOGGER.info("[dxrmc] anti-aliasing = {}", modeName(mode))
+            status == 0 && pushed != OFF -> Illusion.LOGGER.warn(
                 "[dxrmc] anti-aliasing {} is not implemented yet; the renderer falls back to OFF",
                 modeName(mode),
             )
-            Int.MIN_VALUE -> Illusion.LOGGER.info(
+            status == Int.MIN_VALUE -> Illusion.LOGGER.info(
                 "[dxrmc] the loaded MCDR.dll has no mcdrSetAntiAliasing; anti-aliasing stays off",
             )
-            else -> Illusion.LOGGER.warn("[dxrmc] mcdrSetAntiAliasing({}) returned {}", mode, status)
+            else -> Illusion.LOGGER.warn("[dxrmc] mcdrSetAntiAliasing({}) returned {}", pushed, status)
         }
     }
 

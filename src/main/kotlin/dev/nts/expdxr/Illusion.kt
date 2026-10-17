@@ -40,13 +40,6 @@ class Illusion(modEventBus: IEventBus, modContainer: ModContainer) {
             IllusionLogger.applyFromConfig()
             applyGpuCaptureConfig()
         }
-        // P76b: per-object true motion vectors. NeoForge's public render-state API hands us the
-        // `Entity` while its `EntityRenderState` is being built, which is the only place the
-        // cross-frame endpoints (xOld / getX(), yRotO / getYRot()) are reachable for a submitted
-        // object -- the model matrix is baked into vertices before any draw happens.
-        modEventBus.addListener(net.neoforged.neoforge.client.renderstate.RegisterRenderStateModifiersEvent::class.java) { event ->
-            dev.nts.expdxr.d3d12.render.advanced.taa.D3D12ObjectMotion.register(event)
-        }
         LOGGER.info("[$MODID] $MOD_NAME is constructing...")
         // To probe exact backend setting before loading the mod, the only way to achieve this is to read it from file.
         val preferredGraphics = preferredGraphicsSettingFromOptionsFile()

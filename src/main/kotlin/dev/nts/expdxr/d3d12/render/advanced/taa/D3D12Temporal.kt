@@ -212,10 +212,12 @@ object D3D12Temporal {
         frameIndex++
         // P76a：速度附件与时间性状态同帧滚动（只在 velocity 开关打开时做任何事）。
         D3D12Velocity.beginFrame()
-        // P76b：逐物体快照同帧滚动。此刻本帧的 extract 阶段已经跑完（GameRenderer 先调
-        // levelExtractor.extract 再 renderLevel），所以滚过去的正是刚采完的这一帧。
+        // P76b：逐物体快照同帧采集。清空上一帧的槽，紧接着由公共 API 重新遍历一次实体表 ——
+        // 实体的位置在 Minecraft.tick() 里就更新好了，而速度 pass 要到这一帧末尾才录制，
+        // 所以这里采到的就是本帧渲染要用的那批位置。
         D3D12ObjectMotion.beginFrame()
-        // P76b 诊断：区分"回调没挂上"与"这帧真的没有可见物体"（每 ~300 帧一行）。
+        D3D12ObjectMotion.harvestVisible()
+        // P76b 诊断：采集计数与写出行数（每 ~300 帧一行）。
         D3D12ObjectMotion.logProbe()
     }
 

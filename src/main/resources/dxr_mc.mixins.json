@@ -18,8 +18,6 @@
     "render.LevelRendererWorldTargetsScaleMixin",
     "render.GameRendererSmaaWorldMixin",
     "render.LevelRendererMainPassDepthMixin",
-    "render.P108zScaleDragProbeMixin",
-    "render.LevelExtractorVisibleEntitiesMixin",
     "render.GuiRendererTargetMixin",
     "render.CubeMapTargetMixin",
     "render.GameRendererBlurTargetMixin",

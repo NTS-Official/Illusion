@@ -1,21 +1,15 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+
 plugins {
     id 'java-library'
     id 'maven-publish'
     id 'net.neoforged.moddev' version '2.0.148'
     id 'idea'
-    // 2.4.0 = first line whose stdlib metadata matches, and 2.3.0+ is required
-    // because Kotlin only gained JVM target 25 support in 2.3.0 (Kotlin 2.2.x
-    // silently falls back to JVM_24, which Gradle 9's KGP then rejects as an
-    // inconsistent JVM-target pair against compileJava(25)).
     id 'org.jetbrains.kotlin.jvm' version '2.4.0'
 }
 
 tasks.named('wrapper', Wrapper).configure {
-    // Define wrapper values here so as to not have to always do so when updating gradlew.properties.
-    // Switching this to Wrapper.DistributionType.ALL will download the full gradle sources that comes with
-    // documentation attached on cursor hover of gradle classes and methods. However, this comes with increased
-    // file size for Gradle. If you do switch this to ALL, run the Gradle wrapper task twice afterwards.
-    // (Verify by checking gradle/wrapper/gradle-wrapper.properties to see if distributionUrl now points to `-all`)
     distributionType = Wrapper.DistributionType.BIN
 }
 
@@ -73,13 +67,22 @@ def dxrmcTemporalVelocity = providers.gradleProperty('dxrmc.temporal.velocity')
 // 自动化取证：`-Pdxrmc.quickPlayWorld=<存档名>` 让客户端启动后直接进单人世界（无人值守截图/复现用）。
 // 空字符串 = 不传（普通游玩保持手动进世界）。
 def dxrmcQuickPlayWorld = providers.gradleProperty('dxrmc.quickPlayWorld').getOrElse('')
+// P108z：DLSS 输出纹理的"交接"（handover）—— **默认开启**。
+//
+// `handover`（默认）：JVM 建一张 target 尺寸的 UAV 纹理，经 `mcdr_dx12SetDlssOutput` 交给 native
+// 当 NGX 的输出目标，评价完再拷回 GUI 目标。这是**正式路径**：native 自建的
+// `CreateCommittedResource` 纹理存不住 NGX 的写入，而模块 `createTexture` 建的可以
+//（用户 m11787 实机确认：不崩了、DLSS 有肉眼可见效果）。
+// `off`：只用于排查 —— 退回让 native 用私有 UAV 兜底（那条路在这台机器上写不进内容），
+// `pInOutput` 仍是 GUI 目标。
+// 失效保护在 JVM 侧：只有"本帧 handover 成功 + native 报 evaluate 成功"才跳过世界层 blit。
+def dxrmcDlssOutput = providers.gradleProperty('dxrmc.dlssOutput')
+        .orElse(providers.systemProperty('dxrmc.dlssOutput')).getOrElse('handover')
 
 neoForge {
     // Specify the version of NeoForge to use.
     version = project.neo_version
-
-    // This line is optional. Access Transformers are automatically detected
-    // accessTransformers = project.files('src/main/resources/META-INF/accesstransformer.cfg')
+    accessTransformers = project.files('src/main/resources/META-INF/accesstransformer.cfg')
 
     // Default run configurations.
     // These can be tweaked, removed, or duplicated as needed.
@@ -105,6 +108,21 @@ neoForge {
             systemProperty 'dxrmc.temporal.jitter', dxrmcTemporalJitter
             // P76a：速度附件（默认 false，见上面的说明）。
             systemProperty 'dxrmc.temporal.velocity', dxrmcTemporalVelocity
+            // P108z 验收：DLSS 输出纹理交接（默认 off；handover 只用于验证 NGX 是否真的写入）。
+            systemProperty 'dxrmc.dlssOutput', dxrmcDlssOutput
+
+            // DXRMC：把选定的环境变量显式转给 runClient 的 JVM。Loom 的 run config **不继承**
+            // shell 环境（Gradle 守护进程持有它自己启动时的环境），所以 `$env:X=…` 常常到不了
+            // JavaExec 子进程 —— `-P` 走 Gradle 命令行则一定生效。
+            // `-Pdxrmc.dxcDir=<空目录>` 可用来验证"三站都找不到 DXC"时的降级路径（P67）。
+            // `-Pdxrmc.dxcDisable=1` 让 native 的 DXC 探测直接返回空（三站全不查），
+            // 用来实机验证"找不到 DXC 时回退 D3DCompile、不变成砖"这条路径（P67）。
+            if (project.hasProperty('dxrmc.dxcDisable')) {
+                environment 'MCDR_DXC_DISABLE', project.property('dxrmc.dxcDisable').toString()
+            }
+            if (project.hasProperty('dxrmc.dxcDir')) {
+                environment 'MCDR_DXC_DIR', project.property('dxrmc.dxcDir').toString()
+            }
             // 自动化取证：直接进指定存档（P75/P76 画面比对用；普通游玩不设置）。
             // 注意 Loom 的 runClient **不支持** `--args=`，参数只能在这里追加。
             if (!dxrmcQuickPlayWorld.isEmpty()) {
@@ -555,9 +573,9 @@ tasks.withType(JavaCompile).configureEach {
 //
 // Kotlin source files are always read as UTF-8; unlike JavaCompile there is no
 // encoding options to set.
-tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+tasks.withType(KotlinCompile).configureEach {
     compilerOptions {
-        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_25)
+        jvmTarget.set(JvmTarget.JVM_25)
     }
 }
 

@@ -26,6 +26,27 @@ class D3D12GpuTexture(usage: Int, label: String, format: GpuFormat, width: Int,
         }
     }
 
+    companion object {
+        /**
+         * P108z（用户 m11203）：**未映射到资源状态的 `storage / UAV` 语义位**。
+         *
+         * <p>vanilla 的 [GpuTexture] 只定义了 4 个位：`USAGE_COPY_DST = 1`、`USAGE_COPY_SRC = 2`、
+         * `USAGE_TEXTURE_BINDING = 4`、`USAGE_RENDER_ATTACHMENT = 8`（`javap -constants` 实测），
+         * 16 起是 DXRMC 自己的约定（`D3D12Velocity` 用 16 之后的位）。这里取 **32**，因为 native
+         * `textureFlags()`（`MCDR\src\core\d3d12_device.cpp:1876-1892`）正好判 `usage & 32`：
+         *
+         * ```cpp
+         * if (usage & 32) {  // STORAGE / UAV
+         *     flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+         * }
+         * ```
+         *
+         * 没有这个位，NGX 就不肯写进那张资源（"NGX 只肯写进带 ALLOW_UNORDERED_ACCESS 的资源"）。
+         * 该位只影响 `createTexture` 一处，未用到它的纹理行为与改动前逐字一致。
+         */
+        const val USAGE_STORAGE: Int = 32
+    }
+
     /** Native handle ({@code Dx12Object*} as long). */
     fun handle(): Long {
         return this.handle

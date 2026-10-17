@@ -1,16 +1,16 @@
 package dev.nts.expdxr.d3d12.render.advanced.taa
 
 import net.minecraft.client.Minecraft
-import net.minecraft.client.renderer.entity.EntityRenderer
-import net.minecraft.client.renderer.entity.state.EntityRenderState
 import net.minecraft.util.Mth
-import net.minecraft.util.context.ContextKey
 import net.minecraft.world.entity.Entity
+import net.minecraft.world.entity.LivingEntity
 import org.slf4j.LoggerFactory
+import java.util.Locale
 import kotlin.math.max
+import kotlin.math.sqrt
 
 /**
- * P76b — 逐物体真运动矢量：CPU 侧的「本帧可见物体」快照采集。
+ * P76b — 逐物体真运动矢量：CPU 侧的「本帧物体」快照采集。
  *
  * ## 为什么需要这一层（P76a 的局限）
  *
@@ -18,45 +18,68 @@ import kotlin.math.max
  * 但它把所有几何（含移动实体）都当成静止世界，所以移动中的猪、玩家、掉落物都会拖影。
  *
  * 而 26.2 的渲染管线里**拿不到逐物体的变换**：物体的 model 矩阵在 CPU 侧就被烘进顶点了
- * （`ModelPart.compile` 里 `builder.addVertex(matrix.transformPosition(...))`），
- * 顶点着色器只有 `gl_Position = ProjMat * ModelViewMat * vec4(Position, 1.0)`，其中
- * `ModelViewMat` 只是**相机视图旋转**（`GameRenderer.java:537` 把它设成 `cameraState.viewRotationMatrix`）。
+ * （`ModelPart` 里 `builder.addVertex(matrix.transformPosition(...))`），顶点着色器只有
+ * `gl_Position = ProjMat * ModelViewMat * vec4(Position, 1.0)`，其中 `ModelViewMat` 只是
+ * **相机视图旋转**（`GameRenderer` 把它设成 `cameraState.viewRotationMatrix`）。
  * 提交路径上也没有任何物体身份：`SubmitNode` 是 10 行的标记接口，
- * `OrderedSubmitNodeCollector` 唯一带身份的入口是 `submitFlame` / `submitLeash` 上的 `EntityRenderState`。
+ * `OrderedSubmitNodeCollector` 唯一带身份的入口是 `submitFlame` / `submitLeash` 上的
+ * `EntityRenderState`。
  *
- * 唯一的出路是在 **extract 阶段**抓 `(Entity, state)` 这一对：NeoForge 的
- * [net.neoforged.neoforge.client.renderstate.RenderStateExtensions.onUpdateEntityRenderState]
- * 在 `EntityRenderer.createRenderState` 里被调用（`EntityRenderer.java:165`），那时 `Entity` 还在
- * 手上，`xOld` / `getX()` / `yRotO` / `getYRot()` 这些跨帧端点都可读，而且每帧每个可见物体只跑一次。
- * 那是**公共 API**（`RegisterRenderStateModifiersEvent`），不需要 mixin。
+ * **注意**：逐物体模型矩阵既拿不到，也不需要拿 —— 见下面「与速度 pass 的集成」。
+ *
+ * ## 采集：只用公共 API，没有 mixin，也没有 access transformer
+ *
+ * 逐帧遍历 `ClientLevel.entitiesForRendering()`，直接从 `Entity` 上读**公共**字段/取值器：
+ *
+ * - 当前插值位置：`Mth.lerp(partialTick, entity.xOld, entity.x)` —— 与 vanilla 在
+ *   `EntityRenderer.createRenderState` 里 `state.x = Mth.lerp(partialTicks, entity.xOld, entity.getX())`
+ *   完全同一个公式；
+ * - 上一帧同相位位置：同一条 `xOld → getX()` 端点按 `partialTick - 1.0` **外推**（见 [extrapolate]）；
+ * - 包围盒：`entity.bbWidth` / `entity.bbHeight`（渲染原点是**脚**，所以竖直方向要抬半个身高）；
+ * - 朝向：`entity.yRot`；
+ * - `partialTick` 与 vanilla 同一来源：
+ *   `deltaTracker.getGameTimeDeltaPartialTick(!tickRateManager.isEntityFrozen(entity))`。
+ *
+ * 早先的两条路都走不通，才落到这里：
+ *
+ * 1. **`RegisterRenderStateModifiersEvent`**（NeoForge 公共事件，在 `EntityRenderer.createRenderState`
+ *    里被调用）—— 实机实测回调一次都没来（`fired=0`，连续 23 次采样），成因未查明；
+ * 2. **注入 `LevelExtractor.extractEntity` 的 mixin** —— 运行期报
+ *    `InjectionError ... Scanned 0 target(s)`，卡在注入本身。
+ *
+ * 而这条路需要的每一个成员都是 public（`Minecraft.level`、`Minecraft.getDeltaTracker()`、
+ * `Minecraft.gameRenderer.mainCamera()`、`ClientLevel.entitiesForRendering()`、
+ * `Level.tickRateManager()`、`Camera.entity()/isDetached()/position()`），所以**既不需要 mixin、
+ * 也不需要 AT** —— 纯粹是「vanilla 本来就把这些暴露了」。
+ *
+ * ## 与 vanilla 的可见集差在哪（有意为之）
+ *
+ * vanilla 的可见性判定是 `LevelExtractor.isEntityVisible`：
+ * `entityRenderDispatcher.shouldRender(entity, frustum, camX, camY, camZ)` **且**
+ * `level.isOutsideBuildHeight(...) || levelRenderer.isSectionCompiledAndVisible(...)`。
+ * 那需要本帧的 `Frustum`，而它只作为 `extract` 的局部变量存在。
+ *
+ * 这里**不做视锥裁剪、也不做区块可见性裁剪**，只用距离（[MAX_DISTANCE_BLOCKS]）+ `isInvisible`
+ * 过滤。这样得到的集合是 vanilla 可见集的**超集**，而超出来的部分是安全的：
+ * 真正的判定发生在着色器里（像素的世界位置是否落在该物体的 AABB 内），一个没被渲染的物体
+ * 不会和任何像素重叠。代价只是占掉行槽，所以才有距离裁剪与 [MAX_OBJECTS] 上限。
  *
  * ## 本类负责什么
  *
- * 只负责**记数据**：本帧每个可见物体一行 [Snapshot]（当前插值位置 + 上一帧同刻位置 + AABB 半径 +
- * 朝向），并保留上一帧那份供 GPU 端配对。**不碰任何 GPU 资源** —— 那是 [D3D12Velocity] 的事。
- *
- * ## 相位约定
- *
- * 快照用**渲染相位**而不是 tick：物体在 tick `t` 与 `t+1` 之间的插值端点就是
- * `xOld` → `getX()`，partialTick 落在 `[0,1)`。为了让位置能与「上一帧的同一渲染相位」对上，
- * 这里按 [phase] 存端点并**外推**上一帧的渲染相位 `phase - 1.0`
- * （一帧 ≈ 一个 tick，这正是 vanilla 那句
- * `state.x = lerp(partialTick, entity.xOld, entity.getX())` 本身的假设）。
+ * 只负责**记数据**：本帧每个物体一行 [Snapshot]（世界坐标的当前/上一帧位置 + AABB 半尺寸 +
+ * 朝向）。**不碰任何 GPU 资源** —— 那是 [D3D12Velocity] 的事。
  *
  * ## 与速度 pass 的集成
  *
- * [D3D12Velocity] 在录制前调 [writeRows] 把上一帧的行写进 GPU 结构化缓冲；速度着色器逐像素先按
- * 当前 AABB 判定「这个像素属于哪个物体」，命中就用物体自身的位移重投影，未命中才退回相机重投影。
+ * [D3D12Velocity] 在录制前调 [writeWorldRows]：把世界坐标减掉**本帧**相机位置换成相机相对坐标，
+ * 写进 GPU 缓冲。减本帧相机是关键 —— 静态物体两帧世界坐标相同，减同一个相机后差分为 0，
+ * 与「静态相机 + 静态几何 ⇒ 运动矢量为 0」的约定一致；减错就会把整段相机位移当成物体速度注入。
+ *
+ * 着色器逐像素先按 AABB 判定「这个像素属于哪个物体」，命中就用物体自身的位移重投影，
+ * 未命中才退回相机重投影。所以物体位移**必须是世界位移**，而不是屏幕空间差。
  */
 object D3D12ObjectMotion {
     private val LOGGER = LoggerFactory.getLogger("dxrmc-objectmotion")
-
-    /**
-     * 身份写进 render state 用的 key。
-     * 注意：[EntityRenderState] 每帧重建，且 `onUpdateEntityRenderState` 开头就
-     * `resetRenderData()`，所以这个值只在**当前帧内**有效 —— 正合本用途。
-     */
-    private val IDENTITY_KEY: ContextKey<Int> = ContextKey.vanilla("dxrmc_object_id")
 
     /** 结构化缓冲每行 16 个 float，与 [D3D12Velocity] 内联 HLSL 的结构体严格对应。 */
     const val ROW_FLOATS: Int = 16
@@ -66,6 +89,14 @@ object D3D12ObjectMotion {
 
     /** 诊断日志间隔（帧）。 */
     private const val LOG_INTERVAL_FRAMES: Long = 300L
+
+    /**
+     * 距离裁剪半径（方块，相机到**实体原点**的欧氏距离）。
+     *
+     * 96 格之外的运动物体在屏幕上只剩几像素，AABB 命中与否对观感没有意义；而裁剪掉它们
+     * 才能保证拥挤场景下 [MAX_OBJECTS] 的槽位留给近处物体。
+     */
+    private const val MAX_DISTANCE_BLOCKS: Double = 96.0
 
     /** GPU 行的字段下标。 */
     const val FIELD_ID: Int = 0
@@ -80,40 +111,13 @@ object D3D12ObjectMotion {
     const val FIELD_HALF_Z: Int = 10
     const val FIELD_YAW: Int = 11
 
-    /** 一个物体的本帧快照。 */
-    private class Snapshot(
-        val id: Int,
-        val currX: Float, val currY: Float, val currZ: Float,
-        val prevX: Float, val prevY: Float, val prevZ: Float,
-        val halfX: Float, val halfY: Float, val halfZ: Float,
-        val yaw: Float
-    ) {
-        /** 写进 GPU 结构化缓冲的一行（[ROW_FLOATS] 个 float）。 */
-        fun writeInto(row: FloatArray, offset: Int) {
-            row[offset + FIELD_ID] = id.toFloat()
-            row[offset + FIELD_CUR_X] = currX
-            row[offset + FIELD_CUR_Y] = currY
-            row[offset + FIELD_CUR_Z] = currZ
-            // [4] 保留（以后放速度模长 / 置信度）。
-            row[offset + FIELD_PREV_X] = prevX
-            row[offset + FIELD_PREV_Y] = prevY
-            row[offset + FIELD_PREV_Z] = prevZ
-            row[offset + FIELD_HALF_X] = halfX
-            row[offset + FIELD_HALF_Y] = halfY
-            row[offset + FIELD_HALF_Z] = halfZ
-            row[offset + FIELD_YAW] = yaw
-            // [12..15] 保留。
-        }
-    }
-
     /**
-     * 一个物体的本帧快照（世界坐标绝对位置）。
+     * 一个物体的本帧快照（**世界坐标**绝对位置）。
      *
-     * 与 [Snapshot] 的区别：这里存的是**世界坐标**而不是相机相对坐标 —— 「路径 B」的调用点在
-     * `extractVisibleEntities` 里，拿不到渲染用的相机相对原点，而且相机动了以后相机相对坐标
-     * 的差会把相机位移混进物体速度里。世界坐标由 [D3D12Velocity] 在写缓冲时减去相机相对原点。
+     * 存世界坐标而不是相机相对坐标：相机相对坐标的差会把相机位移混进物体速度里，而世界坐标
+     * 由 [D3D12Velocity] 在写缓冲时统一减去本帧相机位置。
      */
-    private class WorldSnapshot(
+    private class Snapshot(
         val id: Int,
         val currX: Float, val currY: Float, val currZ: Float,
         val prevX: Float, val prevY: Float, val prevZ: Float,
@@ -123,64 +127,23 @@ object D3D12ObjectMotion {
     )
 
     /**
-     * 每帧重填。Extract 阶段同一个物体可能被建多个 state（多部件 / 多个 renderer），
-     * 用 id 去重、后到覆盖 —— 与最终提交的那份最接近。
+     * 本帧采集槽。同一个物体一帧只会出现一次（按 [Entity.id] 去重，后到覆盖），
+     * 所以这个 map 的 size 就是本帧的物体数。
      */
     private val currentSnapshots: MutableMap<Int, Snapshot> = LinkedHashMap()
 
-    /** 上一帧的成品。在 [beginFrame] 里由 [currentSnapshots] 滚动过来。 */
+    /** 最近一次被 [writeWorldRows] 取走的那一份（每帧只滚动一次，见 [lastConsumedFrame]）。 */
     @Volatile
-    private var previousSnapshots: Map<Int, Snapshot> = emptyMap()
+    private var writeSnapshots: Map<Int, Snapshot> = emptyMap()
+
+    /** [writeSnapshots] 对应的帧号；`-1` 表示还没取过任何一份。 */
+    private var lastConsumedFrame: Long = -1L
 
     @Volatile
     private var frameNumber: Long = 0L
 
-    /** 上一次滚动时上一帧有多少行（日志对照用）。 */
-    @Volatile
-    private var lastRolledCount: Int = 0
-
     @Volatile
     private var lastOverflowLoggedFrame: Long = -1L
-
-    /**
-     * 「路径 B」：直接采到的本帧可见物体（世界坐标）。
-     *
-     * 与 [currentSnapshots] 的区别只有一点 —— 后者依赖 NeoForge 的
-     * `RegisterRenderStateModifiersEvent` 回调，而实测该回调在一些场景下一个都不来；
-     * 这条路径由 [LevelExtractorMixin] 在 `extractVisibleEntities` 开头直接遍历
-     * `ClientLevel.entitiesForRendering()` 得到，**不依赖任何回调**，所以只要有可见实体就一定非空。
-     * 两个计数同时打印，一眼就能分清「钩子没挂上」和「这帧真的没有可见物体」。
-     */
-    private val currentWorldSnapshots: MutableMap<Int, WorldSnapshot> = LinkedHashMap()
-
-    /** 最近一次被 [writeWorldRows] 消费掉的那一份世界快照（每份只被写出去一次）。 */
-    @Volatile
-    private var writeWorldSnapshots: Map<Int, WorldSnapshot> = emptyMap()
-
-    /** 累计 [harvest] 看到过多少个可见实体（用来算每帧增量的诊断量）。 */
-    @Volatile
-    private var seenCount: Long = 0L
-
-    /** 诊断：`onEntityRenderState` 被调用过多少次（含被拒绝/溢出的）。全 0 且物体数为 0 就说明 */
-    /** 回调根本没被挂上，而不是"这帧没有可见物体" —— 这两者在日志里必须能区分。 */
-    @Volatile
-    private var callbackCount: Long = 0L
-
-    /** 诊断：[harvest] 被调用过多少次（每次调用对应一帧的可见实体遍历）。 */
-    @Volatile
-    private var harvestCount: Long = 0L
-
-    /** 诊断：上次报 [harvestCount] 时用掉的值，用来算区间增量。 */
-    private var lastHarvestReported: Long = 0L
-
-    /** 诊断：本帧 [harvest] 看到了多少个可见实体。 */
-    private var seenThisFrame: Int = 0
-
-    /** 诊断：自上次报告以来单帧看到的最多可见实体数。 */
-    private var harvestSeenRolling: Int = 0
-
-    /** 诊断：上次报回调计数时用掉的 [callbackCount] 值，用来算区间增量。 */
-    private var lastCallbackReported: Long = 0L
 
     @Volatile
     private var overflowCount: Long = 0L
@@ -188,50 +151,96 @@ object D3D12ObjectMotion {
     @Volatile
     private var rejectedCount: Long = 0L
 
-    /** 注册到 `RegisterRenderStateModifiersEvent` 的入口（见 [IllusionClient]）。 */
-    fun register(event: net.neoforged.neoforge.client.renderstate.RegisterRenderStateModifiersEvent) {
-        event.registerEntityModifier(EntityRenderer::class.java) { entity, state ->
-            onEntityRenderState(entity, state)
-        }
-        LOGGER.info("P76b: 逐物体运动快照已挂到 EntityRenderer（公共 API，无 mixin）")
-    }
+    /** 诊断：累计 [harvest] 记录的物体数（每帧增量可从它算出来）。 */
+    @Volatile
+    private var harvestedTotal: Long = 0L
+
+    /** 诊断：上次报数时用掉的 [harvestedTotal]。 */
+    private var harvestedReported: Long = 0L
+
+    /** 诊断：自上次报数以来单帧采到的最多物体数。 */
+    private var peakThisWindow: Int = 0
+
+    /** 诊断：本帧采到的物体数。 */
+    private var harvestedThisFrame: Int = 0
+
+    /** 诊断：累计遍历过多少个实体（用来区分「循环没跑」与「跑了但没有一个合格」）。 */
+    @Volatile
+    private var examinedTotal: Long = 0L
+
+    /** 诊断：上一次报数时用掉的 [examinedTotal]。 */
+    private var examinedReported: Long = 0L
+
+    /** 诊断：最近一帧里离相机最近的实体距离（方块；无穷大表示这一帧一个实体都没有）。 */
+    @Volatile
+    private var nearestDistance: Double = Double.MAX_VALUE
 
     /**
-     * 一个可见物体刚完成 extract 时的回调：先把身份塞进 render state，再记一行快照。
+     * 逐帧采集入口：遍历客户端世界里可参与渲染的实体，每个记一行。
      *
-     * 泛型参数来自事件注册的 `Class<out EntityRenderer<…>>`，这里只依赖
-     * `Entity` / `EntityRenderState` 两个上界，所以基类回调可以覆盖全部 renderer。
+     * 调用点在 [D3D12Temporal.beginFrame]（时间性 jitter 推进的同一时刻）。那里是**安全的**：
+     * 实体的位置在 `Minecraft.tick()` 里就已更新，而速度 pass 要到这一帧末尾才录制。
      */
-    fun <E : Entity, S : EntityRenderState> onEntityRenderState(entity: E, state: S) {
-        callbackCount++
-        state.setRenderData(IDENTITY_KEY, entity.id)
-        record(entity, state)
-    }
-
-    /** 取出塞进 render state 的身份（0 = 没登记过）。 */
-    fun identityOf(state: EntityRenderState): Int = state.getRenderData(IDENTITY_KEY) ?: 0
-
-    /**
-     * 「路径 B」采集：**每个可见实体调一次**，由 [LevelExtractorVisibleEntitiesMixin] 挂在
-     * `LevelExtractor.extractVisibleEntities` 里 `this.extractEntity(entity, partialEntity)`
-     * 那一行之前 —— 也就是 vanilla 已经做完 `isEntityVisible` 过滤、拿到此刻精确的
-     * `partialEntity` 之后。
-     *
-     * 为什么不在方法头一次拿整张实体表：`ClientLevel.entitiesForRendering()` 返回的是
-     * **整个客户端世界**的实体（实测这个测试世界有 300+ 个），而真正走到渲染的只有通过
-     * `isEntityVisible` 的那几个（实测 1 个）。在方法头采集会把 300 个不可见实体全部当成
-     * "可见物体"，既超缓冲又会让速度着色器用错误的 AABB 覆盖大量像素。
-     *
-     * 位置用 `Mth.lerp` 复算而不是读 render state：这条路径的价值就是**不依赖**任何回调
-     * （公共 API 的 `RegisterRenderStateModifiersEvent` 实测一次都没来），而 render state
-     * 只在回调里才拿得到。`partialTick` 与 vanilla 同一来源。
-     */
-    @JvmStatic
     @Synchronized
-    fun harvest(entity: Entity, partialTick: Float) {
-        harvestCount++
+    fun harvestVisible() {
+        val minecraft = Minecraft.getInstance()
+        val level = minecraft.level ?: return
+        val camera = minecraft.gameRenderer.mainCamera()
+        val cameraPos = camera.position()
+        val camX = cameraPos.x()
+        val camY = cameraPos.y()
+        val camZ = cameraPos.z()
+        val cameraEntity = camera.entity()
+        // vanilla：相机实体自己只有在第三人称（`camera.isDetached()`）或睡觉时才被渲染。
+        val cameraEntityRenderable = camera.isDetached() ||
+            (cameraEntity is LivingEntity && cameraEntity.isSleeping)
+        val tickRateManager = level.tickRateManager()
+        val deltaTracker = minecraft.deltaTracker
+        val localPlayer = minecraft.player
+        val maxDistanceSq = MAX_DISTANCE_BLOCKS * MAX_DISTANCE_BLOCKS
+        var nearestSq = Double.MAX_VALUE
+
+        for (entity in level.entitiesForRendering()) {
+            examinedTotal++
+            val dx = entity.x - camX
+            val dy = entity.y - camY
+            val dz = entity.z - camZ
+            val distanceSq = dx * dx + dy * dy + dz * dz
+            if (distanceSq < nearestSq) {
+                nearestSq = distanceSq
+            }
+            if (entity.isRemoved || !entity.isAlive || entity.isInvisible) {
+                continue
+            }
+            if (entity === cameraEntity && !cameraEntityRenderable) {
+                continue
+            }
+            // vanilla：本地玩家在被观察（观战）时不画自己。
+            if (entity === localPlayer && entity.isSpectator) {
+                continue
+            }
+            if (distanceSq > maxDistanceSq) {
+                continue
+            }
+            val partial = deltaTracker.getGameTimeDeltaPartialTick(!tickRateManager.isEntityFrozen(entity))
+            harvest(entity, partial)
+        }
+
+        nearestDistance = if (nearestSq == Double.MAX_VALUE) Double.MAX_VALUE else sqrt(nearestSq)
+        if (harvestedThisFrame > peakThisWindow) {
+            peakThisWindow = harvestedThisFrame
+        }
+        harvestedThisFrame = 0
+    }
+
+    /**
+     * 记录一个物体的一行快照。
+     *
+     * 位置用 `Mth.lerp` 复算而不是读 `EntityRenderState`：后者只有在 extract 阶段才拿得到，
+     * 而这条路径的全部价值就是**不依赖任何回调**。`partialTick` 与 vanilla 同一来源。
+     */
+    private fun harvest(entity: Entity, partialTick: Float) {
         val partial = partialTick.toDouble()
-        seenCount++
         val id = entity.id
         val x = Mth.lerp(partial, entity.xOld, entity.x)
         val y = Mth.lerp(partial, entity.yOld, entity.y)
@@ -240,12 +249,12 @@ object D3D12ObjectMotion {
             rejectedCount++
             return
         }
-        if (currentWorldSnapshots.size >= MAX_OBJECTS && !currentWorldSnapshots.containsKey(id)) {
+        if (currentSnapshots.size >= MAX_OBJECTS && !currentSnapshots.containsKey(id)) {
             overflowCount++
             if (lastOverflowLoggedFrame != frameNumber) {
                 lastOverflowLoggedFrame = frameNumber
                 LOGGER.warn(
-                    "P76b: 物体缓冲已满（$MAX_OBJECTS 行），本帧后续可见实体不参与逐物体速度修正" +
+                    "P76b: 物体行已满（$MAX_OBJECTS 行），本帧其余物体不参与逐物体速度修正" +
                         "（累计丢弃 $overflowCount 个）"
                 )
             }
@@ -253,7 +262,7 @@ object D3D12ObjectMotion {
         }
         val halfWidth = max(entity.bbWidth * 0.5f, 0.01f)
         val halfHeight = max(entity.bbHeight * 0.5f, 0.01f)
-        currentWorldSnapshots[id] = WorldSnapshot(
+        currentSnapshots[id] = Snapshot(
             id = id,
             currX = x.toFloat(), currY = y.toFloat(), currZ = z.toFloat(),
             prevX = extrapolate(entity.xOld, entity.x, partial - 1.0).toFloat(),
@@ -266,63 +275,20 @@ object D3D12ObjectMotion {
             centerYOffset = halfHeight,
             yaw = entity.yRot
         )
-    }
-
-    /** 采集一个物体的快照。 */
-    private fun record(entity: Entity, state: EntityRenderState) {
-        val id = entity.id
-        val x = state.x
-        val y = state.y
-        val z = state.z
-        if (!x.isFinite() || !y.isFinite() || !z.isFinite()) {
-            rejectedCount++
-            return
-        }
-        if (currentSnapshots.size >= MAX_OBJECTS && !currentSnapshots.containsKey(id)) {
-            overflowCount++
-            if (lastOverflowLoggedFrame != frameNumber) {
-                lastOverflowLoggedFrame = frameNumber
-                LOGGER.warn(
-                    "P76b: 物体缓冲已满（$MAX_OBJECTS 行），本帧后续物体不参与逐物体速度修正" +
-                        "（累计丢弃 $overflowCount 个）"
-                )
-            }
-            return
-        }
-        val partial = state.partialTick.toDouble()
-        val halfWidth = max(state.boundingBoxWidth * 0.5f, 0.01f)
-        val halfHeight = max(state.boundingBoxHeight * 0.5f, 0.01f)
-        currentSnapshots[id] = Snapshot(
-            id = id,
-            currX = x.toFloat(), currY = y.toFloat(), currZ = z.toFloat(),
-            prevX = extrapolate(entity.xOld, entity.x, partial - 1.0).toFloat(),
-            prevY = extrapolate(entity.yOld, entity.y, partial - 1.0).toFloat(),
-            prevZ = extrapolate(entity.zOld, entity.z, partial - 1.0).toFloat(),
-            halfX = halfWidth,
-            halfY = halfHeight,
-            halfZ = max(halfWidth, halfHeight),
-            yaw = entity.yRot
-        )
+        harvestedThisFrame++
+        harvestedTotal++
     }
 
     /**
-     * 帧推进：把本帧采集的成品滚成「上一帧」，清空本帧的采集槽。
+     * 帧推进：清空本帧的采集槽并让帧号 +1。
      *
-     * 调用时机必须**在 extract 阶段之前**，且在速度 pass 消费完上一帧数据之后 ——
-     * 也就是 [D3D12Temporal.beginFrame] 里（与 [D3D12Velocity] 的乒乓交换同一时刻）。
+     * 调用时机与 [D3D12Velocity] 的乒乓交换同一时刻（[D3D12Temporal.beginFrame]），
+     * 紧随其后的 [harvestVisible] 再填这一帧的数据。
      */
     @Synchronized
     fun beginFrame() {
-        lastRolledCount = currentSnapshots.size
-        previousSnapshots = HashMap(currentSnapshots)
         currentSnapshots.clear()
-        // 路径 B **故意不在这里滚动**：extract 阶段跑在 [beginFrame] 之后（实机日志：
-        // `P76b 诊断` 排在速度 pass 那行之后、帧号同步），所以本帧采到的世界快照永远落在
-        // `currentWorldSnapshots` 里，只有等这一帧的录制把它消费掉才能滚走 —— 见 [writeWorldRows]。
-        if (seenThisFrame > harvestSeenRolling) {
-            harvestSeenRolling = seenThisFrame
-        }
-        seenThisFrame = 0
+        harvestedThisFrame = 0
         frameNumber++
     }
 
@@ -330,92 +296,35 @@ object D3D12ObjectMotion {
     @Synchronized
     fun reset() {
         currentSnapshots.clear()
-        previousSnapshots = emptyMap()
-        currentWorldSnapshots.clear()
-        writeWorldSnapshots = emptyMap()
+        writeSnapshots = emptyMap()
+        lastConsumedFrame = -1L
         frameNumber = 0L
-        lastRolledCount = 0
         overflowCount = 0L
         rejectedCount = 0L
-        harvestSeenRolling = 0
-        seenThisFrame = 0
+        harvestedTotal = 0L
+        harvestedReported = 0L
+        examinedTotal = 0L
+        examinedReported = 0L
+        nearestDistance = Double.MAX_VALUE
+        peakThisWindow = 0
+        harvestedThisFrame = 0
     }
 
-    /** 本帧已采集的物体数。 */
-    @Synchronized
-    fun currentCount(): Int = currentSnapshots.size
-
-    /** 上一帧采集到的物体数。 */
-    fun previousCount(): Int = previousSnapshots.size
-
-    fun lastRolled(): Int = lastRolledCount
-
-    fun overflow(): Long = overflowCount
-
-    fun rejected(): Long = rejectedCount
-
-    fun frame(): Long = frameNumber
-
     /**
-     * 有可用的物体行可写，且时间性 jitter 是开的（否则上一帧位置没有意义）。
+     * 把本帧采集到的物体写成 GPU 结构化缓冲的行，返回真正写入的行数。
      *
-     * 看 [currentWorldSnapshots]（本帧 extract 刚采的那批）而不是已消费的那份 —— 写得出去。
-     */
-    fun isActive(): Boolean =
-        D3D12Temporal.enabled && (currentWorldSnapshots.isNotEmpty() || previousSnapshots.isNotEmpty())
-
-    /**
-     * 把上一帧的快照写成 GPU 结构化缓冲的行，返回真正写入的行数。
+     * [cameraX]/[cameraY]/[cameraZ] 是**本帧**的相机世界位置（见类注释：为什么必须是本帧）。
      *
-     * 只写上一帧：速度 pass 在**本帧渲染完成之后**才录制，像素来自本帧，而它要回答的是
-     * 「这个像素上一帧在哪」，所以配对对象是上一帧的快照。
-     */
-    @Synchronized
-    fun writeRows(target: FloatArray): Int {
-        val source = previousSnapshots
-        if (source.isEmpty()) {
-            return 0
-        }
-        val capacity = target.size / ROW_FLOATS
-        val limit = if (source.size < capacity) source.size else capacity
-        var written = 0
-        for (snapshot in source.values) {
-            if (written >= limit) {
-                break
-            }
-            snapshot.writeInto(target, written * ROW_FLOATS)
-            written++
-        }
-        return written
-    }
-
-    fun describe(): String =
-        "objects(thisFrame=${currentSnapshots.size} lastFrame=${previousSnapshots.size} " +
-            "rolled=$lastRolledCount overflow=$overflowCount rejected=$rejectedCount frame=$frameNumber " +
-            "| harvest(visible=$seenCount peak=$harvestSeenRolling " +
-            "thisFrame=${currentWorldSnapshots.size} written=${writeWorldSnapshots.size}))"
-
-    /** 「路径 B」最近一次真正写进 GPU 缓冲的物体数。 */
-    fun worldCount(): Int = writeWorldSnapshots.size
-
-    /**
-     * 「路径 B」：把上一帧的世界坐标快照换算成**相机相对**坐标后写成 GPU 行。
-     *
-     * [cameraX]/[cameraY]/[cameraZ] 是**本帧**的相机世界位置。减本帧相机而不是上一帧：
-     * 静态物体在两帧的世界坐标相同，减同一个本帧相机后 `prev == curr`，差分为 0 —— 与
-     * 「静态相机 + 静态几何 ⇒ 运动矢量为 0」的既有约定一致（也正是不这样做就会把整段相机
-     * 位移当成物体速度注入的那个已知陷阱）。
+     * 每帧只滚动一次：第一次调用时把 [currentSnapshots] 拷进 [writeSnapshots]，同一帧内的
+     * 后续调用直接复用 —— 否则第二次调用会读到空槽而把行数误报成 0。
      */
     @Synchronized
     fun writeWorldRows(target: FloatArray, cameraX: Float, cameraY: Float, cameraZ: Float): Int {
-        // 滚动点在这里，不在 [beginFrame]：extract 跑在 [beginFrame] 之后，
-        // 所以「本帧渲染用的那一份世界快照」此刻正躺在 [currentWorldSnapshots] 里，
-        // 它才是速度着色器要的「上一帧」（每行自带 `pos(p)` 与 `pos(p-1)` 两个端点）。
-        // 消费一次即滚走，下一帧不会再被写出去。
-        if (currentWorldSnapshots.isNotEmpty()) {
-            writeWorldSnapshots = HashMap(currentWorldSnapshots)
+        if (lastConsumedFrame != frameNumber) {
+            writeSnapshots = HashMap(currentSnapshots)
+            lastConsumedFrame = frameNumber
         }
-        val source = writeWorldSnapshots
+        val source = writeSnapshots
         if (source.isEmpty()) {
             return 0
         }
@@ -430,7 +339,7 @@ object D3D12ObjectMotion {
             target[offset + FIELD_ID] = snapshot.id.toFloat()
             target[offset + FIELD_CUR_X] = snapshot.currX - cameraX
             // 实体的渲染原点是**脚**，而包围盒以几何中心为准 —— 把这一行抬到盒子中心，
-            // 否则着色器会把 [y, y+2*halfHeight] 当成 [-halfHeight, +halfHeight]。
+            // 否则着色器会把 [y, y + 2 * halfHeight] 当成 [-halfHeight, +halfHeight]。
             target[offset + FIELD_CUR_Y] = snapshot.currY - cameraY + snapshot.centerYOffset
             target[offset + FIELD_CUR_Z] = snapshot.currZ - cameraZ
             target[offset + FIELD_PREV_X] = snapshot.prevX - cameraX
@@ -445,55 +354,33 @@ object D3D12ObjectMotion {
         return written
     }
 
+    /** 最近一次交给 GPU 的物体行数。 */
+    fun worldCount(): Int = writeSnapshots.size
+
+    fun describe(): String =
+        "objects(thisFrame=${currentSnapshots.size} written=${writeSnapshots.size} " +
+            "overflow=$overflowCount rejected=$rejectedCount peak=$peakThisWindow frame=$frameNumber)"
+
     /**
-     * 诊断：每 [LOG_INTERVAL_FRAMES] 帧报一次回调与采集情况。
+     * 诊断：每 [LOG_INTERVAL_FRAMES] 帧报一次采集情况。
      *
-     * 存在的理由：`objects=0` 有两种完全不同的成因 —— **回调没挂上** 与 **这帧真的没有可见物体**。
-     * 只看物体数分不出来，而这两者的修法完全不同。`fired` 是自上次报告以来的回调增量，
-     * `harvested` 是同一区间内 [harvest] 看到的实体数增量 —— 两者一起看即可判定：
-     *
-     * - `harvested=0`：这帧**真的**没有可见实体，`fired=0` 不代表钩子有问题；
-     * - `harvested>0` 而 `fired=0`：回调路径确实没生效，走「路径 B」。
+     * `harvested` 是区间内 [harvest] 记下的物体数增量。它是 0 就说明**这帧真的没有**满足
+     * 过滤条件的实体（而不是采集没接上）；非 0 而 `written` 还是 0，才是缓冲/上传那一段的问题。
      */
     @Synchronized
     fun logProbe() {
         if (frameNumber % LOG_INTERVAL_FRAMES != 0L) {
             return
         }
-        val fired = callbackCount - lastCallbackReported
-        lastCallbackReported = callbackCount
-        val harvested = harvestCount - lastHarvestReported
-        lastHarvestReported = harvestCount
+        val harvested = harvestedTotal - harvestedReported
+        harvestedReported = harvestedTotal
+        val examined = examinedTotal - examinedReported
+        examinedReported = examinedTotal
+        val nearest = if (nearestDistance == Double.MAX_VALUE) "n/a" else "%.1f".format(Locale.ROOT, nearestDistance)
         LOGGER.info(
-            "P76b 诊断: fired=$fired (累计 $callbackCount) harvestCalls=$harvested (累计 $harvestCount) " +
-                "objects(thisFrame=${currentSnapshots.size} lastFrame=${previousSnapshots.size}) " +
-                "harvest(thisFrame=${currentWorldSnapshots.size} written=${writeWorldSnapshots.size} " +
-                "seen=$seenCount peak=$harvestSeenRolling) " +
-                "rolled=$lastRolledCount overflow=$overflowCount rejected=$rejectedCount frame=$frameNumber " +
-                "| ${visibleEntityProbe()}"
+            "P76b 诊断: harvested=$harvested (累计 $harvestedTotal) peak=$peakThisWindow " +
+                "| examined=$examined nearest=${nearest}格 | ${describe()}"
         )
-    }
-
-    /**
-     * 诊断：当前客户端世界里有多少实体可参与渲染，以及相机实体是否被排除。
-     *
-     * 为什么需要：`fired=0` 有两种成因 —— 钩子没挂上、或确实没有可见实体（相机实体在第一人称下
-     * 被 `LevelExtractor` 排除）。这两个数字能把它们分开。
-     */
-    private fun visibleEntityProbe(): String {
-        val level = Minecraft.getInstance().level ?: return "no world"
-        return runCatching {
-            val camera = Minecraft.getInstance().cameraEntity
-            var self = 0
-            var total = 0
-            for (entity in level.entitiesForRendering()) {
-                total++
-                if (entity === camera) {
-                    self++
-                }
-            }
-            "level: visible=$total cameraEntity=$self"
-        }.getOrElse { "probe failed: $it" }
     }
 
     /**

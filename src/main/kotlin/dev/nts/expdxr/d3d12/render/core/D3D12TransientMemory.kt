@@ -127,38 +127,61 @@ class D3D12TransientMemory(private val ctx: Long, private val ensureListOpen: Ru
         if (IllusionLogger.debugEnabled()) {
             checkForNanInfinity(data, "uploadStaging")
         }
-        var offset = allocateInStagingBlock(total, alignment)
-        // P108z（用户 m11203 的崩溃：`dx12MapBuffer returned null`）：
-        // staging 块不可映射**绝不能**把整帧打断。这里换一块重试一次；两次都失败才抛出，
-        // 并且把块的句柄/容量/关闭状态写进异常与日志，下一次复现能直接定位是哪一块。
+        // P108z（用户 m11203 的崩溃：`dx12MapBuffer returned null`）：staging 块不可映射
+        // **绝不能**把整帧打断。分配 + 写入 + 换块重试全在 [writeIntoStagingBlock] 里。
+        val write = writeIntoStagingBlock(total, alignment) { dst ->
+            for (buffer in data) {
+                dst.put(buffer.duplicate())
+            }
+            total
+        }
+        return write.getOrThrow().first
+    }
+
+    /**
+     * P108z：在本帧 staging 块内分配 [total] 字节、把数据写进去，返回 `(切片, 写入的总字节数)`。
+     *
+     * <p>这是 [uploadStaging] / [multiUploadStaging] 共用的写入口。**映射失败不再直接抛异常** ——
+     * 用户 m11203 的崩溃（`dx12MapBuffer returned null`）就发生在 `stagingBlock!!.map(...)` 上，
+     * 它会把整个渲染帧打断。现在改成：
+     * <ol>
+     *   <li>映射 + 写入；成功就返回块内切片（与改动前逐字一样）；</li>
+     *   <li>失败就 [reportStagingMapFailure] 打一行 WARN（块句柄 / 容量 / 是否已关闭 / 偏移 / 长度 /
+     *       异常原文），[discardStagingBlock] 丢弃它，重新分配一块再试；</li>
+     *   <li>连续失败 [MAX_STAGING_MAP_RETRIES] 次以上才抛出 —— 那是设备/内存层面的问题，早点报错
+     *       比每帧刷屏好。</li>
+     * </ol>
+     *
+     * @param write 收到可写缓冲；返回**实际写入的字节数**（`multiUploadStaging` 里可能为 0）。
+     */
+    private fun writeIntoStagingBlock(total: Long, alignment: Long,
+        write: (ByteBuffer) -> Long): Result<Pair<GpuBufferSlice, Long>> {
         var attempt = 0
         while (true) {
+            val offset = allocateInStagingBlock(total, alignment)
             val block = this.stagingBlock
                 ?: error("transientMemory: no staging block after allocateInStagingBlock")
+            var written = 0L
             val failure = try {
                 block.map(offset, total, false, true).use { view ->
-                    val dst = view.data()
-                    for (buffer in data) {
-                        dst.put(buffer.duplicate())
-                    }
+                    written = write(view.data())
                 }
                 null
             } catch (t: Throwable) {
                 t
             }
             if (failure == null) {
-                return block.slice(offset, total)
+                return Result.success(block.slice(offset, written) to written)
             }
             reportStagingMapFailure(block, offset, total, attempt, failure)
             if (attempt >= MAX_STAGING_MAP_RETRIES) {
-                throw IllegalStateException(
+                return Result.failure(IllegalStateException(
                     "staging block 0x${block.handle().toULong().toString(16)} (${block.size()} bytes, "
                         + "closed=${block.isClosed()}) could not be mapped at $offset+$total after "
-                        + "${attempt + 1} attempt(s)", failure)
+                        + "${attempt + 1} attempt(s)", failure))
             }
             attempt++
             discardStagingBlock(block)
-            offset = allocateInStagingBlock(total, alignment)
         }
     }
 
@@ -218,16 +241,17 @@ class D3D12TransientMemory(private val ctx: Long, private val ensureListOpen: Ru
             checkForNanInfinity(data, "multiUploadStaging")
         }
         // P54：每个输入在本帧 staging 块内独立占一段，全部返回块内切片。
+        // P108z：与 [uploadStaging] 共用同一条"坏块就换一块重试"的写入口。
         val result = mutableListOf<GpuBufferSlice>()
         for (buffer in data) {
             val length = buffer.remaining()
-            val offset = allocateInStagingBlock(length.toLong(), alignment)
-            if (length > 0) {
-                this.stagingBlock!!.map(offset, length.toLong(), false, true).use { view ->
-                    view.data().put(buffer.duplicate())
+            val write = writeIntoStagingBlock(length.toLong(), alignment) { dst ->
+                if (length > 0) {
+                    dst.put(buffer.duplicate())
                 }
+                length.toLong()
             }
-            result.add(this.stagingBlock!!.slice(offset, length.toLong()))
+            result.add(write.getOrThrow().first)
         }
         return result
     }

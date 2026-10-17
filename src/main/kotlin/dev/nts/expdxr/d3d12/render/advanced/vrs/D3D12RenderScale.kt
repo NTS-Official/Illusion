@@ -150,6 +150,14 @@ object D3D12RenderScale {
         // 2) 载入目标模式的值。
         val restored = values[target]
         mode = target
+        // P108aa：DLAA 锁定期间缩放必须恒为 100 —— 绝不能让"DLSS 模式的 50..90"把它夹走
+        //（实测过：DLAA 生效后 `setDlssMode(true)` 把 100 夹成 90，于是 render 2304x1200 而
+        // target 2560x1334，native 的 DLAA 分支直接拒绝）。模式切换照做，取值交给 DLAA 锁。
+        if (dlaaLock) {
+            OPTION.set(100)
+            store(OPTION.get())
+            return true
+        }
         // 3) 应用。这里有一个 vanilla 的坑：`OptionInstance.set` 在 `Minecraft.isRunning()` 为假时
         // **只改 option 的值、不触发回调**（见 `OptionInstance.set`），而 `Options.load` 恰好跑在
         // `Minecraft` 构造函数里 —— 那时 `isRunning()` 还是 false。于是回调里的 `apply`（写状态 +
@@ -197,8 +205,7 @@ object D3D12RenderScale {
      * 所以手柄位置与刻度一一对应。
      */
     private object PercentRange : OptionInstance.SliderableValueSet<Int> {
-        override fun validateValue(value: Int): Optional<Int> =
-            Optional.of(snap(value).coerceIn(minOf(), maxOf()))
+        override fun validateValue(value: Int): Optional<Int> = Optional.of(denormalise(value))
 
         override fun codec(): Codec<Int> = Codec.intRange(MIN_PERCENT, MAX_PERCENT)
 
@@ -212,7 +219,7 @@ object D3D12RenderScale {
             val raw = Mth.floor(
                 Mth.map(slider.coerceIn(0.0, 1.0), 0.0, 1.0, minOf().toDouble(), maxOf() + 1.0),
             )
-            return snap(raw).coerceIn(minOf(), maxOf())
+            return denormalise(raw)
         }
 
         override fun next(current: Int): Optional<Int> =
@@ -221,6 +228,48 @@ object D3D12RenderScale {
         override fun previous(current: Int): Optional<Int> =
             Optional.of((current - stepOf()).coerceAtLeast(minOf()))
     }
+
+    /**
+     * DLAA 锁定（用户 m11796）：DLAA 要求**渲染分辨率 == 目标分辨率**，所以选中 DLAA 时把缩放
+     * 强制为 **100**，并且让滑条无论怎么拖都只给出 100（[denormalise]）。由
+     * `D3D12AntiAliasing` 在选中/离开 DLAA 时调用。
+     *
+     * <p>为什么不干脆把滑条隐藏：vanilla 的控件是建界面时按 `PercentRange` 造好的，隐藏要走
+     * `OptionsList` 的 rebuild（工程里没有干净入口）。置灰 + 取值恒为 100 的语义最直白，
+     * 界面侧再由 `VideoSettingsScreenMixin` 把滑条 disable 掉。
+     */
+    @Volatile
+    private var dlaaLock: Boolean = false
+
+    /** 界面临时置灰的依据。 */
+    @JvmStatic
+    fun isLockedByDlaa(): Boolean = dlaaLock
+
+    /**
+     * 选中/离开 DLAA 时调用。进入锁定时把缩放**立刻**置为 100（走正常 setter：会重建主渲染目标），
+     * 离开时保持当前值不动（100 在任何模式下都合法）。
+     */
+    @JvmStatic
+    fun setDlaaLock(active: Boolean) {
+        if (dlaaLock == active) {
+            return
+        }
+        dlaaLock = active
+        Illusion.LOGGER.info(
+            "[${Illusion.MODID}] P105: DLAA {} render-scale lock; DLAA needs render == target, so "
+                + "the scale is {}100%",
+            if (active) "engaged the" else "released the", if (active) "pinned to " else "free from ")
+        if (active) {
+            OPTION.set(100)
+            store(OPTION.get())
+        }
+    }
+
+    /**
+     * 把滑条给出的原始值规整成**当前允许的**取值：DLAA 锁定期间恒为 100，否则按模式步进吸附并夹取。
+     */
+    private fun denormalise(value: Int): Int =
+        if (dlaaLock) 100 else snap(value).coerceIn(minOf(), maxOf())
 
     /**
      * 吸附公式：离 [value] 最近的**当前步进**的倍数，从 [minOf] 起算。非 DLSS 模式即

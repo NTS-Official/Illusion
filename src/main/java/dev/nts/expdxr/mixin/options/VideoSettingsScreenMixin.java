@@ -77,14 +77,12 @@ public abstract class VideoSettingsScreenMixin {
             return;
         }
         list.addHeader(Component.translatable("options.video.illusion.header"));
-        list.addSmall(D3D12RenderScale.option(), D3D12VariableShadingRate.option());
+        list.addBig(D3D12RenderScale.option());
+        list.addSmall(D3D12VariableShadingRate.option());
         // P108b（用户 m10920）：DLSS 单开一行，不再占抗锯齿那个循环按钮的第 4 格。`addSmall` 的
         // 第二格传 null 就得到"这一行只有左边一个按钮"（vanilla 的 OptionsList.Entry.small 对 null
         // 走单控件分支），不必造一个占位控件；DLSS 也不参与原版画质预设，与这一栏的另外两项一致。
-        list.addSmall(DeepLearningSuperSampling.option(), null);
-        // P108y（用户 m11147）：挡位（性能/平衡/质量）单独一个按钮，占满一行 —— 与上面的开关同一栏，
-        // 视觉上紧跟在开关后面；它同样不参与原版画质预设。
-        list.addSmall(DeepLearningSuperSampling.qualityOption(), null);
+        list.addSmall(DeepLearningSuperSampling.option(), DeepLearningSuperSampling.qualityOption());
     }
 
     @Inject(method = "tick", at = @At("TAIL"))
@@ -95,10 +93,16 @@ public abstract class VideoSettingsScreenMixin {
         }
         dxr_mc$setButtonActive(list, D3D12AntiAliasing.option(),
                 D3D12AntiAliasing.isAvailable() && !D3D12AntiAliasing.isLockedByDlss());
-        dxr_mc$setButtonActive(list, D3D12RenderScale.option(), D3D12RenderScale.isAvailable());
+        // P108aa（用户 m11796）：DLAA 要求 render == target，缩放缓条在 DLAA 期间置灰（值钉在 100）。
+        dxr_mc$setButtonActive(list, D3D12RenderScale.option(),
+                D3D12RenderScale.isAvailable() && !D3D12RenderScale.isLockedByDlaa());
         dxr_mc$setButtonActive(list, D3D12VariableShadingRate.option(), D3D12VariableShadingRate.isAvailable());
-        dxr_mc$setButtonActive(list, DeepLearningSuperSampling.option(), DeepLearningSuperSampling.isAvailable());
-        dxr_mc$setButtonActive(list, DeepLearningSuperSampling.qualityOption(), DeepLearningSuperSampling.isAvailable());
+        // P108aa：抗锯齿 = DLAA 时 DLSS 由抗锯齿选项接管，这两个按钮置灰（tooltip 里已说明）。
+        boolean dlaaOwnsDlss = DeepLearningSuperSampling.isDlaaActive();
+        dxr_mc$setButtonActive(list, DeepLearningSuperSampling.option(),
+                DeepLearningSuperSampling.isAvailable() && !dlaaOwnsDlss);
+        dxr_mc$setButtonActive(list, DeepLearningSuperSampling.qualityOption(),
+                DeepLearningSuperSampling.isAvailable() && !dlaaOwnsDlss);
     }
 
     private void dxr_mc$setButtonActive(OptionsList list, OptionInstance<?> option, boolean active) {
