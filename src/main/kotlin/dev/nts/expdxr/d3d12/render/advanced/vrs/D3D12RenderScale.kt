@@ -95,6 +95,40 @@ object D3D12RenderScale {
     @Volatile
     private var percent: Int = 100
 
+    /**
+     * P76i（用户 m10601）：**滑条需要重新同步**的代号，每次由本类自己（而不是玩家拖滑条）
+     * 改动取值时自增。
+     *
+     * 为什么需要它：vanilla 的 `OptionInstanceSliderButton` 只在**构造**时和 `onRelease` 调
+     * `resetValue()` 的那一刻，才把滑块位置对齐到 `OptionInstance.get()`；`OptionInstance.set`
+     * 又是一条"值没变就什么都不做"的路径（见 `OptionInstance.set` 里的 `Objects.equals`）。
+     * 于是切 DLSS 开关、进/出 DLAA 时，模型里的百分比已经变了，画面上那个滑条却**停在旧位置**，
+     * 而它的标题又是拿"旧位置 + 新取值范围"算出来的 —— 显示的数字和真正生效的值可以完全无关
+     * （实测：DLAA 把缩放钉到 100%，滑条却按 DLSS 的 50..90 把同一个位置读成 50%）。
+     *
+     * 界面侧（`VideoSettingsScreenMixin`）每 tick 比对一次代号，变了就调
+     * `OptionsList.resetOption` —— 那是 vanilla 自己的公共入口，内部就是
+     * `ResettableOptionWidget.resetValue()`。本类不认识任何界面对象，依赖方向保持单向。
+     */
+    @Volatile
+    private var syncGeneration: Int = 0
+
+    /** 界面据此判断"该重新同步滑条了"。只增不减。 */
+    @JvmStatic
+    fun syncGeneration(): Int = syncGeneration
+
+    /**
+     * 界面把滑条重新对齐到生效值之后打一行（P76i）。只在代号变化时调用（切 DLSS 开关、进/出
+     * DLAA），所以每次切换最多一行 —— 它是"界面确实刷新了"的取证判据，滑条的数字对不上时先看它。
+     */
+    @JvmStatic
+    fun logSliderResync() {
+        Illusion.LOGGER.info(
+            "[${Illusion.MODID}] P76i: render-scale slider re-synced to {}% ({} mode, range {}..{}%, step {}%)",
+            percent, if (mode == MODE_DLSS) "DLSS" else "plain", minOf(), maxOf(), stepOf(),
+        )
+    }
+
     private fun minOf(): Int = if (mode == MODE_DLSS) DLSS_MIN_PERCENT else MIN_PERCENT
 
     private fun maxOf(): Int = if (mode == MODE_DLSS) DLSS_MAX_PERCENT else MAX_PERCENT
@@ -103,7 +137,11 @@ object D3D12RenderScale {
 
     @JvmStatic
     fun setPercent(value: Int) {
-        percent = value.coerceIn(minOf(), maxOf())
+        // P108aa（用户 m11796）：DLAA 锁定是**最高优先级**，比模式夹取更早生效。曾经只把锁加在
+        // 滑条取值（[denormalise]）上，而 `apply` → `store` → `setPercent` 仍会把 100 夹回 DLSS
+        // 模式的 90：主目标附件按 90% 分配、native 拒绝 DLAA（render != target）并每帧重建 NGX
+        // 特征。所有路径（滑条、`setDlssMode`、`load`、`store`）最终都走这里，所以锁必须在这里生效。
+        percent = if (dlaaLock) DEFAULT_PERCENT else value.coerceIn(minOf(), maxOf())
     }
 
     @JvmStatic
@@ -145,17 +183,21 @@ object D3D12RenderScale {
         if (target == mode) {
             return false
         }
-        // 1) 当前模式的值存回自己的键（内存镜像）。
-        values[mode] = OPTION.get()
-        // 2) 载入目标模式的值。
+        // 1) 当前模式的值存回自己的键（内存镜像）。DLAA 锁定期间 `OPTION` 是 100，不是用户值 ——
+        //    拿它覆盖记忆会让"退出 DLAA 恢复原值"变成恢复 100。
+        if (!dlaaLock) {
+            values[mode] = OPTION.get()
+        }
+        // 2) 载入目标模式的值（锁定期间只留在记忆里，不生效）。
         val restored = values[target]
         mode = target
         // P108aa：DLAA 锁定期间缩放必须恒为 100 —— 绝不能让"DLSS 模式的 50..90"把它夹走
         //（实测过：DLAA 生效后 `setDlssMode(true)` 把 100 夹成 90，于是 render 2304x1200 而
         // target 2560x1334，native 的 DLAA 分支直接拒绝）。模式切换照做，取值交给 DLAA 锁。
         if (dlaaLock) {
-            OPTION.set(100)
-            store(OPTION.get())
+            // 补齐状态 + 按需重建 + 让滑条重新同步，全在 [setProgrammatically] 里。
+            setProgrammatically(DEFAULT_PERCENT)
+            logModeSwitch()
             return true
         }
         // 3) 应用。这里有一个 vanilla 的坑：`OptionInstance.set` 在 `Minecraft.isRunning()` 为假时
@@ -166,9 +208,39 @@ object D3D12RenderScale {
         //   - 游戏在跑：`OPTION.set` 会触发 `apply`（顺带重建主目标），下面那次 [store] 是幂等的；
         //   - 游戏没跑：回调不会来，由下面那次 [store] 顶上。主目标此刻还不存在，本来也不需要重建
         //     （它会在第一次创建时按新比例分配），所以这里**不**调 `rebuildMainTarget()`。
-        OPTION.set(restored)
-        store(OPTION.get())
-        // `apply` 已经把 values[target] 写成实际生效值；这里把它读回来打日志。
+        setProgrammatically(restored)
+        logModeSwitch()
+        return true
+    }
+
+    /** [setDlssMode] / [setDlaaLock] 里"我们自己改值"的统一入口（P76i）。 */
+    private fun setProgrammatically(value: Int) {
+        val appliesBefore = applyCount
+        OPTION.set(value)
+        val effective = denormalise(value)
+        if (percent != effective) {
+            // 回调没来（值没变 ⇒ vanilla 的 `set` 直接返回；或游戏还没跑起来 ⇒ 只改值）。
+            store(effective)
+        }
+        // P76i（用户 m10601）：值**没变**时 vanilla 完全不会触发回调，主目标因此不会重建 ——
+        // 但 AA / DLSS 已经换了模式，渲染链该按新模式重新长一遍。这里在"回调确实没跑"的
+        // 情况下强制补一次重建（排在帧边界，见 [rebuildMainTarget]），值变了的那条路
+        // `apply` 已经重建过，不重复。
+        if (applyCount == appliesBefore) {
+            rebuildMainTarget()
+        }
+        syncGeneration++
+    }
+
+    /**
+     * `apply` 被调用的次数（P76i）。[setProgrammatically] 用它判断 `OptionInstance.set` **到底有没有**
+     * 触发回调：vanilla 在"值没变"与"游戏还没跑起来"两种情况下都不调，那条路径得由我们自己补重建。
+     */
+    @Volatile
+    private var applyCount: Int = 0
+
+    /** [setDlssMode] 的取证行：两个键与生效值一起打出来。 */
+    private fun logModeSwitch() {
         Illusion.LOGGER.info(
             "[${Illusion.MODID}] P105: renderScale 范围随 DLSS 切换：{}（{}..{}，步进 {}%）；生效 {}%，" +
                 "两个键 {}={} / {}={}",
@@ -176,7 +248,6 @@ object D3D12RenderScale {
             minOf(), maxOf(), stepOf(), percent,
             OPTIONS_KEY, values[MODE_PLAIN], DLSS_OPTIONS_KEY, values[MODE_DLSS],
         )
-        return true
     }
 
     /**
@@ -209,11 +280,13 @@ object D3D12RenderScale {
 
         override fun codec(): Codec<Int> = Codec.intRange(MIN_PERCENT, MAX_PERCENT)
 
-        override fun toSliderValue(value: Int): Double = when (value) {
-            minOf() -> 0.0
-            maxOf() -> 1.0
-            else -> Mth.map(value + 0.5, minOf().toDouble(), maxOf() + 1.0, 0.0, 1.0)
-        }
+        override fun toSliderValue(value: Int): Double =
+            // DLAA 锁定时取值恒为 100，落在 DLSS 模式的 50..90 之外；直接贴到最右端。
+            if (dlaaLock) 1.0 else when (value) {
+                minOf() -> 0.0
+                maxOf() -> 1.0
+                else -> Mth.map(value + 0.5, minOf().toDouble(), maxOf() + 1.0, 0.0, 1.0)
+            }
 
         override fun fromSliderValue(slider: Double): Int {
             val raw = Mth.floor(
@@ -223,10 +296,16 @@ object D3D12RenderScale {
         }
 
         override fun next(current: Int): Optional<Int> =
-            Optional.of((current + stepOf()).coerceAtMost(maxOf()))
+            Optional.of(
+                if (dlaaLock) DEFAULT_PERCENT
+                else (current + stepOf()).coerceAtMost(maxOf()),
+            )
 
         override fun previous(current: Int): Optional<Int> =
-            Optional.of((current - stepOf()).coerceAtLeast(minOf()))
+            Optional.of(
+                if (dlaaLock) DEFAULT_PERCENT
+                else (current - stepOf()).coerceAtLeast(minOf()),
+            )
     }
 
     /**
@@ -247,7 +326,7 @@ object D3D12RenderScale {
 
     /**
      * 选中/离开 DLAA 时调用。进入锁定时把缩放**立刻**置为 100（走正常 setter：会重建主渲染目标），
-     * 离开时保持当前值不动（100 在任何模式下都合法）。
+     * 离开时恢复**锁定前该模式的用户值**（DLAA 期间 `apply` 不写回记忆，见 [apply]）。
      */
     @JvmStatic
     fun setDlaaLock(active: Boolean) {
@@ -260,8 +339,20 @@ object D3D12RenderScale {
                 + "the scale is {}100%",
             if (active) "engaged the" else "released the", if (active) "pinned to " else "free from ")
         if (active) {
-            OPTION.set(100)
-            store(OPTION.get())
+            val before = percent
+            setProgrammatically(DEFAULT_PERCENT)
+            // 游戏没跑时回调不会触发；本来就已经 100% 时回调也不改变状态 —— 两种情况都补一行
+            // 显式读数（DLAA 的验收判据要求看到 `render scale = 100%`）。
+            if (percent == before) {
+                logScaleState()
+            }
+        } else {
+            val restored = denormalise(values[mode])
+            val before = percent
+            setProgrammatically(restored)
+            if (percent == before) {
+                logScaleState()
+            }
         }
     }
 
@@ -312,7 +403,12 @@ object D3D12RenderScale {
 
     /** 选项回调：记状态 → 日志 → 主目标按新比例重建。只改**当前模式**的键。 */
     private fun apply(value: Int) {
-        storeValue(value)
+        applyCount++
+        // DLAA 锁定期间 `OPTION` 被强制成 100，那**不是**用户值：写回记忆会把用户原来的 70
+        // 覆盖掉，退出 DLAA 就恢复不出来。用户值留在 values[mode] 里不动。
+        if (!dlaaLock) {
+            storeValue(value)
+        }
         store(value)
         rebuildMainTarget()
     }
@@ -323,8 +419,21 @@ object D3D12RenderScale {
      */
     private fun store(value: Int) {
         setPercent(value)
+        logScaleState()
+    }
+
+    /** 当前生效缩放的一行取证日志：[store] 与 DLAA 锁定/释放共用，避免只读到"模式范围"却看不到生效值。 */
+    private fun logScaleState() {
         if (percent == DEFAULT_PERCENT) {
-            Illusion.LOGGER.info("[${Illusion.MODID}] render scale off: the world is shaded at window resolution")
+            if (dlaaLock) {
+                Illusion.LOGGER.info(
+                    "[${Illusion.MODID}] render scale = 100% (DLAA lock: render == target is required, "
+                        + "so the scale stays pinned until DLAA is released)",
+                )
+            } else {
+                Illusion.LOGGER.info(
+                    "[${Illusion.MODID}] render scale off: the world is shaded at window resolution")
+            }
         } else {
             Illusion.LOGGER.info(
                 "[${Illusion.MODID}] render scale = $percent%; the world's render target is created at that " +
@@ -343,6 +452,15 @@ object D3D12RenderScale {
      *
      * 全部动作都排到客户端线程（`RenderTarget.resize` 里有 `assertOnRenderThread`），并且是尽力而为：
      * 失败就算了，下次窗口尺寸变化或下次启动一样会生效。
+     *
+     * <p>P108aa（用户 m11796 崩溃修复）：**必须排到帧边界，不能就地重建**。`Minecraft.execute`
+     * 在渲染线程上会**内联执行**（`BlockableEventLoop.execute`：`scheduleExecutables()` 在
+     * `runningTask() == false && isSameThread()` 时为假 → `doRunTask`），而 DLAA 释放 / 滑条
+     * 回调正是从 `GameRenderer.render` 内的钩子来的 —— 就地 `gameRenderer.resize` 会关掉本帧仍在
+     * 使用的深度纹理，随后 `GameRenderer.render:443` 的 `clearDepthTexture` 抛
+     * `IllegalStateException: Depth texture is closed`（实测 crash-2026-10-17_16.57.21）。
+     * `Minecraft.schedule` 只入队，由 `Minecraft.runTick` 的 `scheduledExecutables`
+     * （`runAllTasks`，在 `tick()` / `renderFrame()` 之前）执行，于是重建落在帧边界。
      */
     private fun rebuildMainTarget() {
         val minecraft = try {
@@ -358,18 +476,23 @@ object D3D12RenderScale {
             return
         }
         try {
-            minecraft.execute {
-                try {
-                    val window = minecraft.window
-                    minecraft.gameRenderer.resize(window.width, window.height)
-                    Illusion.LOGGER.info("[${Illusion.MODID}] main render target re-created for the new render scale.")
-                } catch (t: Throwable) {
-                    Illusion.LOGGER.warn(
-                        "[${Illusion.MODID}] could not re-create the main render target now ($t); the new render " +
-                            "scale applies on the next window resize or restart.",
-                    )
-                }
-            }
+            // 只入队，**不用** `execute`：后者在渲染线程上会内联执行（见上面的说明）。
+            minecraft.schedule(
+                Runnable {
+                    try {
+                        val window = minecraft.window
+                        minecraft.gameRenderer.resize(window.width, window.height)
+                        Illusion.LOGGER.info(
+                            "[${Illusion.MODID}] main render target re-created for the new render scale.",
+                        )
+                    } catch (t: Throwable) {
+                        Illusion.LOGGER.warn(
+                            "[${Illusion.MODID}] could not re-create the main render target now ($t); the new render " +
+                                "scale applies on the next window resize or restart.",
+                        )
+                    }
+                },
+            )
         } catch (t: Throwable) {
             Illusion.LOGGER.warn(
                 "[${Illusion.MODID}] could not schedule the main render target refresh ($t); the new render " +
@@ -410,12 +533,14 @@ object D3D12RenderScale {
             Illusion.LOGGER.warn("[${Illusion.MODID}] could not read $OPTIONS_KEY from $file", t)
             return
         }
-        // 当前模式下记住的值由 PercentRange.validateValue 吸附/夹取后生效。
-        OPTION.set(values[mode])
+        // 当前模式下记住的值吸附/夹取后生效。DLAA 锁定期间不论文件里写的是多少都只能是 100；
+        // 用户原值已读进 values[mode]，退出锁定时恢复。
+        val effective = denormalise(values[mode])
+        OPTION.set(effective)
         // OPTION.set 在游戏没跑起来时不触发回调（与 D3D12AntiAliasing/DeepLearningSuperSampling 同理），
         // 所以这里补一次"只记状态、不重建主目标"的路径（主目标本来就是按新比例创建的）。
-        if (percent != OPTION.get()) {
-            store(OPTION.get())
+        if (percent != effective) {
+            store(effective)
         }
     }
 
@@ -432,7 +557,11 @@ object D3D12RenderScale {
             return
         }
         try {
-            values[mode] = OPTION.get()
+            // DLAA 锁定期间 `OPTION` 是锁定用的 100，不是用户值：写盘要保留记忆里的原值，
+            // 下次启动（DLAA 仍选中时）再由锁定作用到 100，退出 DLAA 才恢复得回来。
+            if (!dlaaLock) {
+                values[mode] = OPTION.get()
+            }
             val eol = System.lineSeparator()
             val owned = MODE_KEYS.toSet()
             val kept = file.readLines(StandardCharsets.UTF_8)
@@ -539,6 +668,13 @@ object D3D12RenderScale {
             // 取证用：只有真正缩放时才打；主目标每次（重）建纹理最多四行
             // （allocateColorAttachment / allocateDepthAttachment 两处分配 × 宽、高各一）。
             Illusion.LOGGER.info("P105: 主渲染目标附件 {} -> {}（renderScale={}%）", value, result, percent)
+        } else if (dlaaLock && percent == DEFAULT_PERCENT) {
+            // DLAA 的验收条件就是"附件尺寸 == 窗口尺寸"，所以 100% 时也要留一行显式读数
+            //（`result == value` 是恒等变换，正常路径刻意不打，以免变成每帧日志）。
+            Illusion.LOGGER.info(
+                "P105: 主渲染目标附件 {} -> {}（renderScale=100%，DLAA 锁定：render == target）",
+                value, result,
+            )
         }
         return result
     }

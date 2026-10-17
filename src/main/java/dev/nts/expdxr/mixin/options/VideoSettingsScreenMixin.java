@@ -14,6 +14,7 @@ import net.minecraft.client.gui.screens.options.OptionsSubScreen;
 import net.minecraft.client.gui.screens.options.VideoSettingsScreen;
 import net.minecraft.network.chat.Component;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -54,6 +55,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  */
 @Mixin(VideoSettingsScreen.class)
 public abstract class VideoSettingsScreenMixin {
+    /**
+     * P76i（用户 m10601）：上一次把渲染缩放滑条对齐到生效值时看到的
+     * {@link D3D12RenderScale#syncGeneration()}。{@code MIN_VALUE} 让第一帧必定对齐一次。
+     */
+    @Unique
+    private int dxr_mc$renderScaleSynced = Integer.MIN_VALUE;
+
     @Inject(method = "qualityOptions", at = @At("RETURN"), cancellable = true)
     private static void dxr_mc$addAntiAliasing(Options options, CallbackInfoReturnable<OptionInstance<?>[]> cir) {
         OptionInstance<?>[] vanilla = cir.getReturnValue();
@@ -78,11 +86,8 @@ public abstract class VideoSettingsScreenMixin {
         }
         list.addHeader(Component.translatable("options.video.illusion.header"));
         list.addBig(D3D12RenderScale.option());
-        list.addSmall(D3D12VariableShadingRate.option());
-        // P108b（用户 m10920）：DLSS 单开一行，不再占抗锯齿那个循环按钮的第 4 格。`addSmall` 的
-        // 第二格传 null 就得到"这一行只有左边一个按钮"（vanilla 的 OptionsList.Entry.small 对 null
-        // 走单控件分支），不必造一个占位控件；DLSS 也不参与原版画质预设，与这一栏的另外两项一致。
-        list.addSmall(DeepLearningSuperSampling.option(), DeepLearningSuperSampling.qualityOption());
+        list.addSmall(D3D12VariableShadingRate.option(), DeepLearningSuperSampling.option());
+        list.addSmall(DeepLearningSuperSampling.presetOption(), DeepLearningSuperSampling.qualityOption());
     }
 
     @Inject(method = "tick", at = @At("TAIL"))
@@ -90,6 +95,17 @@ public abstract class VideoSettingsScreenMixin {
         OptionsList list = ((OptionsSubScreen) (Object) this).list;
         if (list == null) {
             return;
+        }
+        // P76i（用户 m10601）：切 DLSS 开关 / 进出行 DLAA 会同时改缩放的**取值范围**与**生效值**，
+        // 而 vanilla 的滑条只在构造和松手时对齐 `OptionInstance.get()`；`OptionInstance.set` 在
+        // 值没变时更是连回调都不来。滑条于是停在旧位置，标题又拿"旧位置 + 新范围"算 —— 显示的数字
+        // 可以和真正生效的值毫无关系（DLAA 把缩放钉在 100%，滑条却按 DLSS 的 50..90 读成 50%）。
+        // 这里每 tick 比对一次代号，变了就借 vanilla 的公共入口重新同步（内部即 `resetValue()`）。
+        int scaleGeneration = D3D12RenderScale.syncGeneration();
+        if (scaleGeneration != dxr_mc$renderScaleSynced) {
+            dxr_mc$renderScaleSynced = scaleGeneration;
+            list.resetOption(D3D12RenderScale.option());
+            D3D12RenderScale.logSliderResync();
         }
         dxr_mc$setButtonActive(list, D3D12AntiAliasing.option(),
                 D3D12AntiAliasing.isAvailable() && !D3D12AntiAliasing.isLockedByDlss());
@@ -103,8 +119,11 @@ public abstract class VideoSettingsScreenMixin {
                 DeepLearningSuperSampling.isAvailable() && !dlaaOwnsDlss);
         dxr_mc$setButtonActive(list, DeepLearningSuperSampling.qualityOption(),
                 DeepLearningSuperSampling.isAvailable() && !dlaaOwnsDlss);
+        dxr_mc$setButtonActive(list, DeepLearningSuperSampling.presetOption(),
+                DeepLearningSuperSampling.isAvailable() && !dlaaOwnsDlss);
     }
 
+    @Unique
     private void dxr_mc$setButtonActive(OptionsList list, OptionInstance<?> option, boolean active) {
         AbstractWidget button = list.findOption(option);
         if (button != null) {

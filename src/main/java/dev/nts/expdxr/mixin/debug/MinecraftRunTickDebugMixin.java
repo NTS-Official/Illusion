@@ -5,6 +5,7 @@ import dev.nts.expdxr.utils.IllusionLogger;
 
 import net.minecraft.client.Minecraft;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -25,25 +26,30 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public class MinecraftRunTickDebugMixin {
 
     /** 0 = 关闭；>0 = 进入世界后这么多秒自动开物品栏。 */
-    private static final int dx12InvDelaySec = dx12EnvInt("DXRMC_OPEN_INVENTORY", 0);
+    @Unique
+    private static final int illusion$D3D12InvDelaySec = illusion$D3D12EnvInt();
     /**
      * P101c：每帧反射 + 一行日志的 runTick 调试输出，改为**显式**开关（DXRMC_RUN_TICK_DEBUG=1），
      * 不再跟随 DX12_LOG_VERBOSE。理由：整轮 verbose 会喷 60 MB 日志、把 CPU 吃满，
      * 而冒烟复现（进世界/开物品栏）只需要 mixin 的两行自报。
      */
-    private static final boolean dx12RunTickDebug = "1".equals(System.getenv("DXRMC_RUN_TICK_DEBUG"));
-    private static long dx12LevelSeenAtMs = -1L;
-    private static boolean dx12InvOpened = false;
+    @Unique
+    private static final boolean illusion$D3D12RunTickDebug = "1".equals(System.getenv("DXRMC_RUN_TICK_DEBUG"));
+    @Unique
+    private static long illusion$D3D12LevelSeenAtMs = -1L;
+    @Unique
+    private static boolean illusion$D3D12InvOpened = false;
 
-    private static int dx12EnvInt(String name, int dflt) {
+    @Unique
+    private static int illusion$D3D12EnvInt() {
         try {
-            String v = System.getenv(name);
+            String v = System.getenv("DXRMC_OPEN_INVENTORY");
             if (v == null || v.isEmpty()) {
-                return dflt;
+                return 0;
             }
             return Integer.parseInt(v.trim());
         } catch (Throwable ignored) {
-            return dflt;
+            return 0;
         }
     }
 
@@ -53,16 +59,16 @@ public class MinecraftRunTickDebugMixin {
         // P101c：把"进世界后自动开物品栏"放在 verbose 门之前 —— 它由 DXRMC_OPEN_INVENTORY
         // 自己控制，复现物品栏 bug 时**不需要**开 verbose（verbose 每次运行喷 60 MB 日志，
         // 既费 CPU 又把取证日志淹没）。此前它被 !debugEnabled() 挡住，静默模式下根本不会触发。
-        if (dx12InvDelaySec > 0 && !dx12InvOpened) {
+        if (illusion$D3D12InvDelaySec > 0 && !illusion$D3D12InvOpened) {
             Object lvl = null;
             try {
                 java.lang.reflect.Field lf = Minecraft.class.getDeclaredField("level");
                 lf.setAccessible(true);
                 lvl = lf.get(mc);
             } catch (Exception ignored) {}
-            dx12MaybeOpenInventory(mc, lvl);
+            illusion$D3D12MaybeOpenInventory(mc, lvl);
         }
-        if (!dx12RunTickDebug) {
+        if (!illusion$D3D12RunTickDebug) {
             return;
         }
         java.lang.reflect.Field levelField, tickCountField, loadField, pendingField, serverField;
@@ -113,34 +119,35 @@ public class MinecraftRunTickDebugMixin {
      * 两代名字都探——只认旧名字的写法在本版本里会静默读成 null，等于悄悄放弃了
      * 「有别的界面就先不动」的保护；这里的候选名探测 + 命中名回日志让改名不会静默失效。
      */
-    private void dx12MaybeOpenInventory(Minecraft mc, Object level) {
+    @Unique
+    private void illusion$D3D12MaybeOpenInventory(Minecraft mc, Object level) {
         try {
             if (level == null || mc.player == null) {
-                dx12LevelSeenAtMs = -1L;
+                illusion$D3D12LevelSeenAtMs = -1L;
                 return;
             }
             long now = System.currentTimeMillis();
-            if (dx12LevelSeenAtMs < 0L) {
-                dx12LevelSeenAtMs = now;
+            if (illusion$D3D12LevelSeenAtMs < 0L) {
+                illusion$D3D12LevelSeenAtMs = now;
                 // 每轮运行只打 1 行 ⇒ 直接走 stderr，不依赖 verbose 开关。
                 System.err.println("[backend-debug] DXRMC_OPEN_INVENTORY: 世界已进入，"
-                    + dx12InvDelaySec + " 秒后自动打开物品栏");
+                    + illusion$D3D12InvDelaySec + " 秒后自动打开物品栏");
                 System.err.flush();
                 return;
             }
-            if (now - dx12LevelSeenAtMs < dx12InvDelaySec * 1000L) {
+            if (now - illusion$D3D12LevelSeenAtMs < illusion$D3D12InvDelaySec * 1000L) {
                 return;
             }
             // 还有别的界面（加载遮罩 / 暂停菜单）时先不动，等它自己关掉。
-            Object cur = dx12CurrentScreen(mc);
+            Object cur = illusion$D3D12CurrentScreen(mc);
             if (cur != null) {
                 return;
             }
-            dx12InvOpened = true;
+            illusion$D3D12InvOpened = true;
             Object inv = new net.minecraft.client.gui.screens.inventory.InventoryScreen(mc.player);
-            String how = dx12CallSetScreen(mc, inv);
+            String how = illusion$dx12CallSetScreen(mc, inv);
             System.err.println("[backend-debug] DXRMC_OPEN_INVENTORY: InventoryScreen 已打开（"
-                + (now - dx12LevelSeenAtMs) + " ms, via " + how + "）");
+                + (now - illusion$D3D12LevelSeenAtMs) + " ms, via " + how + "）");
             System.err.flush();
             // P101d：紧接着的 3 帧各落盘一张主画面 BMP（只在 MCDR_DUMP_TEX=1 时生效）——
             // 这样取证图正好是"物品栏已打开"的那几帧，不需要按帧号碰运气。
@@ -150,19 +157,21 @@ public class MinecraftRunTickDebugMixin {
                 // 取证钩子绝不影响游戏
             }
         } catch (Throwable t) {
-            dx12InvOpened = true;
+            illusion$D3D12InvOpened = true;
             System.err.println("[backend-debug] DXRMC_OPEN_INVENTORY 失败: " + t);
             System.err.flush();
         }
     }
 
     /** 读 Minecraft 自己的字段（旧名字走这里）。 */
-    private static Object dx12ReadField(Object target, String name) {
-        return dx12ReadFieldOf(target, name, Minecraft.class);
+    @Unique
+    private static Object illusion$dx12ReadField(Object target, String name) {
+        return illusion$D3D12ReadFieldOf(target, name, Minecraft.class);
     }
 
     /** 按候选名字读任意对象的字段；名字不存在返回 null（调用方自己决定要不要再试别的名字）。 */
-    private static Object dx12ReadFieldOf(Object target, String name, Class<?> on) {
+    @Unique
+    private static Object illusion$D3D12ReadFieldOf(Object target, String name, Class<?> on) {
         try {
             java.lang.reflect.Field f = on.getDeclaredField(name);
             f.setAccessible(true);
@@ -173,9 +182,10 @@ public class MinecraftRunTickDebugMixin {
     }
 
     /** 无参方法调用；失败返回 null。 */
-    private static Object dx12CallNoArg(Object target, String name) {
+    @Unique
+    private static Object illusion$D3D12CallNoArg(Object target) {
         try {
-            java.lang.reflect.Method m = target.getClass().getMethod(name);
+            java.lang.reflect.Method m = target.getClass().getMethod("screen");
             return m.invoke(target);
         } catch (Throwable ignored) {
             return null;
@@ -187,27 +197,28 @@ public class MinecraftRunTickDebugMixin {
      * 再退回旧映射的 `Minecraft.screen` / `Minecraft.currentScreen`。全都不命中时返回 null
      * （语义 = 「没有别的界面」），但那条路径只会在又一次改名后走到。
      */
-    private static Object dx12CurrentScreen(Minecraft mc) {
-        Object gui = dx12ReadField(mc, "gui");
+    @Unique
+    private static Object illusion$D3D12CurrentScreen(Minecraft mc) {
+        Object gui = illusion$dx12ReadField(mc, "gui");
         if (gui != null) {
-            Object s = dx12CallNoArg(gui, "screen");
+            Object s = illusion$D3D12CallNoArg(gui);
             if (s == null) {
-                s = dx12ReadFieldOf(gui, "screen", gui.getClass());
+                s = illusion$D3D12ReadFieldOf(gui, "screen", gui.getClass());
             }
             if (s != null) {
                 return s;
             }
         }
-        Object legacy = dx12ReadField(mc, "screen");
+        Object legacy = illusion$dx12ReadField(mc, "screen");
         if (legacy == null) {
-            legacy = dx12ReadField(mc, "currentScreen");
+            legacy = illusion$dx12ReadField(mc, "currentScreen");
         }
         return legacy;
     }
 
     /** 26.2 的 `Gui.setScreen(Screen)`；退回旧版 `Minecraft.setScreen` / `setScreenAndShow`，再退回任意单 Screen 参数的方法。 */
-    private static String dx12CallSetScreen(Minecraft mc, Object screen) {
-        Object gui = dx12ReadField(mc, "gui");
+    private static String illusion$dx12CallSetScreen(Minecraft mc, Object screen) {
+        Object gui = illusion$dx12ReadField(mc, "gui");
         if (gui != null) {
             try {
                 java.lang.reflect.Method m = gui.getClass().getMethod("setScreen",

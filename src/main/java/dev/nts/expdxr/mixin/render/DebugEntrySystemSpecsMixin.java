@@ -37,9 +37,6 @@ public abstract class DebugEntrySystemSpecsMixin {
             LevelChunk serverChunk,
             CallbackInfo ci) {
         Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft == null || minecraft.getWindow() == null) {
-            return;
-        }
         List<String> lines = D3D12DebugInfo.extraSystemLines(
                 minecraft.getWindow().getWidth(),
                 minecraft.getWindow().getHeight()

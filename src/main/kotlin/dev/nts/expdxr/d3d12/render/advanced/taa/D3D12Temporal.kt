@@ -84,6 +84,19 @@ object D3D12Temporal {
      */
     private const val JITTER_PROPERTY: String = "dxrmc.temporal.jitter"
 
+    /**
+     * P76e 实验开关：`-Ddxrmc.temporal.jitter.dlss=on` 让**冻结期间（DLSS 开启）也注入 jitter**。
+     * 默认 **off**，此时行为与 P108d 之后逐字节一致。
+     *
+     * 为什么要重新试：P108d 把"整帧塌成常量清屏色（190,179,167）"归因于替换投影上传，但
+     * [interceptLevelProjectionWrite] 现在的写法是**就地改写调用方缓冲后原样返回**，而
+     * `D3D12CommandEncoderBackend.writeToBuffer` 里 `val payload = jittered ?: data` 对
+     * "返回 data" 与 "返回 null" 是同一个对象 —— 也就是说当年测的两条路其实都走到了就地改写。
+     * 真正没测过的是"jitter 值本身非 0"这条路：冻结期间 [frame `beginFrame`] 把 jitter 强制
+     * 清 0，画面当然不会坏。所以这次把生成与注入一起放开，用实机确认到底是哪一侧。
+     */
+    private const val DLSS_JITTER_PROPERTY: String = "dxrmc.temporal.jitter.dlss"
+
     /** 总开关。P75 默认关闭。 */
     @Volatile
     var enabled: Boolean = "true" == System.getProperty(TEMPORAL_PROPERTY)
@@ -91,6 +104,10 @@ object D3D12Temporal {
     /** 是否真的把 jitter 注入投影矩阵（捕获路径不受它影响，便于 A/B 诊断）。 */
     @Volatile
     var jitterEnabled: Boolean = "false" != System.getProperty(JITTER_PROPERTY)
+
+    /** P76e：冻结期间是否照旧生成并注入 jitter（实验开关，默认 false）。 */
+    @Volatile
+    var jitterWhileSuspended: Boolean = "on" == System.getProperty(DLSS_JITTER_PROPERTY)
 
     /** jitter 循环长度（可被外部按画质档位调整，至少 1）。 */
     @Volatile
@@ -111,6 +128,24 @@ object D3D12Temporal {
 
     /** 上一帧未抖动的关卡投影矩阵。 */
     private var previousProjection: FloatArray? = null
+
+    /**
+     * P76g：本帧未抖动的关卡投影矩阵，直接取自 vanilla 的 CPU 渲染状态
+     * （`LevelRenderState.cameraRenderState.projectionMatrix`，由 [captureProjection] 喂进来）。
+     *
+     * 为什么不能再用 UBO 写拦截的那份字节：实测 `writeToBuffer` 收到的 64 字节**根本不是投影矩阵**
+     * （诊断 `proj4` 四行：对角线是 `4.66793E17`、`1.8E-43` 这类非规格化数，第三行 `m32 = -1` 不在位）。
+     * 透视投影的 `w = -view.z` 全靠 `m32 = -1`，它一旦不在位，`prevClip.w` 就恒在 0 附近 ⇒
+     * 着色器对**每个像素**都在 `if (prevClip.w <= 1e-4)` 处返回 0 ⇒ 运动矢量整张 0 ⇒
+     * DLSS 把移动画面当静止累积 ⇒ 「拖影只在运动时出现、产生后不消失」（用户 m08677 / m08809）。
+     *
+     * 顺序上没有歧义：`cameraState.projectionMatrix` 与 `viewRotationMatrix` 同一份状态、同一个挂点
+     * （[captureCameraView] 旁边）喂进来，喂的时候还在本帧 velocity pass 录制之前。
+     */
+    private var stateProjection: FloatArray? = null
+
+    /** 上一帧同样的 [stateProjection]（[beginFrame] 里滚动）。 */
+    private var previousStateProjection: FloatArray? = null
 
     /** 兼容保留：把"view-projection"记成单矩阵的旧入口（当前接线用的是 projection + modelView）。 */
     private var viewProj: FloatArray? = null
@@ -184,6 +219,14 @@ object D3D12Temporal {
      */
     @Synchronized
     fun beginFrame() {
+        // P76f：相机世界坐标在**每帧帧首**直接向 Camera 取，不再从 Global Settings UBO 的字节里还原。
+        // 旧路（`CameraBlockPos - CameraOffset`）实测读到的是垃圾：诊断行 `camPos=-4.6E23/5.4E14/-1.8E9`，
+        // 每帧还在变。污染链是：CameraDelta 变成天文数字 → 世界位置被推到无穷远 →
+        // `prevClip.w` 落到 -1e-4 以下 / 位移超过上界 → 着色器对**每个像素**都返回 0
+        // ⇒ 运动矢量整张 0 ⇒ DLSS 认为画面从未移动过，拖影一旦产生就永不衰减
+        // （用户实测 m08677「拖影产生了就不会消失」）。Camera 是权威来源，且与
+        // [D3D12ObjectMotion.harvestVisible] 用的同一份，没有理由再解析字节。
+        captureCameraFromCamera()
         previousJitterX = jitterX
         previousJitterY = jitterY
         previousProjection = projection
@@ -195,14 +238,18 @@ object D3D12Temporal {
         // P108d：CPU 侧相机 model-view 与本帧同帧滚动（见 [captureCameraView]）。
         previousStateCameraView = stateCameraView
         stateCameraView = null
+        // P76g：CPU 侧关卡投影矩阵同帧滚动（见 [stateProjection]）。
+        previousStateProjection = stateProjection
+        stateProjection = null
 
         val n = jitterSamples
         ensureHalton(n)
         val index = (frameIndex % n).toInt()
         // Halton 值域 (0,1) → 平移成以 0 为中心的像素偏移 [-0.5, +0.5)。
-        // P108d：`jitterSuspended`（DLSS 开启期间）必须一起判 —— 那时投影上传不被替换，所以
+        // P108d：`jitterSuspended`（DLSS 开启期间）默认必须一起判 —— 那时投影上传不被替换，所以
         // [jitter] 也必须返回 0，否则喂给 NGX 的 jitterOffset 会和实际渲染的画面不一致。
-        if (enabled && jitterEnabled && !jitterSuspended) {
+        // P76e：实验开关打开时连这一段一起放开，让"生成"与"注入"同生同灭（只放开一边只会喂错 jitterOffset）。
+        if (enabled && jitterEnabled && (!jitterSuspended || jitterWhileSuspended)) {
             jitterX = halton2[index] - 0.5
             jitterY = halton3[index] - 0.5
         } else {
@@ -235,7 +282,8 @@ object D3D12Temporal {
             return pristine
         }
         beginFrame()
-        projection = pristine.copyOf()
+        // P76g：优先用 CPU 渲染状态那份（权威、且实测正常）；UBO 字节实测是垃圾，只留作兜底与对照。
+        projection = stateProjection?.copyOf() ?: pristine.copyOf()
         // 低频诊断：挂钩点是否真的在跑、逐物体捕获有没有数据（P75 验证用，每 ~5s 一行）。
         logStatus()
         if (!enabled || !jitterEnabled) {
@@ -292,28 +340,46 @@ object D3D12Temporal {
             // P108d：DLSS 期间**绝不替换**关卡投影的上传。实测：这个方法一旦返回非 null，整帧就塌成
             // 一片清屏色（常量 190,179,167），且与 jitter 的数值无关（把 jitter 关成 0、字节一字不改
             // 也一样）；返回 null 时画面完全正常。这里只做历史滚动等记账（[interceptLevelProjectionWrite]
-            // 内部会调 [onLevelProjectionUpload]），返回值一律丢掉，GLOBALS 的只读捕获也一并跳过 ——
-            // 让"上传"这条路与"没开时间性渲染"逐字节一致。
-            if (buffer.label() == LEVEL_PROJECTION_LABEL) {
-                interceptLevelProjectionWrite(destination, data)
+            // 内部会调 [onLevelProjectionUpload]），返回值一律丢掉，让"上传"这条路与"没开时间性渲染"
+            // 逐字节一致。
+            //
+            // P76e 修：但**相机坐标的捕获不能跳过**。它是纯读、返回 null、一个字节都不改，与"替换上传"
+            // 那条会把画面打坏的路无关；而跳过的后果实测是灾难性的（`dxrmc-temporal` 诊断恒为
+            // `camera=null`）：
+            //   - [cameraDelta] 恒为 null ⇒ 速度着色里的 `CameraDelta` 恒为 0 ⇒ 相机**平移**的视差整块
+            //     丢失（只剩旋转项），走动时地面/近景的运动矢量系统性偏小，表现出"整片地面均匀地拖"；
+            //   - `D3D12Velocity.uploadObjects()` 在相机为 null 时直接返回 0 行 ⇒ 逐物体修正整条失效
+            //     （日志 `objects=0`）。
+            // P76f：相机已在 [beginFrame] 里从 `Camera` 取过，这里不再解析 UBO 字节
+            // （旧路读出来是 1e9~1e23 的垃圾，见那里的注释）。
+            when (buffer.label()) {
+                LEVEL_PROJECTION_LABEL -> interceptLevelProjectionWrite(destination, data)
+                else -> {}
             }
             return null
         }
         return when (buffer.label()) {
-            GLOBALS_LABEL -> {
-                if (data.remaining() >= 32) {
-                    val blockPos = readInts(data, 0, 3)
-                    val offset = readFloats(data, 16, 3)
-                    if (blockPos != null && offset != null) {
-                        captureCamera(blockPos[0] - offset[0], blockPos[1] - offset[1],
-                            blockPos[2] - offset[2])
-                    }
-                }
-                null
-            }
             LEVEL_PROJECTION_LABEL -> interceptLevelProjectionWrite(destination, data)
             else -> null
         }
+    }
+
+    /**
+     * 从 `Camera` 直接取本帧相机世界坐标（P76f）。这是权威来源，与
+     * [D3D12ObjectMotion.harvestVisible] 用的是同一个 `gameRenderer.mainCamera()`。
+     *
+     * 只在 [beginFrame] 里调用一次 —— 这里同时承担历史滚动，多调一次就会把本帧当成上一帧。
+     */
+    private fun captureCameraFromCamera() {
+        val pos = try {
+            Minecraft.getInstance().gameRenderer.mainCamera().position()
+        } catch (t: Throwable) {
+            null
+        } ?: return
+        if (!pos.x.isFinite() || !pos.y.isFinite() || !pos.z.isFinite()) {
+            return
+        }
+        captureCamera(pos.x.toFloat(), pos.y.toFloat(), pos.z.toFloat())
     }
 
     /**
@@ -350,7 +416,8 @@ object D3D12Temporal {
 
         // P108d：**冻结期间（DLSS 开启）到记账为止，一个字节都不写、也不返回替换缓冲** ——
         // 实测这条写上传路径会把整帧打成常量色，连"写回与原字节完全相同的内容"都不行。
-        if (jitterSuspended) {
+        // P76e：实验开关（[jitterWhileSuspended]）打开时继续往下走，就地改动上传字节。
+        if (jitterSuspended && !jitterWhileSuspended) {
             return null
         }
 
@@ -576,22 +643,29 @@ object D3D12Temporal {
     @Synchronized
     fun clipJitterY(height: Int): Double = if (height <= 0) 0.0 else 2.0 * jitterY / height
 
-    /** 保存本帧未抖动的关卡投影矩阵。 */
+    /**
+     * 保存本帧未抖动的关卡投影矩阵（列主序 16 float）。
+     *
+     * P76g：改写到 [stateProjection]（同一帧以第一次为准）。原实现直接覆盖 [projection]，而那条路
+     * 唯一的生产者就是 UBO 写拦截 —— 实测它读出来的是垃圾字节（见 [stateProjection] 的注释），
+     * 于是透视的 `m32 = -1` 不在位、`prevClip.w` 恒 0、运动矢量整张 0。现在由 DLSS 侧从
+     * `cameraRenderState.projectionMatrix` 喂这份权威矩阵。
+     */
     @Synchronized
     fun captureProjection(matrix: FloatArray) {
-        if (matrix.size != 16) {
+        if (matrix.size != 16 || stateProjection != null) {
             return
         }
-        projection = matrix.copyOf()
+        stateProjection = matrix.copyOf()
     }
 
     /** 本帧未抖动的投影矩阵。 */
     @Synchronized
-    fun currentProjection(): FloatArray? = projection?.copyOf()
+    fun currentProjection(): FloatArray? = stateProjection?.copyOf() ?: projection?.copyOf()
 
     /** 上一帧未抖动的投影矩阵；第一帧为 null。 */
     @Synchronized
-    fun previousProjection(): FloatArray? = previousProjection?.copyOf()
+    fun previousProjection(): FloatArray? = previousStateProjection?.copyOf() ?: previousProjection?.copyOf()
 
     /** 兼容旧入口：保存本帧未抖动的 view-projection（完整 16 float 列主序）。 */
     @Synchronized
@@ -743,6 +817,22 @@ object D3D12Temporal {
     @Synchronized
     fun previousCameraPosition(): FloatArray? = previousCameraPosition?.copyOf()
 
+    /**
+     * 两帧之间相机的**平移**增量（本帧 − 上一帧）；没有历史时为 null。
+     *
+     * 速度 pass 必须补这一项：terrain / 实体顶点是**相机相对**坐标，深度反投影出来的世界位置
+     * 也是「相对本帧相机」的，而 [previousCameraView] 只带旋转、不带平移 —— 直接拿它重投影等于
+     * 假设相机没动过，于是相机自身平移造成的视差整块丢失（近景最先糊）。
+     * 把世界位置换到「相对上一帧相机」再加这个增量即可：
+     * `prevWorld = world + (camNow - camPrev)`。
+     */
+    @Synchronized
+    fun cameraDelta(): FloatArray? {
+        val now = cameraPosition ?: return null
+        val prev = previousCameraPosition ?: return null
+        return floatArrayOf(now[0] - prev[0], now[1] - prev[1], now[2] - prev[2])
+    }
+
     /** 本帧第 index 个物体的 view-projection（projection × modelView），用于速度场计算。 */
     @Synchronized
     fun currentViewProjAt(index: Int): FloatArray? {
@@ -770,8 +860,11 @@ object D3D12Temporal {
         for (c in 0 until 4) {
             val c4 = c * 4
             for (r in 0 until 4) {
-                out[c4 + r] = a[r] * b[c4] + a[4 + r] * b[c4 + 1]
-                    + a[8 + r] * b[c4 + 2] + a[12 + r] * b[c4 + 3]
+                var sum = 0.0
+                for (k in 0 until 4) {
+                    sum += a[k * 4 + r].toDouble() * b[c4 + k].toDouble()
+                }
+                out[c4 + r] = sum.toFloat()
             }
         }
         return out
@@ -795,7 +888,12 @@ object D3D12Temporal {
             + " modelViews(thisFrame/prevFrame)=${modelViews.size}/${previousModelViews.size}"
             + " chunkSections(thisFrame/prevFrame)=${chunkSections.size}/"
             + previousChunkSections.size
-            + " camera=${if (cameraPosition == null) "null" else "set"}")
+            + " camera=${if (cameraPosition == null) "null" else "set"}"
+            // P76f 诊断：相机世界坐标与"上一帧 → 本帧"的位移量。与 native 侧
+            // `DXRMC_P108X_DUMP_MV=1` 打出的运动矢量读数按时间戳对齐，就能回答
+            // "mv 全 0 到底是通路坏了、还是这一刻相机根本没动"。
+            + " camPos=${cameraPosition?.joinToString("/") ?: "-"}"
+            + " camDelta=${cameraDelta()?.joinToString("/") ?: "-"}")
 
     /**
      * Halton 序列：van der Corput 基的 radical inverse。

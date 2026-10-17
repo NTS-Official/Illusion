@@ -17,7 +17,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public class MinecraftRunDebugMixin {
 
     @Inject(method = "run", at = @At("HEAD"), remap = false)
-    private void dx12_runDebug(CallbackInfo ci) {
+    private void D3D12RunDebug(CallbackInfo ci) {
         Minecraft mc = (Minecraft) (Object) this;
         // Shadow fields are not directly accessible from mixin without @Shadow,
         // but we can use reflection on the target object to read them.

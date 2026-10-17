@@ -379,6 +379,104 @@ object DeepLearningSuperSampling {
     @Volatile
     private var loggedQualityUnsupported = false
 
+    // ------------------------------------------------------------------
+    // P108ac（用户 m08033）：DLSS 模型 —— 换 render preset
+    // ------------------------------------------------------------------
+
+    /** `options.txt` 里的模型键。 */
+    const val PRESET_OPTIONS_KEY: String = "dxrMcDlssPreset"
+
+    /**
+     * 模型按钮的取值名，**下标是界面上的循环顺序，不是下发给 native 的编号**（映射见 [PRESET_VALUES]）。
+     *
+     * 用户原话（m08033）："剩下的噪点闪烁是 dlss 自身的问题，所有使用 dlss 的游戏都会出现这种现象，
+     * 优化方法是更换 dlss 的模型"。所以这里把 NVIDIA 文档里点名的 transformer 预设做成按钮，
+     * 而不是由我们擅自改默认值。
+     *
+     * - `default`：不设提示键，交给 NGX 按挡位自选 —— 历史行为，默认值。
+     * - `j`：与 K 同代，官方注释说"残影更少、但闪烁更多"。
+     * - `k`：官方注释说"A/B 里推荐的画质最佳"（DLAA/Balanced/Quality 档的默认值）。
+     * - `l` / `m`：分别是 Ultra Performance / Performance 档的官方默认值。
+     *
+     * CNN 时代的 E/F 已弃用，G/H/I 被文档标为 reserved，都不放上来。
+     */
+    private val PRESET_NAMES: List<String> = listOf("default", "j", "k", "l", "m")
+
+    /**
+     * [PRESET_NAMES] 各下标对应的 `NVSDK_NGX_DLSS_Hint_Render_Preset` 值：
+     * 0 = Default、10 = J、11 = K、12 = L、13 = M。native 侧按这些值设 NGX 参数。
+     */
+    private val PRESET_VALUES: List<Int> = listOf(0, 10, 11, 12, 13)
+
+    /** 默认 = `default`（不改变 native 的历史行为，只有玩家主动选才换模型）。 */
+    private const val PRESET_DEFAULT: Int = 0
+
+    /**
+     * 模型按钮的值域（照 `OptionInstance.LazyEnum` 的形状，与挡位按钮同一套管道）。
+     *
+     * <p>预设是 `CreateFeature` 的输入，所以换模型时 native 会**重建特征**（会有一帧的世界重建，
+     * 与换挡位完全一样）；这一点写进 tooltip，免得玩家以为卡了。
+     */
+    private object PresetValues : OptionInstance.CycleableValueSet<Int> {
+        override fun validateValue(value: Int): Optional<Int> =
+            if (value in PRESET_NAMES.indices) Optional.of(value) else Optional.empty()
+
+        override fun valueListSupplier(): CycleButton.ValueListSupplier<Int> =
+            CycleButton.ValueListSupplier.create(PRESET_NAMES.indices.toList())
+
+        override fun codec(): Codec<Int> = Codec.intRange(0, PRESET_NAMES.size - 1)
+    }
+
+    private val PRESET_OPTION: OptionInstance<Int> = OptionInstance(
+        "options.dlss.preset",
+        { Tooltip.create(Component.translatable("options.dlss.preset.tooltip")) },
+        { _, value -> Component.translatable("options.dlss.preset.${PRESET_NAMES[value]}") },
+        PresetValues,
+        PRESET_DEFAULT,
+        { value -> pushPreset(value) },
+    )
+
+    @JvmStatic
+    fun presetOption(): OptionInstance<Int> = PRESET_OPTION
+
+    /** 界面里的当前模型（[PRESET_NAMES] 下标），也是写回 `options.txt` 的值。 */
+    @JvmStatic
+    fun preset(): Int = PRESET_OPTION.get()
+
+    /**
+     * 把模型推给 native（`mcdr_dx12SetDlssRenderPreset`，参数是 [PRESET_VALUES] 里的 NGX 枚举值）。
+     *
+     * <p>返回值契约：`d3d12_mc::setDlssRenderPreset` 成功时**返回记录的预设值本身**（所以
+     * `default` 档返回 **0**，那是成功、不是失败），越界返回 **-1**；旧 DLL 没有这条导出时
+     * `MCDR_ABI` 返回 [Int.MIN_VALUE]，这里只打一次 INFO。
+     */
+    private fun pushPreset(index: Int) {
+        val value = PRESET_VALUES[index]
+        val status = MCDR_ABI.dx12SetDlssRenderPreset(value)
+        when {
+            status == value -> Illusion.LOGGER.info(
+                "[dxrmc] $PREFIX DLSS model preset = {} (NGX render preset {})",
+                PRESET_NAMES[index], value)
+            status == -1 -> Illusion.LOGGER.warn(
+                "[dxrmc] $PREFIX mcdr_dx12SetDlssRenderPreset({}) was rejected (-1: out of range)",
+                value)
+            status == Int.MIN_VALUE -> if (!loggedPresetUnsupported) {
+                loggedPresetUnsupported = true
+                Illusion.LOGGER.info(
+                    "[dxrmc] $PREFIX the loaded MCDR.dll has no mcdr_dx12SetDlssRenderPreset, so "
+                        + "the DLSS model button is remembered but native keeps NGX's own per-tier "
+                        + "preset")
+            }
+            else -> Illusion.LOGGER.warn(
+                "[dxrmc] $PREFIX mcdr_dx12SetDlssRenderPreset({}) returned {} (expected the preset "
+                    + "back, or -1 when out of range)", value, status)
+        }
+    }
+
+    /** 「本地 DLL 没有模型导出」只报一次。 */
+    @Volatile
+    private var loggedPresetUnsupported = false
+
     /**
      * DLSS 是否在工作：独立开关 [OPTION] **或** 抗锯齿停在 DLAA（P108aa，用户 m11796 —— DLAA
      * 就是"原生分辨率的 DLSS"，由抗锯齿选项接管，此时那个独立开关在界面上置灰）。
@@ -425,11 +523,25 @@ object DeepLearningSuperSampling {
             return
         }
         dlaaActive = want
-        // DLAA 必须 render == target：把缩放缓条钉在 100，离开时再放开。
+        // DLAA 必须 render == target：把缩放缓条钉在 100；离开时恢复锁定前该模式的用户值
+        // （DLAA 期间 `OPTION` 的 100 不写回两个记忆键，见 `D3D12RenderScale.apply/save`）。
         D3D12RenderScale.setDlaaLock(want)
         if (want) {
             // 让 native 打开 DLSS 闸门（DLAA 走同一条 DLSS 特性链路），并请求 DLAA 档位。
             forceDlssGate(true)
+            // P108aa（A3）：这里只在状态翻转时推**一次** 3，绝不每帧重推 —— native 已经把
+            // "本轮实际接受的档位"当作基线：若这一帧两者都还没到 100%（缩放重建排在下一帧），
+            // native 只降级一次并只打一条 ERROR；等主目标真正到 100%、尺寸变化触发重建时，
+            // `requestedQuality == 3` 仍在，native 会自己升级回 DLAA。JVM 侧因此没有任何
+            // 每帧 downcall 路径，也不需要在降级后反复推 3。
+            val pinned = D3D12RenderScale.percent()
+            if (pinned != 100) {
+                Illusion.LOGGER.warn(
+                    "[dxrmc] $PREFIX DLAA lock did not pin the render scale to 100% (got {}%); "
+                        + "native will accept one downgrade and self-heal when the scale reaches 100%",
+                    pinned,
+                )
+            }
             pushForcedQuality(DLAA_QUALITY)
             Illusion.LOGGER.info(
                 "[dxrmc] $PREFIX DLAA engaged: anti-aliasing = DLAA, render scale pinned to 100% "
@@ -437,7 +549,7 @@ object DeepLearningSuperSampling {
                     + "Note: projection jitter is still frozen to 0 while DLSS runs, so this is a "
                     + "no-jitter temporal DLAA — weaker than the standard one until P75 is fixed.")
         } else {
-            // 还原用户自己选的挡位；缩放缓条由 setDlaaLock(false) 放开（值保持 100）。
+            // 还原用户自己选的挡位；缩放缓条由 setDlaaLock(false) 恢复到锁定前的用户值。
             pushForcedQuality(QUALITY_OPTION.get())
             Illusion.LOGGER.info(
                 "[dxrmc] $PREFIX DLAA released: quality back to the user's own tier ({})",
@@ -655,12 +767,31 @@ object DeepLearningSuperSampling {
                 }
                 break
             }
+            // P108ac：模型（`dxrMcDlssPreset`），认名字（default/j/k/l/m）与 NGX 数值
+            // （0/10/11/12/13）两种写法 —— 手改过文件的人多半写数字。
+            for (line in lines) {
+                if (!line.startsWith("$PRESET_OPTIONS_KEY:")) {
+                    continue
+                }
+                val raw = line.substring(PRESET_OPTIONS_KEY.length + 1).trim().lowercase()
+                val byName = PRESET_NAMES.indexOf(raw).takeIf { it >= 0 }
+                val byValue = raw.toIntOrNull()?.let { ngxValue -> PRESET_VALUES.indexOf(ngxValue) }
+                    ?.takeIf { it >= 0 }
+                val value = byName ?: byValue
+                if (value != null) {
+                    PRESET_OPTION.set(value)
+                }
+                break
+            }
         } catch (t: Throwable) {
             Illusion.LOGGER.warn("[dxrmc] could not read $OPTIONS_KEY from $file", t)
             return
         }
         // 文件里没有这一行时（首次运行 / 用户删过）也要推一次，让 native 与界面取值一致。
         push(OPTION.get())
+        // P108ac：模型同理 —— 游戏未运行时 `OptionInstance.set` 不触发回调，只能在这里补推，
+        // 否则文件里的选择要等玩家再点一次按钮才生效。
+        pushPreset(PRESET_OPTION.get())
         // P108y：**先**按文件里的开关切模式，`D3D12RenderScale` 才会用"DLSS 模式"那套集合与键；
         // [push] 末尾其实已经调过一次，这里再调是幂等的（模式没变直接返回 false），
         // 目的是覆盖"文件里没有 dxrMcDlss 行、`OPTION.set` 没触发回调"的情形。
@@ -676,6 +807,9 @@ object DeepLearningSuperSampling {
      *
      * <p>P108y：挡位（`dxrMcDlssQuality`）也在这里落盘。渲染缩放的两个键由
      * `D3D12RenderScale.save` 负责（它在同一个 TAIL 注入里，晚于本方法）。
+     *
+     * <p>P108ac：模型（`dxrMcDlssPreset`）同样在这里落盘 —— 漏掉它时按钮每次进游戏都回到
+     * `default`，而日志里看不出任何异常（native 只是收到 0）。
      */
     @JvmStatic
     fun save(file: File) {
@@ -684,12 +818,13 @@ object DeepLearningSuperSampling {
         }
         try {
             val eol = System.lineSeparator()
-            val owned = setOf(OPTIONS_KEY, QUALITY_OPTIONS_KEY)
+            val owned = setOf(OPTIONS_KEY, QUALITY_OPTIONS_KEY, PRESET_OPTIONS_KEY)
             val kept = file.readLines(StandardCharsets.UTF_8)
                 .filterNot { line -> owned.any { key -> line.startsWith("$key:") } }
             val written = listOf(
                 "${OPTIONS_KEY}:${OPTION.get()}",
                 "${QUALITY_OPTIONS_KEY}:${QUALITY_NAMES[QUALITY_OPTION.get()]}",
+                "${PRESET_OPTIONS_KEY}:${PRESET_NAMES[PRESET_OPTION.get()]}",
             )
             val text = (kept + written).joinToString(eol) + eol
             file.writeText(text, StandardCharsets.UTF_8)
@@ -734,37 +869,41 @@ object DeepLearningSuperSampling {
         // 不再从 vanilla 的 UBO 环做 GPU 写映射读回 —— 那条读回会把整帧打成常量清屏色。
         captureCameraView(minecraft)
         val encoder = D3D12Device.sharedCommandEncoder() ?: return
-        // 深度此刻还有内容；同一帧稍后 [applyIfEnabled] 那次调用会被 D3D12Velocity 的每帧闸门挡掉。
+        // P76c（用户 m07942）：挂点已从 `GameRenderer.render` 的清深度之前挪到**帧图 main pass 的 RETURN**
+        // （`mixin.render.LevelRendererMainPassDepthMixin`）。旧挂点按该 mixin 类注释里的执行序排在三次清深度
+        // 中的 (1)(2) 之后，实测深度是 `mean=0.0/0.0/0.0/0.0` —— 速度 pass 拿全 0 深度会把整张运动矢量写成 0，
+        // DLSS 于是把移动画面当静止画面累积（"只有开 DLSS 才有、只随运动出现的拖影"）。
+        // 现在这一刻深度里正是本帧世界几何，且排在所有清深度之前。
         encoder.recordVelocityPass()
-        // P108x：深度快照**不再**在这里做 —— 实测（native `DXRMC_P108X_DUMP=1`）这一刻
-        // `jvm-depth-before-snapshot` 读到的是全 0，即 vanilla 在本挂点之前就把主目标深度清了。
-        // 快照已挪到 `LevelRenderer.addAlwaysOnTopPass` 的 pass 体内、它自己那次
-        // `clearDepthTexture` 之前：那一刻主目标深度里是**本帧世界几何**的深度。
-        // 见 [captureDepthSnapshot] 与 `mixin.render.LevelRendererMainPassDepthMixin`（P108x 的实注释
-        // 一度写成 `LevelRendererAlwaysOnTopMixin`，那个类不存在；唯一的调用点就是这一个 mixin）。
+        // P108x：深度快照与这里**同一个挂点、同一份深度**，由 `LevelRendererMainPassDepthMixin` 紧接着调用
+        // [captureDepthSnapshot]（先速度 pass、后快照，只为了日志顺序）。旧注释里的
+        // `addAlwaysOnTopPass` 不是唯一选择：那个 pass 只在 `hasAnyAlwaysOnTop()` 为真时才进帧图，
+        // 实测那一趟为假，快照一次都没发生 —— 见 [captureDepthSnapshot] 的说明。
     }
 
     /**
-     * P108x（用户 m11686）：深度快照的**新挂点** —— `LevelRenderer.addAlwaysOnTopPass` 的 pass
-     * 体里、它自己那次 `clearDepthTexture(mainRenderTarget.getDepthTexture(), 0.0)` 之前，
-     * 由 `mixin.render.LevelRendererAlwaysOnTopMixin` 在同一个 `@Inject` 里调用。
+     * P108x（用户 m11686）：深度快照的挂点 —— **帧图 main pass 的 RETURN**
+     * （`lambda$addMainPass$0`，源码 `_port\mcsrc\...\LevelRenderer.java:482`，即 `pass.executes(...)` 那个
+     * lambda 的结尾），由 `mixin.render.LevelRendererMainPassDepthMixin` 调用。
      *
-     * 为什么必须在那里（反编译证据）：
-     *  - `GameRenderer.render` 里那次清深度（`javap` 偏移 **356**，源码 :443）之前，深度**已经**
-     *    是 0。26.2 的关卡渲染是**帧图**：`LevelRenderer.render` 只负责 addPass/`frame.execute`，
-     *    真正清深度的是 `addAlwaysOnTopPass` 的 pass 体（`lambda$addAlwaysOnTopPass$0` 偏移
-     *    **52**，源码 :571）与 `GameRenderer.renderLevel` 的手部清深度（源码 :578）。
-     *  - 原挂点（`GameRenderer.render` 偏移 356 之前）在这些之后才轮到，所以读到的必然是 0。
+     * 为什么必须在那里（反编译 + 实测证据见该 mixin 的类注释）：
+     *  - `GameRenderer.render` 里那次清深度（`javap` 偏移 **356**，源码 :443）之前，深度**已经**是 0。
+     *    26.2 的关卡渲染是**帧图**：`LevelRenderer.render` 只负责 addPass/`frame.execute`，真正清深度的
+     *    是 `addAlwaysOnTopPass` 的 pass 体（`lambda$addAlwaysOnTopPass$0` 偏移 **52**，源码 :571）与
+     *    `GameRenderer.renderLevel` 的手部清深度（源码 :578）。
+     *  - `addAlwaysOnTopPass` 本身不能依赖：它只在 `FeatureRenderDispatcher.PreparedFrame.hasAnyAlwaysOnTop()`
+     *    为真时才进帧图（源码 :557），实机那一趟为假，快照一次都没发生。
+     *  - main pass 的 RETURN 实测读到 `640x360 fmt=40 mean=14.6/16.4/13.5/6.9 max=255/254/255/57`，
+     *    正是本帧世界几何的深度；`addMainPass`（源码 :394）无条件执行。
      *
      * 顺序（帧图执行序）：clear → sky → **main（世界几何）** → clouds → weather → 透明链 →
-     * **always_on_top（清深度 + 实体置顶）** → 手部（清深度 + 手）→ `GameRenderer.render` 清深度
-     * → GUI。因此"世界几何画完之后、任何一次清深度之前"能稳定拿到世界深度的位置就是
-     * always_on_top 的 pass 体开头。
+     * always_on_top（若加了：清深度 + 实体置顶）→ 手部（清深度 + 手）→ `GameRenderer.render` 清深度
+     * → GUI。
      *
-     * 只做快照这一件事：运动矢量仍由 [captureMotionVectors] 在旧挂点录（那里的深度读数虽然
-     * 已是 0，但速度 pass 的挂点时机与 `D3D12Velocity` 的历史记账都验证过可用，不动它）；
-     * [applyIfEnabled] 的评价时机也不动。旧 DLL 没有 `mcdr_dx12SnapshotDlssDepth` ⇒
-     * `Int.MIN_VALUE`，静默退回"用 JVM 传的深度"。
+     * P76c（用户 m07942）：运动矢量也在这个挂点录（[captureMotionVectors]，同一 mixin 里先调它）。
+     * 旧挂点深度全 0 ⇒ 运动矢量整张 0 ⇒ DLSS 把移动画面当静止画面累积。
+     * [applyIfEnabled] 的评价时机不动（仍在 SMAA 那处，世界层颜色完整）。旧 DLL 没有
+     * `mcdr_dx12SnapshotDlssDepth` ⇒ `Int.MIN_VALUE`，静默退回"用 JVM 传的深度"。
      */
     @JvmStatic
     fun captureDepthSnapshot() {
@@ -917,14 +1056,21 @@ object DeepLearningSuperSampling {
     /**
      * P108d：把本帧的相机 model-view 喂给 [D3D12Temporal]（见 `captureCameraView` 的说明）。 */
     private fun captureCameraView(minecraft: Minecraft) {
-        val matrix = try {
-            minecraft.gameRenderer.gameRenderState().levelRenderState.cameraRenderState.viewRotationMatrix
+        val state = try {
+            minecraft.gameRenderer.gameRenderState().levelRenderState.cameraRenderState
         } catch (t: Throwable) {
             return
         }
+        val matrix = state.viewRotationMatrix
         val out = FloatArray(16)
         matrix.get(out)
         D3D12Temporal.captureCameraView(out)
+        // P76g：投影矩阵走同一条权威路。UBO 写拦截读出的 64 字节实测是垃圾（非规格化数 +
+        // 第三行 NaN），导致透视的 `m32 = -1` 不在位、`prevClip.w` 恒 0、运动矢量整张 0。
+        val projection = state.projectionMatrix
+        val proj = FloatArray(16)
+        projection.get(proj)
+        D3D12Temporal.captureProjection(proj)
     }
 
     /**

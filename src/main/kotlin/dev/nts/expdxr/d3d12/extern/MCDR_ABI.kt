@@ -108,6 +108,8 @@ object MCDR_ABI {
     private var MH_snapshotdlssdepth: MethodHandle? = null
     /** P108y：DLSS 挡位（Performance/Balanced/Quality，见 [dx12SetDlssQuality]）。 */
     private var MH_setdlssquality: MethodHandle? = null
+    /** P108ac：DLSS 模型（NGX render preset，见 [dx12SetDlssRenderPreset]）。 */
+    private var MH_setdlssrenderpreset: MethodHandle? = null
     /** P108z：把 JVM 建的输出纹理交给 native（见 [dx12SetDlssOutput]）。 */
     private var MH_setdlssoutput: MethodHandle? = null
 
@@ -736,6 +738,35 @@ object MCDR_ABI {
             handle.invokeExact(quality) as Int
         } catch (t: Throwable) {
             System.err.println("[backend-java] dx12SetDlssQuality failed: $t")
+            Int.MIN_VALUE
+        }
+    }
+
+    /**
+     * P108ac（用户 m08033）：DLSS 的**模型**（NGX 的 `NVSDK_NGX_DLSS_Hint_Render_Preset`）。
+     *
+     * <p>用户原话："剩下的噪点闪烁是 dlss 自身的问题，所有使用 dlss 的游戏都会出现这种现象，
+     * 优化方法是更换 dlss 的模型"。所以这条做成旋钮而不是由我们擅自换默认值。
+     *
+     * 取值是 NGX 的枚举，不是本项目自定义的编号：`0` = Default（交给 NGX 按挡位自选）、
+     * `5` = E / `6` = F（已弃用的 CNN 预设）、`10` = J / `11` = K / `12` = L / `13` = M
+     * （transformer 预设）。预设是 `CreateFeature` 的输入，native 侧看到变化会**重建特征**。
+     * **按 [skipOptional] 挂上**：旧 DLL 没有这个导出时返回 [Int.MIN_VALUE]，调用方静默容忍。
+     * `MCDR_ABI_VERSION` 保持不变（新增导出、不改结构布局）。
+     *
+     * @param preset NGX 的 render preset 值。
+     * @return 已记录的预设值，-1 = 参数非法（越界），[Int.MIN_VALUE] = 本地 DLL 没有这个导出。
+     *     Never throws.
+     */
+    fun dx12SetDlssRenderPreset(preset: Int): Int {
+        if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_setdlssrenderpreset ?: return Int.MIN_VALUE
+        return try {
+            handle.invokeExact(preset) as Int
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12SetDlssRenderPreset failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -2645,6 +2676,8 @@ object MCDR_ABI {
         // 于是**native 还没实现这条导出**时只是返回 MIN_VALUE、JVM 侧打一次 INFO 说明仍由 native
         // 按比例就近选择，不会把游戏挡在启动之外，MCDR_ABI_VERSION 保持 2。
         MH_setdlssquality = skipOptional("mcdr_dx12SetDlssQuality", fd(MCDRLayout.I32, MCDRLayout.I32))
+        MH_setdlssrenderpreset =
+            skipOptional("mcdr_dx12SetDlssRenderPreset", fd(MCDRLayout.I32, MCDRLayout.I32))
         // P108z（用户 m11203）：DLSS 的输出纹理改由 JVM 建、经这条交给 native（两个指针风格：
         // 一个 Dx12Object* 句柄）。同样走 skipOptional —— native 还没实现时只是返回 MIN_VALUE、
         // JVM 侧打一次 INFO 然后继续用 native 私有的 UAV 路径，MCDR_ABI_VERSION 保持 2。

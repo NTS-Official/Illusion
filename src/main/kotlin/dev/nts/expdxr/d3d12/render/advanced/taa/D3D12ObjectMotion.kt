@@ -191,7 +191,8 @@ object D3D12ObjectMotion {
         val camY = cameraPos.y()
         val camZ = cameraPos.z()
         val cameraEntity = camera.entity()
-        // vanilla：相机实体自己只有在第三人称（`camera.isDetached()`）或睡觉时才被渲染。
+        // 原版：相机实体自己只有在第三人称或睡觉时才被渲染。
+        // TODO: 未来需要测试兼容真实第一人称模组
         val cameraEntityRenderable = camera.isDetached() ||
             (cameraEntity is LivingEntity && cameraEntity.isSleeping)
         val tickRateManager = level.tickRateManager()

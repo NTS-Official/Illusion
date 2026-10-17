@@ -3,6 +3,7 @@
   "dxr_mc.configuration.section.dxr.mc.client.toml": "Illusion 配置",
   "dxr_mc.configuration.section.dxr.mc.client.toml.title": "Illusion 配置",
   "dxr_mc.configuration.section.dxr.mc.client.toml.tooltip": "Illusion 客户端设置：日志与诊断。",
+
   "dxr_mc.configuration.logging": "日志",
   "dxr_mc.configuration.logging.button": "编辑",
   "dxr_mc.configuration.logging.tooltip": "日志记录选项相关设置",
@@ -15,31 +16,32 @@
   "dxr_mc.configuration.logging.logLevel.TRACE": "跟踪",
   "dxr_mc.configuration.logging.nativeVerbose": "原生层详细日志",
   "dxr_mc.configuration.logging.nativeVerbose.tooltip": "无视上面的日志等级设置，强制原生 DLL 输出 DEBUG 信息。",
+
   "dxr_mc.configuration.debug": "调试",
   "dxr_mc.configuration.debug.button": "编辑",
   "dxr_mc.configuration.debug.tooltip": "必须在渲染器启动之前决定的诊断开关。只在配置载入时读取一次。",
   "dxr_mc.configuration.debug.pixCapture": "PIX GPU 捕获（需重启）",
   "dxr_mc.configuration.debug.pixCapture.tooltip": "启动时载入 Microsoft PIX 的 GPU 捕获层（WinPixGpuCapturer.dll），让 PIX 能对本进程抓取 GPU 帧。捕获层必须在第一个 Direct3D 12 设备创建之前载入，因此修改此项需要重启游戏。抓帧时 PIX 必须正在运行。若 PIX 装在非默认位置，可用环境变量 MCDR_PIX_CAPTURER 指向该 DLL（或它所在的目录）。",
+
+
+  "options.graphicsApi.d3d12": "优先 DirectX 12（实验性）",
+  "options.graphicsApi.tooltip.d3d12": "由 Illusion 提供的 D3D12 渲染后端选项，使用 Java FFM API 访问 MCDR 动态链接库实现。\n\n实验性设置。在部分情况下可能降低性能或导致不稳定。",
+
+
   "options.video.illusion.header": "Illusion 设置",
-  "options.renderScale": "渲染缩放",
-  "options.renderScale.tooltip": "决定 MCDR 以当前窗口（或全屏）渲染原始画面的分辨率百分比。\n\nDLSS 关闭时滑条为 25~400、步进 25%（默认 100）；DLSS 开启时为 50~90、步进 10%（默认 70），两种模式各自记住自己的取值。不需要重启。",
-  "options.shadingRate": "着色粒度（VRS）",
-  "options.shadingRate.tooltip": "下发给每条图形命令列表的着色速率（D3D12 RSSetShadingRate）。关闭（默认）时一个着色速率调用都不发，设备保持默认 1x1，与引入 VRS 之前的行为完全一致。2X2 表示每 2x2 像素只着色一个像素，是帧受着色吞吐限制时的常规第一档；1X2/2X1/2X4/4X2/4X4 还要求设备支持 AdditionalShadingRatesSupported。设备报告 VRS tier 0 时会拒绝此项并在日志中说明，保持 1x1。不需要重启。",
+
   "options.antiAliasing": "抗锯齿",
   "options.antiAliasing.tooltip": "仅选择 DirectX 12 作为图形 API 时可用。\n\n可用选项：SMAA、TAA、DLAA\n\n此选项决定 Illusion 如何对游戏画面进行抗锯齿处理。",
   "options.antiAliasing.mode.0": "关闭",
   "options.antiAliasing.mode.1": "SMAA",
   "options.antiAliasing.mode.2": "TAA",
   "options.antiAliasing.mode.3": "DLAA",
-  "options.dlss": "DLSS 超分辨率",
-  "options.dlss.tooltip": "开启或关闭深度学习超采样功能。",
-  "options.dlss.quality": "DLSS 预设",
-  "options.dlss.quality.tooltip": "可用：性能、平衡、质量",
-  "options.dlss.quality.performance": "性能",
-  "options.dlss.quality.balanced": "平衡",
-  "options.dlss.quality.quality": "质量",
-  "options.graphicsApi.d3d12": "优先 DirectX 12（实验性）",
-  "options.graphicsApi.tooltip.d3d12": "由 Illusion 提供的 D3D12 渲染后端选项，使用 Java FFM API 访问 MCDR 动态链接库实现。\n\n实验性设置。在部分情况下可能降低性能或导致不稳定。",
+
+  "options.renderScale": "渲染缩放",
+  "options.renderScale.tooltip": "决定 MCDR 以当前窗口（或全屏）渲染原始画面的分辨率百分比。",
+
+  "options.shadingRate": "着色粒度（VRS）",
+  "options.shadingRate.tooltip": "改变着色的颗粒度。",
   "options.illusion.render.shadingRate.OFF": "关闭",
   "options.illusion.render.shadingRate.RATE_1X1": "1×1",
   "options.illusion.render.shadingRate.RATE_1X2": "1×2",
@@ -47,5 +49,22 @@
   "options.illusion.render.shadingRate.RATE_2X2": "2×2",
   "options.illusion.render.shadingRate.RATE_2X4": "2×4",
   "options.illusion.render.shadingRate.RATE_4X2": "4×2",
-  "options.illusion.render.shadingRate.RATE_4X4": "4×4"
+  "options.illusion.render.shadingRate.RATE_4X4": "4×4",
+
+  "options.dlss": "DLSS 超分辨率",
+  "options.dlss.tooltip": "开启或关闭深度学习超采样功能。",
+
+  "options.dlss.quality": "DLSS 质量预设",
+  "options.dlss.quality.tooltip": "可用：性能、平衡、质量",
+  "options.dlss.quality.performance": "性能",
+  "options.dlss.quality.balanced": "平衡",
+  "options.dlss.quality.quality": "质量",
+
+  "options.dlss.preset": "DLSS 模型选择",
+  "options.dlss.preset.tooltip": "决定 DLSS 使用哪一代神经网络模型（NGX 的渲染预设）。\n\n可用选项：默认（由质量预设决定）、J、K、L、M",
+  "options.dlss.preset.default": "默认",
+  "options.dlss.preset.j": "J",
+  "options.dlss.preset.k": "K",
+  "options.dlss.preset.l": "L",
+  "options.dlss.preset.m": "M"
 }

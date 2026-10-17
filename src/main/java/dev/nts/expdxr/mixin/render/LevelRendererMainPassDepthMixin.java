@@ -49,9 +49,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * 世界几何已画完、且排在所有清深度之前；`frame.addPass("main")` 在 `LevelRenderer.addMainPass`
  * 源码 :394 是**无条件**执行的，不像 always_on_top 有前置条件。
  *
- * <p>运动矢量仍由 `DeepLearningSuperSampling.captureMotionVectors()` 挂在旧挂点
- * （`GameRendererSmaaWorldMixin` 的 `dxr_mc$dlssBeforeDepthClear`）录，Evaluate 的时机也不动 ——
- * 本 mixin 只负责"把这一帧的深度快照交给 native"。
+ * <p>P76c（用户 m07942「走动时仍然有拖影，只有dlss开才会带来拖影」）：**运动矢量的速度 pass 也挪到这里**。
+ * 原先它挂在 `GameRendererSmaaWorldMixin` 的 `dxr_mc$dlssBeforeDepthClear`，而那处按上面的执行序已经排在
+ * (1)(2) 两次清深度**之后** —— 实测 `mean=0.0/0.0/0.0/0.0`，即速度 pass 拿到的深度**整张是 0**。
+ * `D3D12Velocity` 的像素着色器对 `depth <= 0.0 || depth >= 1.0` 直接 `return float4(0,0,0,0)`，
+ * 于是运动矢量纹理**恒为零**，DLSS 只能把整帧当静止画面做时间累积 —— 拖影只随运动出现、只在 DLSS
+ * 开启时出现（此前所有 mv 侧的改动因此都是空转）。
+ * 深度快照与速度 pass 现在共用这一个挂点：世界几何已画完（深度有效）、且排在所有清深度之前。
  *
  * <p>`require = 1`（`dxr_mc.mixins.json` 的 `defaultRequire`）保证：这个 lambda 名字一旦随版本
  * 变化而找不到，启动就会**直接失败**，不会静默失效。
@@ -61,9 +65,13 @@ public class LevelRendererMainPassDepthMixin {
 
     /**
      * {@code addMainPass} 的 pass 体（javac 合成方法 {@code lambda$addMainPass$0}）的 RETURN。
+     *
+     * <p>先录速度 pass（吃这一刻的主目标深度），再交给 native 做深度快照 —— 两者读的是同一份资源，
+     * 顺序只是为了日志里"速度 pass 先有读数"。
      */
     @Inject(method = "lambda$addMainPass$0", at = @At("RETURN"), remap = false)
     private void dxr_mc$dlssDepthSnapshotAfterMainPass(CallbackInfo ci) {
+        DeepLearningSuperSampling.captureMotionVectors();
         DeepLearningSuperSampling.captureDepthSnapshot();
     }
 }

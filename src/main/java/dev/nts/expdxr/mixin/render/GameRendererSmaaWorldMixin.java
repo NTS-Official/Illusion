@@ -37,14 +37,14 @@ public class GameRendererSmaaWorldMixin {
     }
 
     /**
-     * P108：DLSS 的**数据面**挂点 —— 比上面那处更早，因为 vanilla 在调 `GuiRenderer.render()` 之前
-     * 就把主渲染目标的深度清掉了（26.2 的 `GameRenderer.render`：:443 `clearDepthTexture` 早于
-     * :447 `GuiRenderer.render`），而运动矢量要吃本帧深度。
+     * 每帧兜底（抗锯齿锁 + 进出 DLSS 模式的状态机）。
      *
-     * <p>P108d（用户 m11364）：这里**只录运动矢量**。实测（native `DXRMC_P108X_COPY_COLOR=1`）
-     * 证明此刻主目标的颜色还是清屏色（常量 190,179,167），DLSS 拿它升采样只会得到常量输出 ——
-     * 所以真正的 Evaluate 移到上面 SMAA 那处（世界层颜色完整）。逻辑全在 Kotlin 的
-     * {@code DeepLearningSuperSampling.captureMotionVectors()}，这里只留一行。
+     * <p>P76c（用户 m07942）：运动矢量的**速度 pass 已经从这里移走**，改由
+     * `LevelRendererMainPassDepthMixin` 挂在帧图 main pass 的 RETURN 上录。原因：这处注入按
+     * `LevelRendererMainPassDepthMixin` 类注释里的执行序排在三次清深度中的 (1)(2) **之后**，
+     * 实测此刻主目标深度是 `mean=0.0/0.0/0.0/0.0` —— 速度 pass 拿到全 0 深度会把运动矢量写成一整张 0，
+     * DLSS 于是把移动的画面当静止画面累积，表现为"只有开 DLSS 才有、只随运动出现的拖影"。
+     * 这里只保留与 DLSS 开关状态有关的记账，不再碰深度/速度通道。
      *
      * <p>P108b（用户 m10920）：SMAA 与 DLSS **互不排斥**，两处注入各判各的开关（DLSS 是自己的
      * 开关，SMAA 那处是抗锯齿模式）。
@@ -63,6 +63,5 @@ public class GameRendererSmaaWorldMixin {
         // 必须挂在**这里**（无论 DLSS 开还是关都会跑到），不能挂 `applyIfEnabled()`：
         // "DLSS 关掉 => 把抗锯齿还回去"恰恰发生在开关为 false 的时候。
         DeepLearningSuperSampling.reconcileAntiAliasingEveryFrame();
-        DeepLearningSuperSampling.captureMotionVectors();
     }
 }

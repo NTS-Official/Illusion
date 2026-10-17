@@ -8,7 +8,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * Persists DXRMC's anti-aliasing mode in vanilla's own {@code options.txt}.
+ * Persists DXRMC's antialiasing mode in vanilla's own {@code options.txt}.
  *
  * <p>The options is a real {@code OptionInstance} (see {@link D3D12AntiAliasing})
  * but it is not a field of {@code Options}, so vanilla's

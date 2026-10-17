@@ -35,14 +35,15 @@ import org.slf4j.LoggerFactory
  *    `R32_FLOAT`（`D32_FLOAT`）或 `R32_FLOAT_X8X24_TYPELESS`（`D32_FLOAT_S8X24_UINT`）；
  *  - entry 2 = SRV（`register(t2)`，无采样器）→ P76b 的逐物体行缓冲（R32_FLOAT texel buffer）。
  *
- * 输出：`RG16_FLOAT` 乒乓纹理（xy = 屏幕空间运动，单位**像素**，`uv - prevUv` 乘屏幕尺寸）。
+ * 输出：`RG16_FLOAT` 乒乓纹理（xy = 屏幕空间运动，单位**像素**，`(prevUv - uv) * ScreenSize`，
+ * 方向是「本帧 → 上一帧」，与 DLSS 编程指南一致；旧写法反了，见 P76h）。
  * 乒乓里"上一帧速度"这一半本轮**还不被消费**（那是 TAAU resolve 的历史纹理），保留是为了
  * 让 P77 的 resolve 直接接上。
  *
  * 数学（PS 内，逐像素）：
  *  1. `uv = SV_Position.xy / ScreenSize`（全屏三角形正好覆盖 [0,1]²，uv 即纹素中心）；
  *  2. `ndc = (uv.x*2-1, 1-uv.y*2, depth, 1)`，用**本帧抖动过的**投影的逆矩阵反投影回世界；
- *  3. 用上一帧 view-projection 投影 → `prevUv`；`motion = (uv - prevUv) * ScreenSize`；
+ *  3. 用上一帧 view-projection 投影 → prevUv；motion = (prevUv - uv) * ScreenSize（方向是「本帧→上一帧」，见 P76h）；
  *  4. （P76b）世界位置落在某个上一帧物体 AABB 内 ⇒ 用该物体的屏幕位移覆盖第 3 步的结果。
  *
  * P76b 增量：在上面这条**相机重投影**之上叠加**逐物体修正**。相机重投影对静态几何严格正确，
@@ -127,6 +128,9 @@ object D3D12Velocity {
      * 用来挡住"上一帧 AABB 张冠李戴"的坏匹配：一旦匹配错行，位移会是成百上千像素。
      */
     private const val OBJECT_MAX_MOTION_PIXELS: Float = 128.0f
+
+    /** 第一帧（还没有上一帧相机）时的平移增量回退值。 */
+    private val CAMERA_DELTA_NONE: FloatArray = floatArrayOf(0.0f, 0.0f, 0.0f)
 
     private const val LOG_INTERVAL_MILLIS: Long = 5_000L
 
@@ -333,7 +337,20 @@ object D3D12Velocity {
         // 本帧 extract 采到的那份快照**就是**该配对的「上一帧」，滚动点因此放在
         // [D3D12ObjectMotion.writeWorldRows] 里而不是 beginFrame 里。
         val rows = uploadObjects()
-        if (!writeParameters(uniformBuffer, prevViewProj, invCurr, w, h, rows)) {
+        // P76a 的 jitter 补偿：历史缓冲里存的是上一帧**抖动后**的画面。当前像素 uv 带着本帧
+        // 的 jitter，而 PrevViewProj 是未抖动的上一帧投影，所以「同一表面点」在历史里的位置是
+        // prevUv + 上一帧jitter。于是 mv = (uv - prevUv) - 本帧jitter + 上一帧jitter。
+        // 少任何一项都会残留半个像素，远处掠射的地面最先糊成拖影。
+        val jitter = D3D12Temporal.jitter()
+        val prevJitter = D3D12Temporal.previousJitter()
+        // P76a：相机**平移**的视差补偿。深度反投影出的是「相对本帧相机」的世界位置，而
+        // PrevViewProj 里的视图矩阵只有旋转（terrain 顶点本来就是相机相对坐标），少了这一项
+        // 就等于假设相机没平移过，相机自身走动/侧移造成的视差整块丢失。
+        val camDelta = D3D12Temporal.cameraDelta() ?: CAMERA_DELTA_NONE
+        if (!writeParameters(uniformBuffer, prevViewProj, invCurr, w, h, rows,
+                jitter[0].toFloat(), jitter[1].toFloat(),
+                prevJitter[0].toFloat(), prevJitter[1].toFloat(),
+                camDelta[0], camDelta[1], camDelta[2])) {
             return false
         }
 
@@ -509,7 +526,10 @@ object D3D12Velocity {
     /**
      * 写参数块。CBV 布局（std140 兼容）：`float4x4 PrevViewProj`(0) + `float4x4 InvCurrViewProj`(64)
      * + `float2 ScreenSize`(128, float 下标 32/33) + `float2 ObjectParams`(136, float 下标 34/35,
-     * x = 行数 + 1、y = 位移像素上限)，共 144 B，剩余补齐到 256 B。
+     * x = 行数 + 1、y = 位移像素上限) + `float2 JitterPixels`(144, float 下标 36/37, 本帧抖动
+     * 的像素偏移) + `float2 PrevJitterPixels`(152, float 下标 38/39, 上一帧抖动的像素偏移)
+     * + `float3 CameraDelta`(160, float 下标 40/41/42, 两帧之间相机平移的增量)，
+     * 着色器用这三项把运动矢量换到「以历史缓冲为参照」的空间，共 172 B，剩余补齐到 256 B。
      *
      * `ObjectParams.x` 存的是**行数 + 1**：HLSL 里直接拿它当循环上界，省掉一个分支，
      * 而且 0 表示"没有物体"时循环体一次都不进。
@@ -518,7 +538,9 @@ object D3D12Velocity {
      * 那条路会经过 [D3D12Temporal.interceptWrite]（label 不匹配虽会放行，但没必要）。
      */
     private fun writeParameters(buffer: D3D12GpuBuffer, prevViewProj: FloatArray,
-        invCurrViewProj: FloatArray, w: Int, h: Int, rows: Int): Boolean {
+        invCurrViewProj: FloatArray, w: Int, h: Int, rows: Int,
+        jitterX: Float, jitterY: Float, prevJitterX: Float, prevJitterY: Float,
+        camDeltaX: Float, camDeltaY: Float, camDeltaZ: Float): Boolean {
         return try {
             buffer.map(0L, CBV_SIZE, false, true).use { view ->
                 val fb: FloatBuffer = view.data().order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
@@ -528,6 +550,13 @@ object D3D12Velocity {
                 fb.put(h.toFloat())
                 fb.put((rows + 1).toFloat())
                 fb.put(OBJECT_MAX_MOTION_PIXELS)
+                fb.put(jitterX)
+                fb.put(jitterY)
+                fb.put(prevJitterX)
+                fb.put(prevJitterY)
+                fb.put(camDeltaX)
+                fb.put(camDeltaY)
+                fb.put(camDeltaZ)
                 // 补齐到 256 B（= 64 个 float）。CBV_SIZE 是 256，所以上界是 float 下标 64。
                 while (fb.position() < 64) {
                     fb.put(0.0f)
@@ -540,19 +569,71 @@ object D3D12Velocity {
         }
     }
 
-    /** 列主序 4×4 求逆（JOML，奇异矩阵返回 null）。 */
+    /**
+     * 列主序 4×4 求逆（双精度 + 高斯-约当；奇异或含非有限值时返回 null）。
+     *
+     * 为什么不再用 JOML 的 `Matrix4f().set(...).invert()`：`set(16 个 float)` 的参数按**行主序**
+     * 解释，而 `get(float[])` 按**列主序**写出 —— 一进一出正好把结果转置，拿到的其实是
+     * 「逆矩阵的转置」。反投影用错矩阵会让世界位置整片失真；实测那条路在这台机器上还会整片
+     * NaN（诊断 `icRow3=[NaN,NaN,NaN,NaN]`），于是每个像素都在 NaN 兜底处返回 0，
+     * 运动矢量恒为 0、拖影永不衰减。这里按列主序自己算，语义没有第二种解释。
+     */
     private fun invert(matrix: FloatArray): FloatArray? {
-        return try {
-            val m = Matrix4f().set(matrix[0], matrix[1], matrix[2], matrix[3],
-                matrix[4], matrix[5], matrix[6], matrix[7],
-                matrix[8], matrix[9], matrix[10], matrix[11],
-                matrix[12], matrix[13], matrix[14], matrix[15]).invert()
-            val out = FloatArray(16)
-            m.get(out)
-            out
-        } catch (t: Throwable) {
-            null
+        if (matrix.size < 16) {
+            return null
         }
+        // 增广矩阵：左边 4 列是 A（按行主序排好），右边 4 列是单位阵。
+        val augmented = Array(4) { r ->
+            DoubleArray(8) { c ->
+                when {
+                    c < 4 -> matrix[c * 4 + r].toDouble()
+                    c - 4 == r -> 1.0
+                    else -> 0.0
+                }
+            }
+        }
+        for (col in 0 until 4) {
+            var pivot = col
+            var best = kotlin.math.abs(augmented[col][col])
+            for (r in col + 1 until 4) {
+                val candidate = kotlin.math.abs(augmented[r][col])
+                if (candidate > best) {
+                    best = candidate
+                    pivot = r
+                }
+            }
+            if (!best.isFinite() || best < 1e-20) {
+                return null
+            }
+            if (pivot != col) {
+                val swap = augmented[col]
+                augmented[col] = augmented[pivot]
+                augmented[pivot] = swap
+            }
+            val diagonal = augmented[col][col]
+            for (c in 0 until 8) {
+                augmented[col][c] /= diagonal
+            }
+            for (r in 0 until 4) {
+                if (r == col) {
+                    continue
+                }
+                val factor = augmented[r][col]
+                if (factor == 0.0) {
+                    continue
+                }
+                for (c in 0 until 8) {
+                    augmented[r][c] -= factor * augmented[col][c]
+                }
+            }
+        }
+        val out = FloatArray(16)
+        for (r in 0 until 4) {
+            for (c in 0 until 4) {
+                out[c * 4 + r] = augmented[r][c + 4].toFloat()
+            }
+        }
+        return out
     }
 
     private fun countSkip(reason: String) {
@@ -651,12 +732,14 @@ object D3D12Velocity {
      * `SV_Position.xy` 是像素中心，除以屏幕尺寸就是该像素的 uv（与深度采样坐标一致），
      * 所以不需要额外插值量。清屏值（depth 恰为 0 或 1）直接输出 0，避免远平面反投影出垃圾。
      *
-     * 逐物体修正（P76b）：物体行里的世界 AABB 与位移都由 CPU 算好（见 [D3D12ObjectMotion]），
-     * GPU 侧只做"当前像素的世界位置落在哪个物体的上一帧盒子里"这一件事，然后**直接采用**那个
-     * 物体的屏幕位移。为什么不自己乘矩阵：本 pass 用的世界位置来自**本帧抖动投影**的反投影，
-     * 含当前的 jitter；而物体位移是 CPU 按「本帧插值位置 − 再上一帧插值位置」算的，两者都建立在
-     * 同一套 view-projection 与同一份 jitter 之上，所以位移本身已经是"干净的屏幕空间差"，
-     * 再套一次矩阵只会重复计入投影与 jitter。
+     * 逐物体修正（P76b）：物体行里的世界 AABB 与「本帧/上一帧位置」都由 CPU 算好
+     * （见 [D3D12ObjectMotion]），GPU 侧只做两件事：① 判断这个像素现在被哪个物体的盒子挡住；
+     * ② 刚体平移下把该表面点搬回上一帧位置再投影。
+     *
+     * 为什么不借「物体中心的屏幕位移」来近似：那样得到的不是这个表面点的位移，只是表面点相对
+     * 物体中心的偏移，静止物体也会算出非零值。`world + (prev - cur)` 才是精确的对应关系，
+     * 且与相机重投影共用同一个 PrevViewProj（同样不含本帧 jitter），与 P76a 的约定一致。
+     * 两条路径都还要再加 `CameraDelta` —— 世界位置是「相对本帧相机」的，PrevViewProj 却没有平移。
      */
     private val PIXEL_HLSL: String = """
         cbuffer DXRMVelocity : register(b0, space0) {
@@ -665,6 +748,17 @@ object D3D12Velocity {
             float2 ScreenSize;
             // x = 物体行数 + 1（0 表示没有物体，循环一次都不进），y = 位移像素上限。
             float2 ObjectParams;
+            // 本帧抖动带来的像素偏移。uv 是抖动后的屏幕位置，PrevViewProj 是未抖动的
+            // 上一帧投影，所以位移里混着这份 jitter，必须减掉才是去抖动空间的位移。
+            float2 JitterPixels;
+            // 上一帧的抖动。历史缓冲是上一帧**抖动后**的画面：同一个表面点在上一帧里
+            // 落在 prevUv + 上一帧jitter 的像素上，所以采样点还得再补回这一项。
+            float2 PrevJitterPixels;
+            // 两帧之间相机平移的增量（本帧 − 上一帧）。深度反投影出的是**相对本帧相机**的
+            // 位置，而 PrevViewProj 的视图矩阵只有旋转，所以必须补上这段平移，否则相机自己
+            // 走动/侧移造成的视差整块丢失。
+            float3 CameraDelta;
+            float CameraDeltaPad;
         };
 
         Texture2D<float> DXRMDepth : register(t1, space0);
@@ -697,9 +791,9 @@ object D3D12Velocity {
         // 有意的：本 pass 读到的深度、反投影出的世界位置描述的都是**本帧**的几何，所以匹配时
         // 问的是"本帧这个位置，上一帧属于哪个物体"。
         bool insideObjectBox(float3 world, uint base) {
-            float3 center = float3(DXRMObjects.Load(base + OBJECT_FIELD_PREV_X),
-                                   DXRMObjects.Load(base + OBJECT_FIELD_PREV_X + 1u),
-                                   DXRMObjects.Load(base + OBJECT_FIELD_PREV_X + 2u));
+            float3 center = float3(DXRMObjects.Load(base + OBJECT_FIELD_CUR_X),
+                                   DXRMObjects.Load(base + OBJECT_FIELD_CUR_X + 1u),
+                                   DXRMObjects.Load(base + OBJECT_FIELD_CUR_X + 2u));
             float3 halfExtent = float3(DXRMObjects.Load(base + OBJECT_FIELD_HALF_X),
                                        DXRMObjects.Load(base + OBJECT_FIELD_HALF_X + 1u),
                                        DXRMObjects.Load(base + OBJECT_FIELD_HALF_X + 2u))
@@ -720,6 +814,7 @@ object D3D12Velocity {
             float2 uv = position.xy / ScreenSize;
             float depth = DXRMDepth.SampleLevel(DXRMDepthSampler, uv, 0).r;
             if (depth <= 0.0 || depth >= 1.0) {
+                // 天空/远平面（reverse-Z 下 depth==0）没有可靠的对应点，报 0 让 DLSS 自己判断。
                 return float4(0.0, 0.0, 0.0, 0.0);
             }
             float4 ndc = float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
@@ -728,14 +823,28 @@ object D3D12Velocity {
                 return float4(0.0, 0.0, 0.0, 0.0);
             }
             world /= world.w;
-            float4 prevClip = mul(PrevViewProj, world);
-            if (abs(prevClip.w) < 1e-6) {
+            float4 prevClip = mul(PrevViewProj, float4(world.xyz + CameraDelta, 1.0));
+            // P76d（用户 m08236）：点在**上一帧相机背后**（w<0）时绝不能再做 xy/w —— 负的 w 会把
+            // 屏幕位置**镜像**到另一边，得到一个"量级看着合理、实际指向画面另一处"的位移，DLSS
+            // 就照着它去历史缓冲里取别处的颜色。这不是残影而是**整片表面瞬间颜色错乱**：用户实测
+            // 沙地变白（取到了天空）、树叶变紫，且只在转视角/走动时出现一瞬。
+            // 这种像素没有可用的对应点，报 0 交给 DLSS 自己的 disocclusion 处理。
+            // 旧写法是 `abs(prevClip.w) < 1e-6`，只挡住了数值退化、恰好放过了 w<0 这一整类。
+            if (prevClip.w <= 1e-4) {
                 return float4(0.0, 0.0, 0.0, 0.0);
             }
             float2 prevNdc = prevClip.xy / prevClip.w;
             float2 prevUv = float2(prevNdc.x * 0.5 + 0.5, 0.5 - prevNdc.y * 0.5);
-            float2 motion = (uv - prevUv) * ScreenSize;
-
+            // P76h（DLSS 编程指南）：运动向量的方向是「从**本帧**指向该像素在**上一帧**的位置」，
+            // 即 `prevPos - curPos`。旧写法是 `uv - prevUv`，方向整体反了 —— 静止时两边都是 0
+            // 所以看不出来，一旦相机移动 DLSS 就照着**反向**位移去历史缓冲取样，于是运动方向
+            // 上拖出一条永不收敛的残影（用户 m10388：静止好了，走动/转视角的拖影还在）。
+            float2 motion = (prevUv - uv) * ScreenSize + PrevJitterPixels;
+            // NaN/inf 兜底：NaN 参与的比较恒为假，所以用"取反的 <=" 写法把它一并挡掉。上一条
+            // 守卫之后这里理论上不会触发，留着是因为一旦传出去就是一整块画面的错色。
+            if (!(dot(motion, motion) <= 1.0e12)) {
+                return float4(0.0, 0.0, 0.0, 0.0);
+            }
             // P76b：先到先得 —— 行是按「上一帧采集顺序」排的，一个像素落在多个盒子里时
             // （嵌套的乘客/坐骑、相邻的掉落物）取第一行，够用且稳定。
             uint rowLimit = (uint)ObjectParams.x;
@@ -744,21 +853,29 @@ object D3D12Velocity {
                 if (!insideObjectBox(world, base)) {
                     continue;
                 }
-                float3 currentPos = float3(DXRMObjects.Load(base + OBJECT_FIELD_CUR_X),
-                                           DXRMObjects.Load(base + OBJECT_FIELD_CUR_X + 1u),
-                                           DXRMObjects.Load(base + OBJECT_FIELD_CUR_X + 2u));
-                float4 currentClip = mul(PrevViewProj, float4(currentPos, 1.0));
-                if (abs(currentClip.w) < 1e-6) {
+                // 这个像素现在看到的是物体的表面点。它上一帧在哪儿？物体是刚体平移，
+                // 所以上一帧位置 = 本帧世界位置 + (上一帧物体位置 - 本帧物体位置)。
+                // 这是**精确**的对应关系，不需要也不应该去借物体中心的屏幕位移来近似。
+                float3 cur = float3(DXRMObjects.Load(base + OBJECT_FIELD_CUR_X),
+                                    DXRMObjects.Load(base + OBJECT_FIELD_CUR_X + 1u),
+                                    DXRMObjects.Load(base + OBJECT_FIELD_CUR_X + 2u));
+                float3 prv = float3(DXRMObjects.Load(base + OBJECT_FIELD_PREV_X),
+                                    DXRMObjects.Load(base + OBJECT_FIELD_PREV_X + 1u),
+                                    DXRMObjects.Load(base + OBJECT_FIELD_PREV_X + 2u));
+                float3 prevWorld = world.xyz + (prv - cur) + CameraDelta;
+                float4 prevObjectClip = mul(PrevViewProj, float4(prevWorld, 1.0));
+                // 同 main 里的守卫：w<=0 会把位置镜像到画面另一处，得到假位移（见上）。
+                if (prevObjectClip.w <= 1e-4) {
                     continue;
                 }
-                float2 currentNdc = currentClip.xy / currentClip.w;
-                float2 currentUv = float2(currentNdc.x * 0.5 + 0.5, 0.5 - currentNdc.y * 0.5);
-                float2 objectDelta = (uv - currentUv) * ScreenSize;
+                float2 prevObjectNdc = prevObjectClip.xy / prevObjectClip.w;
+                float2 prevObjectUv = float2(prevObjectNdc.x * 0.5 + 0.5, 0.5 - prevObjectNdc.y * 0.5);
+                float2 objectMotion = (prevObjectUv - uv) * ScreenSize;
                 // 坏匹配（张冠李戴的行）位移会大得离谱，直接丢掉，回退相机重投影。
-                if (dot(objectDelta, objectDelta) > ObjectParams.y * ObjectParams.y) {
+                if (dot(objectMotion, objectMotion) > ObjectParams.y * ObjectParams.y) {
                     continue;
                 }
-                return float4(motion - objectDelta, 0.0, 0.0);
+                return float4(objectMotion + PrevJitterPixels, 0.0, 0.0);
             }
             return float4(motion, 0.0, 0.0);
         }
