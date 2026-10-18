@@ -146,6 +146,30 @@ neoForge {
             if (gprops.gradleProperty('dxrmc.debugLayer').isPresent()) {
                 environment 'DX12_DEBUG_LAYER', gprops.gradleProperty('dxrmc.debugLayer').get()
             }
+            // Streamline 运行期探针（P111）：`-Pdxrmc.streamline=1`，默认不转发。
+            // native 侧 applyStreamline() 只在 MCDR_STREAMLINE=1 时才尝试 slInit。
+            if (gprops.gradleProperty('dxrmc.streamline').isPresent()) {
+                environment 'MCDR_STREAMLINE', gprops.gradleProperty('dxrmc.streamline').get()
+            }
+            // P112：DLSS 实现选择（`-Pdxrmc.dlssImpl=streamline` → MCDR_DLSS_IMPL；默认 ngx）。
+            // P115：`-Pdxrmc.reflexFrameLimitUs=6944` 让 Reflex 限制到 ~144 fps（0 = 不限）。
+            if (gprops.gradleProperty('dxrmc.reflexFrameLimitUs').isPresent()) {
+                environment 'MCDR_REFLEX_FRAME_LIMIT_US', gprops.gradleProperty('dxrmc.reflexFrameLimitUs').get()
+            }
+            // P113：`-Pdxrmc.reflex=0` 关掉 Reflex（A/B 用）。
+            if (gprops.gradleProperty('dxrmc.reflex').isPresent()) {
+                environment 'MCDR_REFLEX', gprops.gradleProperty('dxrmc.reflex').get()
+            }
+            if (gprops.gradleProperty('dxrmc.dlssImpl').isPresent()) {
+                environment 'MCDR_DLSS_IMPL', gprops.gradleProperty('dxrmc.dlssImpl').get()
+            }
+            // TAA 投影 jitter 注入（P77）：`-Pdxrmc.taaJitter=1` -> DXRMC_TAA_JITTER=1。
+            // 默认关闭（见 D3D12Temporal.jitterInjectionEnabled）：注入路径在 P108d 被记录为"会让
+            // 整帧塌成清屏色"，但那次的现场里同时开着 captureUniform 的 GPU 读回（现已删除），
+            // 需要用这个开关复验一次再决定是否默认打开。
+            if (gprops.gradleProperty('dxrmc.taaJitter').isPresent()) {
+                environment 'DXRMC_TAA_JITTER', gprops.gradleProperty('dxrmc.taaJitter').get()
+            }
             // DXRMC：把选定的环境变量显式转给 runClient 的 JVM。Loom 的 run config **不继承**
             // shell 环境（Gradle 守护进程持有它自己启动时的环境），所以 `$env:X=…` 常常到不了
             // JavaExec 子进程 —— `-P` 走 Gradle 命令行则一定生效。
@@ -374,20 +398,24 @@ sourceSets.main.resources.srcDir copyNative
 //   AMD FidelityFX  -- AMD binary-only redistribution grant in docs/license.md;
 //                      requires the copyright and permission notice be reproduced.
 def vendorJarLibs = [
+        // XeSS 运行时仍在子模块里（上游 intel/xess 的 bin/ 自带这些 DLL，Intel 许可证允许再分发）。
         [dir: file('../MCDR/external/xess/bin'), files: ['libxess.dll', 'libxess_fg.dll', 'libxell.dll'],
          license: file('../MCDR/external/xess/LICENSE.txt')],
-        [dir: file('../MCDR/external/fidelityfx/bin'),
+        // FidelityFX 运行时已迁到 MCDR\lib\（git 不记录，见 MCDR\.gitignore 的 /lib/）；
+        // 许可证仍在子模块里：Kits/FidelityFX/docs/license.md。
+        [dir: file('../MCDR/lib/fidelityfx'),
          files: ['amd_fidelityfx_loader_dx12.dll', 'amd_fidelityfx_upscaler_dx12.dll',
                  'amd_fidelityfx_denoiser_dx12.dll', 'amd_fidelityfx_radiancecache_dx12.dll',
                  'amd_fidelityfx_framegeneration_dx12.dll'],
-         license: file('../MCDR/external/fidelityfx/LICENSE.md')],
+         license: file('../MCDR/external/fidelityfx/Kits/FidelityFX/docs/license.md')],
 ]
 
 // Dev-only. `nvngx_dlssd.dll` is Ray Reconstruction, `nvngx_dlssg.dll` is Frame
 // Generation. libxess_dx11.dll is deliberately absent: D3D11 flavour, and MCDR
 // is D3D12-only.
 def vendorDevLibs = [
-        [dir: file('../MCDR/external/dlss/bin/x64'), pattern: 'nvngx_*.dll'],
+        // DLSS 运行时同样在 MCDR\lib\dlss\（上游 NVIDIA/DLSS 仓库不含运行时 DLL，且不可再分发）。
+        [dir: file('../MCDR/lib/dlss'), pattern: 'nvngx_*.dll'],
 ]
 
 // Minimal glob -> regex, so `nvngx_*.dll` matches without pulling in a full

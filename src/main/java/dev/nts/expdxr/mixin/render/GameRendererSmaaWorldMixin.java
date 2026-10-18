@@ -2,6 +2,7 @@ package dev.nts.expdxr.mixin.render;
 
 import dev.nts.expdxr.d3d12.render.advanced.smaa.D3D12GUISplit;
 import dev.nts.expdxr.d3d12.render.advanced.smaa.D3D12SMAAWorld;
+import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12TAA;
 import dev.nts.expdxr.dxrmc.dlss.DeepLearningSuperSampling;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.renderer.GameRenderer;
@@ -28,10 +29,19 @@ public class GameRendererSmaaWorldMixin {
                      target = "Lnet/minecraft/client/gui/render/GuiRenderer;render()V"),
             remap = false)
     private void dx12_smaaWorldOnly(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
+        // P77：TAA 与 SMAA 是同一个选项的两个取值，互斥；排在 SMAA 旁边，谁被选中谁动手。
+        D3D12TAA.applyIfEnabled();
         D3D12SMAAWorld.applyIfEnabled();
         // P108d：DLSS 的 Evaluate 挂在这里 —— 只有这一刻主目标的**颜色**里才有本帧的世界层。
         // 排在 SMAA 之后：先在世界分辨率上做 AA，再让 DLSS 把结果升采样进 GUI 目标。
         DeepLearningSuperSampling.applyIfEnabled();
+        // P117：世界层已画完 —— eSimulationEnd + eRenderSubmitStart。
+        DeepLearningSuperSampling.pclRenderSubmitStart();
+        // P109：F3 的 3D 十字准星推迟到这里才画 —— 上面那一笔已经把本帧世界层（不含它）喂给
+        // DLSS/DLAA 评价了，所以它进不了 NGX 的时间性输入（不会拖影），但仍然画在同一个主目标上。
+        // 必须留在**调用点**、不能塞进 applyIfEnabled()：那条路径有多条提前 return，放进去就会在
+        // "本帧不评价"的时候把十字准星整个丢掉。
+        DeepLearningSuperSampling.replayCrosshair();
         // P106：世界层（含 SMAA / DLSS 结果）随后被搬进 GUI 自己的窗口尺寸目标 —— 顺序不能反。
         D3D12GUISplit.prepareForGui();
     }
@@ -63,5 +73,7 @@ public class GameRendererSmaaWorldMixin {
         // 必须挂在**这里**（无论 DLSS 开还是关都会跑到），不能挂 `applyIfEnabled()`：
         // "DLSS 关掉 => 把抗锯齿还回去"恰恰发生在开关为 false 的时候。
         DeepLearningSuperSampling.reconcileAntiAliasingEveryFrame();
+        // P117：PCL stats 的帧开始标记（必须在任何 evaluate 之前）。
+        DeepLearningSuperSampling.pclFrameBegin();
     }
 }

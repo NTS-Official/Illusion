@@ -1,5 +1,6 @@
 package dev.nts.expdxr.mixin.render;
 
+import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12TAA;
 import dev.nts.expdxr.dxrmc.dlss.DeepLearningSuperSampling;
 import net.minecraft.client.renderer.LevelRenderer;
 import org.spongepowered.asm.mixin.Mixin;
@@ -71,6 +72,9 @@ public class LevelRendererMainPassDepthMixin {
      */
     @Inject(method = "lambda$addMainPass$0", at = @At("RETURN"), remap = false)
     private void dxr_mc$dlssDepthSnapshotAfterMainPass(CallbackInfo ci) {
+        // P77：只开 TAA（DLSS 关着）时运动矢量要从这里补录 —— captureMotionVectors 在 DLSS 关闭时
+        // 第一行就返回，不补这一行 TAA 就永远拿不到运动矢量。
+        D3D12TAA.captureTemporalData();
         DeepLearningSuperSampling.captureMotionVectors();
         DeepLearningSuperSampling.captureDepthSnapshot();
     }

@@ -8,6 +8,7 @@ import com.mojang.blaze3d.textures.GpuTexture
 import dev.nts.expdxr.utils.IllusionLogger
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.adapter.D3D12Device
+import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12TAA
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12Temporal
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12Velocity
 import dev.nts.expdxr.d3d12.render.core.*
@@ -349,6 +350,18 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
     fun recordSmaaWorldPass(texture: D3D12GpuTexture): Boolean {
         this.ensureListOpen()
         return MCDR_ABI.dx12ApplySmaaToTexture(this.ctx, texture.handle())
+    }
+
+    /**
+     * P77：把 **TAA 的 resolve + 回填** 录进当前命令列表（世界画完、GUI 还没画的那一刻）。
+     *
+     * 与 [recordSmaaWorldPass] 同一性质、同一挂点，两者互斥（TAA 与 SMAA 是同一个抗锯齿选项
+     * 的两个取值）：往本帧已经打开的那条命令列表里追加命令，不新建也不提交。是否真的做由
+     * [D3D12TAA.isSelected] 决定，未选中时立刻返回，代价只是一次 volatile 读。
+     */
+    fun recordTaaPass(world: D3D12GpuTexture): Boolean {
+        this.ensureListOpen()
+        return D3D12TAA.record(this.ctx, this.device, world)
     }
 
     /**

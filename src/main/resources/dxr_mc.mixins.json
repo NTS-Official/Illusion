@@ -17,6 +17,7 @@
     "render.RenderTargetCreateBuffersScaleMixin",
     "render.LevelRendererWorldTargetsScaleMixin",
     "render.GameRendererSmaaWorldMixin",
+    "render.DebugCrosshairRendererMixin",
     "render.LevelRendererMainPassDepthMixin",
     "render.GuiRendererTargetMixin",
     "render.CubeMapTargetMixin",

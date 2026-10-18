@@ -21,6 +21,7 @@ import java.io.File
 import java.lang.foreign.Arena
 import java.lang.foreign.MemoryLayout.PathElement
 import java.lang.foreign.MemorySegment
+import java.lang.foreign.ValueLayout
 import java.lang.ref.WeakReference
 import java.nio.charset.StandardCharsets
 import java.util.Optional
@@ -28,6 +29,8 @@ import net.minecraft.client.Minecraft
 import net.minecraft.client.OptionInstance
 import net.minecraft.client.gui.components.CycleButton
 import net.minecraft.client.gui.components.Tooltip
+import net.minecraft.client.renderer.DebugCrosshairRenderer
+import net.minecraft.client.renderer.state.level.CameraRenderState
 import net.minecraft.network.chat.Component
 
 /**
@@ -90,11 +93,10 @@ import net.minecraft.network.chat.Component
  * 不这样做的话 `pInMotionVectors` 恒为空句柄，native 会在 `d3d12_dlss.cpp:886` 直接返回 0，
  * DLSS 永远不评价。
  *
- * **投影 jitter 在 DLSS 开启期间被冻结（P108d）**：`D3D12Temporal.enabled` 打开后，那条"替换关卡
- * 投影上传"的路径会把整帧打成一片常量清屏色（实测 `-Pdxrmc.temporal=true` 必现，与 jitter 数值、
- * 是否写回原字节都无关），所以本类在打开 DLSS 时把 [D3D12Temporal.jitterSuspended] 置位：历史
- * 记账/运动矢量照常，但投影上传一个字节都不改、[D3D12Temporal.jitter] 返回 0/0。代价是 NGX 拿到
- * 未抖动的世界层（少一点亚像素细节），好处是画面与 jitterOffset 两边一致、不会错位。
+ * **投影 jitter 与 TAA 共用同一份序列（P110）**：`D3D12Temporal` 每帧把 Halton(2,3) 的亚像素偏移
+ * 注入关卡投影，本类只把同一个值转发给 NGX（`InJitterOffsetX/Y`）。历史记录里"冻结 jitter 才不塌屏"
+ * 的结论已作废：那次实验的干扰项是 GPU 写映射读回（已永久关闭）与 `readFloats` 的字节序 bug —— 后者
+ * 让注入的一直是两个字节反转的垃圾 float，等于从没抖过。
  *
  * 拿不到/降级（诚实清单）：
  *  - `nearZ`/`farZ` 填 0.0 并打一行说明：26.2 的关卡 `Projection` 在 JVM 侧没有可达对象
@@ -186,6 +188,9 @@ object DeepLearningSuperSampling {
 
     /** 写包/调用抛出异常时置位：只报一次，之后本会话不再喂数据。 */
     private var broken = false
+    /** P112 阶段 3：每帧计数（applyIfEnabled 每帧一次），每秒打一行真实 fps 供 A/B。 */
+    private var fpsFrames = 0
+    private var fpsLastNanos = System.nanoTime()
 
     /**
      * 是否已经在 DLSS 模式下跑过（用来判断"离开 DLSS"要不要复位状态）。
@@ -546,8 +551,9 @@ object DeepLearningSuperSampling {
             Illusion.LOGGER.info(
                 "[dxrmc] $PREFIX DLAA engaged: anti-aliasing = DLAA, render scale pinned to 100% "
                     + "(render == target is required), DLSS feature requested at the DLAA tier. "
-                    + "Note: projection jitter is still frozen to 0 while DLSS runs, so this is a "
-                    + "no-jitter temporal DLAA — weaker than the standard one until P75 is fixed.")
+                    + "P110b: the projection carries the same Halton jitter sequence as TAA now, "
+                    + "so NGX gets real sub-pixel samples (InJitterOffset + MVJittered) instead of "
+                    + "the jitter-free accumulation this path used to fall back to.")
         } else {
             // 还原用户自己选的挡位；缩放缓条由 setDlaaLock(false) 恢复到锁定前的用户值。
             pushForcedQuality(QUALITY_OPTION.get())
@@ -1079,8 +1085,22 @@ object DeepLearningSuperSampling {
      * 于是「先 SMAA、后 DLSS 升采样」的顺序成立，而且喂给 NGX 的是**真正的世界层颜色**。
      * 任何一步不满足都只是安静地跳过。
      */
+    /** P117：PCL stats —— 帧开始（世界渲染之前）：建本帧 token + eSimulationStart。 */
+    @JvmStatic
+    fun pclFrameBegin() {
+        MCDR_ABI.dx12ReflexFrameBegin()
+    }
+
+    /** P117：世界层画完、即将提交本帧 —— eSimulationEnd + eRenderSubmitStart。 */
+    @JvmStatic
+    fun pclRenderSubmitStart() {
+        MCDR_ABI.dx12ReflexMarker(1)  // sl::PCLMarker::eSimulationEnd
+        MCDR_ABI.dx12ReflexMarker(2)  // sl::PCLMarker::eRenderSubmitStart
+    }
+
     @JvmStatic
     fun applyIfEnabled() {
+        tickFps()
         // 闸门：只看 DLSS 自己的开关（`dxrMcDlss`）。关掉时把数据面与状态复位。
         // 与抗锯齿无关：抗锯齿的模式在本类这一侧只是被锁成 OFF（用户 m05600），两件事各判各的开关。
         if (!isEnabled()) {
@@ -1195,6 +1215,10 @@ object DeepLearningSuperSampling {
             return disable("writing the DLSS input packet failed: $t")
         }
 
+        // P112：把本帧相机常量交给 native（Streamline 的 sl::Constants 数据源）。
+        pushDlssConstants(renderWidth, renderHeight, targetWidth, targetHeight,
+            jitter[0].toFloat(), jitter[1].toFloat(), resetReason != null)
+
         val result = try {
             encoder.recordDlssEvaluate(packet)
         } catch (t: Throwable) {
@@ -1225,6 +1249,55 @@ object DeepLearningSuperSampling {
                 countEvaluateFailure()
                 noteProblem("dx12EvaluateDlss returned an unexpected value $result")
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // P109：F3 的 3D 十字准星推迟到评价之后再画
+    // ------------------------------------------------------------------
+
+    /**
+     * 本帧被 [deferCrosshair] 拦下的那一笔十字准星（每帧最多一笔，新的覆盖旧的）。
+     *
+     * 三个字段一起读写、只在渲染线程上，所以不加锁；[replayCrosshair] 无论画没画成都清空它们。
+     */
+    private var pendingCrosshairRenderer: DebugCrosshairRenderer? = null
+    private var pendingCrosshairCamera: CameraRenderState? = null
+    private var pendingCrosshairGuiScale: Int = 0
+
+    /**
+     * P109：把 F3 的 3D 十字准星**推迟**到本帧 DLSS/DLAA 评价之后（由
+     * `mixin.render.DebugCrosshairRendererMixin` 在 `render` 的 HEAD 调进来，替掉原地的画）。
+     *
+     * <p>为什么：那个 gizmo 世界对齐、又没有运动矢量，画进 `mainRenderTarget` 就会被 NGX 当成
+     * 静止的世界内容做时间累积（转视角时拖影）；而这版 NGX 运行库不支持 reactive mask，唯一的
+     * 办法是不让它进输入。
+     *
+     * <p>只留一笔：vanilla 每帧只画一次（`GameRenderer.java:592-596`），多余的调用覆盖旧的，
+     * 保证不会把上一帧的相机状态画到这一帧。
+     */
+    @JvmStatic
+    fun deferCrosshair(renderer: DebugCrosshairRenderer, cameraState: CameraRenderState, guiScale: Int) {
+        pendingCrosshairRenderer = renderer
+        pendingCrosshairCamera = cameraState
+        pendingCrosshairGuiScale = guiScale
+    }
+
+    /**
+     * P109：补画 [deferCrosshair] 存下的十字准星，并清空待画槽（这一帧画不成也清，不留给下一帧）。
+     *
+     * <p>调用点是**固定的那一行** —— `mixin.render.GameRendererSmaaWorldMixin` 里
+     * [applyIfEnabled] 的下一行。绝不能挪进 [applyIfEnabled] 内部：它有多条提前 `return`
+     * （本帧不评价时直接退出），补画放在里面就会在那些帧把十字准星整个丢掉。
+     */
+    @JvmStatic
+    fun replayCrosshair() {
+        val renderer = pendingCrosshairRenderer ?: return
+        val cameraState = pendingCrosshairCamera
+        pendingCrosshairRenderer = null
+        pendingCrosshairCamera = null
+        if (cameraState != null) {
+            renderer.render(cameraState, pendingCrosshairGuiScale)
         }
     }
 
@@ -1344,6 +1417,141 @@ object DeepLearningSuperSampling {
      * 只在**真正评价成功**之后才把当前值记下来（[commitState]），所以返回 0/-1 的帧不会把
      * "变化"吃掉。
      */
+    /**
+     * P112：把本帧相机常量写进 `MCDRLayout.DLSS_CONSTANTS` 并交给 native
+     * （`mcdr_dx12SetDlssConstants`）。Streamline 的 `sl::Constants` 需要 viewProj/prevViewProj、
+     * jitter、mvecScale（像素空间 MV ⇒ 1/renderSize）、相机基与位置；其余三个矩阵由 native 派生。
+     * 旧 DLL 没有该导出时返回 `Int.MIN_VALUE`，这里静默跳过。
+     */
+    /** P112 阶段 3：真实帧率（applyIfEnabled 每帧一次；不是 evaluate 调用次数）。 */
+    private fun tickFps() {
+        fpsFrames++
+        val now = System.nanoTime()
+        val elapsed = now - fpsLastNanos
+        if (elapsed >= 1_000_000_000L) {
+            val fps = (fpsFrames * 1_000_000_000L / elapsed).toInt()
+            val impl = System.getenv("MCDR_DLSS_IMPL") ?: "ngx"
+            Illusion.LOGGER.info("[dxrmc] P112 fps={} impl={}", fps, impl)
+            fpsFrames = 0
+            fpsLastNanos = now
+        }
+    }
+
+    /**
+     * P119：把相机平移烘进「纯旋转」的视图矩阵，得到真正的 world→view。
+     *
+     * `V_world = V_rot * T(-camPos)`：列主序下平移列在 `[12]/[13]/[14]`，其第 r 行等于
+     * `-(row_r(V_rot) · camPos)`。速度场那套（`D3D12Velocity`）用相机相对空间就够了，但
+     * `clipToPrevClip` 必须包含相机平移，否则「静止正常、一走动就拖影」。
+     */
+    private fun worldSpaceView(rotation: FloatArray, px: Float, py: Float, pz: Float): FloatArray {
+        if (rotation.size < 16) {
+            return rotation
+        }
+        val out = rotation.copyOf()
+        for (row in 0 until 3) {
+            val rx = rotation[row]
+            val ry = rotation[4 + row]
+            val rz = rotation[8 + row]
+            out[12 + row] = -(rx * px + ry * py + rz * pz)
+        }
+        return out
+    }
+
+    private fun pushDlssConstants(renderWidth: Int, renderHeight: Int, targetWidth: Int,
+        targetHeight: Int, jitterX: Float, jitterY: Float, reset: Boolean) {
+        val proj = D3D12Temporal.currentProjection()
+        val prevProj = D3D12Temporal.previousProjection()
+        val view = D3D12Temporal.currentCameraView()
+        val prevView = D3D12Temporal.previousCameraView()
+        if (proj == null || prevProj == null || view == null || prevView == null) {
+            return
+        }
+        // P119：`view` 只有旋转、没有平移（世界层是相机相对空间），而 `clipToPrevClip` 必须包含
+        // **相机平移**，否则相机一走位，重投影就只算了旋转 —— 表现正是「静止正常、一走动就拖影」。
+        // 这里把相机平移烘进视图矩阵（V_world = V_rot * T(-camPos)），VP 就成了真正的 world→clip；
+        // 参考实现（HOMO `FGConstantsBuilder`）也是用相机相对位移构造 viewToViewPrev 的。
+        val camPos = D3D12Temporal.currentCameraPosition()
+        val prevCamPos = D3D12Temporal.previousCameraPosition()
+        val posX = camPos?.get(0) ?: 0.0f
+        val posY = camPos?.get(1) ?: 0.0f
+        val posZ = camPos?.get(2) ?: 0.0f
+        val worldView = worldSpaceView(view, posX, posY, posZ)
+        val prevWorldView = worldSpaceView(prevView,
+            prevCamPos?.get(0) ?: posX, prevCamPos?.get(1) ?: posY, prevCamPos?.get(2) ?: posZ)
+        val viewProj = D3D12Temporal.multiply(proj, worldView)
+        val prevViewProj = D3D12Temporal.multiply(prevProj, prevWorldView)
+        // P118：`view` 是**列主序**的世界->相机旋转（相机在原点，见 `D3D12Velocity`）。
+        // 相机在**世界空间**的 right/up/fwd 是这张矩阵的**行**：列主序下 (row r, col c) 在 r + c*4。
+        // 旧代码按行主序取成了列（right=(view[0],view[1],view[2])），给 SL 的是一组被转置的基。
+        val rightX = view[0]; val rightY = view[4]; val rightZ = view[8]
+        val upX = view[1]; val upY = view[5]; val upZ = view[9]
+        val fwdX = view[2]; val fwdY = view[6]; val fwdZ = view[10]
+        val fovRadians = Math.toRadians(Minecraft.getInstance().options.fov().get().toDouble()).toFloat()
+        val aspect = if (targetHeight > 0) targetWidth.toFloat() / targetHeight.toFloat() else 1.0f
+        val layout = MCDRLayout.DLSS_CONSTANTS
+        Arena.ofConfined().use { arena ->
+            val seg = arena.allocate(layout)
+            MemorySegment.copy(viewProj, 0, seg, ValueLayout.JAVA_FLOAT,
+                layout.byteOffset(PathElement.groupElement("viewProjection")), 16)
+            MemorySegment.copy(prevViewProj, 0, seg, ValueLayout.JAVA_FLOAT,
+                layout.byteOffset(PathElement.groupElement("prevViewProjection")), 16)
+            // P120：`cameraViewToClip` 的语义是 view->clip（就是这张投影），不是 world->clip 的 VP。
+            MemorySegment.copy(proj, 0, seg, ValueLayout.JAVA_FLOAT,
+                layout.byteOffset(PathElement.groupElement("projection")), 16)
+            seg.set(F32, layout.byteOffset(PathElement.groupElement("jitterOffsetX")), jitterX)
+            seg.set(F32, layout.byteOffset(PathElement.groupElement("jitterOffsetY")), jitterY)
+            seg.set(F32, layout.byteOffset(PathElement.groupElement("mvecScaleX")),
+                1.0f / renderWidth.toFloat())
+            seg.set(F32, layout.byteOffset(PathElement.groupElement("mvecScaleY")),
+                1.0f / renderHeight.toFloat())
+            seg.set(F32, layout.byteOffset(PathElement.groupElement("cameraPosX")), posX)
+            seg.set(F32, layout.byteOffset(PathElement.groupElement("cameraPosY")), posY)
+            seg.set(F32, layout.byteOffset(PathElement.groupElement("cameraPosZ")), posZ)
+            seg.set(F32, layout.byteOffset(PathElement.groupElement("cameraUpX")), upX)
+            seg.set(F32, layout.byteOffset(PathElement.groupElement("cameraUpY")), upY)
+            seg.set(F32, layout.byteOffset(PathElement.groupElement("cameraUpZ")), upZ)
+            seg.set(F32, layout.byteOffset(PathElement.groupElement("cameraRightX")), rightX)
+            seg.set(F32, layout.byteOffset(PathElement.groupElement("cameraRightY")), rightY)
+            seg.set(F32, layout.byteOffset(PathElement.groupElement("cameraRightZ")), rightZ)
+            seg.set(F32, layout.byteOffset(PathElement.groupElement("cameraFwdX")), fwdX)
+            seg.set(F32, layout.byteOffset(PathElement.groupElement("cameraFwdY")), fwdY)
+            seg.set(F32, layout.byteOffset(PathElement.groupElement("cameraFwdZ")), fwdZ)
+            // P118：near/far 从投影矩阵解出来。列主序 m[10]=A=(f+n)/(n-f)、m[14]=B=2fn/(n-f)，
+            // 于是 n = B/(A-1)、f = B/(A+1)。旧代码固定送 0.0，SL 拿到的是非法的近远平面。
+            val projA = proj[10]
+            val projB = proj[14]
+            val nearRaw = if (projA != 1.0f && projA.isFinite() && projB.isFinite()) {
+                projB / (projA - 1.0f)
+            } else {
+                0.0f
+            }
+            val farRaw = if (projA != -1.0f && projA.isFinite() && projB.isFinite()) {
+                projB / (projA + 1.0f)
+            } else {
+                0.0f
+            }
+            // P120：MC 是 reverse-Z（构造投影时 near/far 是互换的），上面解出来的两个平面
+            // 会跟着互换 —— 交给 SL 之前按大小改正，避免"近平面比远平面远"。
+            val nearZ = if (nearRaw > farRaw) farRaw else nearRaw
+            val farZ = if (nearRaw > farRaw) nearRaw else farRaw
+            seg.set(F32, layout.byteOffset(PathElement.groupElement("cameraNear")), nearZ)
+            seg.set(F32, layout.byteOffset(PathElement.groupElement("cameraFar")), farZ)
+            seg.set(F32, layout.byteOffset(PathElement.groupElement("cameraFovRadians")), fovRadians)
+            seg.set(F32, layout.byteOffset(PathElement.groupElement("cameraAspectRatio")), aspect)
+            seg.set(I32, layout.byteOffset(PathElement.groupElement("depthInverted")), 1)
+            seg.set(I32, layout.byteOffset(PathElement.groupElement("cameraMotionIncluded")), 1)
+            // P119：我们的运动矢量是**屏幕空间**像素位移（`D3D12Velocity` 写 `(prevUv - uv) * ScreenSize`），
+            // 不是 3D 世界空间速度。旧值 1 会让 SL 把 MV 当成 3D 速度再用相机矩阵投影一次 —— 静止时
+            // 世界速度≈0 所以看不出来，一走动整幅画面的位移就被算错，表现为「运动时才有拖影」。
+            seg.set(I32, layout.byteOffset(PathElement.groupElement("motionVectors3D")), 0)
+            seg.set(I32, layout.byteOffset(PathElement.groupElement("reset")), if (reset) 1 else 0)
+            seg.set(I32, layout.byteOffset(PathElement.groupElement("renderingGameFrames")), 1)
+            seg.set(I32, layout.byteOffset(PathElement.groupElement("motionVectorsJittered")), 1)
+            // 旧 DLL 没有该导出时返回 Int.MIN_VALUE；这里静默跳过（native 会打自己的 P112 行）。
+            MCDR_ABI.dx12SetDlssConstants(seg)
+        }
+    }
     private fun resetReason(level: Any, renderWidth: Int, renderHeight: Int, targetWidth: Int,
         targetHeight: Int, scalePercent: Int, windowWidth: Int, windowHeight: Int): String? = when {
         !evaluatedOnce -> "first evaluate of this DLSS session"
@@ -1398,17 +1606,6 @@ object DeepLearningSuperSampling {
             Illusion.LOGGER.info(
                 "[dxrmc] $PREFIX DLSS needs motion vectors: the velocity pass "
                     + "(dxrmc.temporal.velocity) is switched on while DLSS is selected")
-        }
-        // P108d：投影 jitter 的**应用**路径当前会毁掉整帧（见 [D3D12Temporal.interceptWrite] 的说明），
-        // 所以 DLSS 开启期间用它的"冻结"开关：投影上传不被替换、[D3D12Temporal.jitter] 返回 0。
-        // 代价是 NGX 拿到的是**未抖动**的世界层（少一点亚像素细节），但画面与 jitter 两边一致、不会错位。
-        if (!D3D12Temporal.jitterSuspended) {
-            D3D12Temporal.jitterSuspended = true
-            Illusion.LOGGER.info(
-                "[dxrmc] $PREFIX projection jitter is suspended while DLSS is on: replacing the "
-                    + "level-projection upload turns the whole frame into a constant colour on this "
-                    + "backend, so DLSS upscales the un-jittered world layer (NGX gets jitterOffset 0/0, "
-                    + "which is what is actually rendered)")
         }
     }
 

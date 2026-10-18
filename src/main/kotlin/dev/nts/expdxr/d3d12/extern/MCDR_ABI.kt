@@ -112,6 +112,11 @@ object MCDR_ABI {
     private var MH_setdlssrenderpreset: MethodHandle? = null
     /** P108z：把 JVM 建的输出纹理交给 native（见 [dx12SetDlssOutput]）。 */
     private var MH_setdlssoutput: MethodHandle? = null
+    /** P112：每帧相机常量（Streamline 的 sl::Constants）。 */
+    private var MH_setdlssconstants: MethodHandle? = null
+    /** P117：PCL stats —— 帧开始与通用标记。 */
+    private var MH_reflexframebegin: MethodHandle? = null
+    private var MH_reflexmarker: MethodHandle? = null
 
     private var MH_createdevice: MethodHandle? = null
     private var MH_createtexture: MethodHandle? = null
@@ -465,8 +470,7 @@ object MCDR_ABI {
     private fun verifyABI() {
         val version = MH_abiversion!!.invokeExact() as Int
         if (version != MCDR_ABI_VERSION) {
-            throw IllegalStateException("MCDR ABI version mismatch: java=${MCDR_ABI_VERSION}"
-                + " native=${version}")
+            throw IllegalStateException("MCDR ABI version mismatch: java=${MCDR_ABI_VERSION}, native=${version}")
         }
         Arena.ofConfined().use { arena ->
             val pFields = arena.allocate(MCDRLayout.PTR)
@@ -824,6 +828,44 @@ object MCDR_ABI {
      * @return 1 = 已记录（下一帧评价用它），0 = 接受但本机 DLSS 不可用/纹理不可用，-1 = 参数非法，
      *     [Int.MIN_VALUE] = 本地 DLL 没有这个导出。Never throws.
      */
+    /**
+     * P112：把每帧相机常量（`MCDRLayout.DLSS_CONSTANTS` 段）交给 native
+     * （`mcdr_dx12SetDlssConstants`）。旧 DLL 没有该导出时返回 [Int.MIN_VALUE]，调用方静默跳过。
+     */
+    /** P117：PCL stats 的帧开始 —— native 建本帧 SL frame token 并发 eSimulationStart。 */
+    fun dx12ReflexFrameBegin() {
+        if (LOAD_FAILURE != null) return
+        val handle = MH_reflexframebegin ?: return
+        try {
+            handle.invokeExact()
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12ReflexFrameBegin failed: ${t}")
+        }
+    }
+
+    /** P117：PCL 通用标记（取值见 sl::PCLMarker，1=eSimulationEnd 2=eRenderSubmitStart）。 */
+    fun dx12ReflexMarker(marker: Int) {
+        if (LOAD_FAILURE != null) return
+        val handle = MH_reflexmarker ?: return
+        try {
+            handle.invokeExact(marker)
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12ReflexMarker(${marker}) failed: ${t}")
+        }
+    }
+
+    fun dx12SetDlssConstants(constants: MemorySegment): Int {
+        if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_setdlssconstants ?: return Int.MIN_VALUE
+        return try {
+            handle.invokeExact(constants) as Int
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12SetDlssConstants failed: $t")
+            Int.MIN_VALUE
+        }
+    }
     fun dx12SetDlssOutput(textureHandle: Long): Int {
         if (LOAD_FAILURE != null) {
             return Int.MIN_VALUE
@@ -2681,6 +2723,10 @@ object MCDR_ABI {
         // P108z（用户 m11203）：DLSS 的输出纹理改由 JVM 建、经这条交给 native（两个指针风格：
         // 一个 Dx12Object* 句柄）。同样走 skipOptional —— native 还没实现时只是返回 MIN_VALUE、
         // JVM 侧打一次 INFO 然后继续用 native 私有的 UAV 路径，MCDR_ABI_VERSION 保持 2。
+        MH_setdlssconstants = skipOptional("mcdr_dx12SetDlssConstants",
+            fd(MCDRLayout.I32, MCDRLayout.PTR))
+        MH_reflexframebegin = skipOptional("mcdr_dx12ReflexFrameBegin", fdv())
+        MH_reflexmarker = skipOptional("mcdr_dx12ReflexMarker", fdv(MCDRLayout.I32))
         MH_setdlssoutput = skipOptional("mcdr_dx12SetDlssOutput",
             fd(MCDRLayout.I32, MCDRLayout.PTR))
 

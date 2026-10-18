@@ -13,7 +13,6 @@ import dev.nts.expdxr.d3d12.render.core.D3D12GpuTextureView
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import net.minecraft.client.Minecraft
-import org.joml.Matrix4f
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
@@ -147,6 +146,15 @@ object D3D12Velocity {
     private var width: Int = 0
     private var height: Int = 0
 
+    /**
+     * 两张速度纹理各自的 SRV 视图（P77 TAA resolve 要采它们）。
+     *
+     * 视图跟纹理一样乒乓交换：`beginFrame` 里和 [current]/[previous] **同时**换，否则 resolve
+     * 会读到上一帧那张（TAA 于是按错位移去历史里取样，表现为整屏拖影）。
+     */
+    private var currentView: D3D12GpuTextureView? = null
+    private var previousView: D3D12GpuTextureView? = null
+
     private var pipeline: Long = 0L
 
     /** 管线创建失败的原因（只记一次，避免每帧刷屏/重复尝试）。 */
@@ -197,7 +205,8 @@ object D3D12Velocity {
     private var abandonedSteps: Int = 0
 
     /** 是否处于"可以录制"的状态（时间性总开关也必须打开）。 */
-    fun isActive(): Boolean = enabled && D3D12Temporal.enabled
+    // P77：TAA 也消费运动矢量 —— 玩家选了 TAA 就等价于打开了速度通道，不再要求开发开关。
+    fun isActive(): Boolean = (enabled || D3D12TAA.isSelected()) && D3D12Temporal.isActive()
 
     /**
      * 是否处于**自我关闭**状态：曾经被 [disable] 关掉过（[disabledReason] 非空），或某个构建步骤
@@ -231,6 +240,14 @@ object D3D12Velocity {
     @Synchronized
     fun currentHandle(): Long = this.current?.handle() ?: 0L
 
+    /**
+     * 本帧速度纹理的 SRV 视图（P77 TAA resolve 用），null = 还没有可用数据。
+     *
+     * 与 [currentHandle] 同一时刻的同一张纹理：本帧速度 pass 录完之后取，就是本帧的位移。
+     */
+    @Synchronized
+    fun currentMotionView(): D3D12GpuTextureView? = if (this.current == null) null else this.currentView
+
     /** 上一帧速度纹理的 native handle（0 = 还没有历史）。 */
     @Synchronized
     fun previousHandle(): Long = this.previous?.handle() ?: 0L
@@ -252,12 +269,15 @@ object D3D12Velocity {
      */
     @Synchronized
     fun beginFrame() {
-        if (!enabled) {
+        if (!isActive()) {
             return
         }
         val swap = this.previous
         this.previous = this.current
         this.current = swap
+        val swapView = this.previousView
+        this.previousView = this.currentView
+        this.currentView = swapView
         frameIndex++
     }
 
@@ -405,6 +425,9 @@ object D3D12Velocity {
         return try {
             this.current = D3D12GpuTexture(USAGE, "DXRMC velocity", FORMAT, w, h, 1, 1)
             this.previous = D3D12GpuTexture(USAGE, "DXRMC velocity (previous)", FORMAT, w, h, 1, 1)
+            // P77：TAA resolve 要把这两张当 SRV 采（本帧的位移）。视图随纹理一起建，乒乓时一起换。
+            this.currentView = D3D12GpuTextureView(this.current!!, 0, 1)
+            this.previousView = D3D12GpuTextureView(this.previous!!, 0, 1)
             // `D3D12Device.createBuffer` 覆写声明返回接口类型 `GpuBuffer`（要匹配 GpuDevice 接口），
             // 这里强转回实现类以便 `dx12PushDescriptors` 拿到原生 handle。
             this.uniform = device.createBuffer({ "DXRMC velocity params" },
@@ -679,6 +702,10 @@ object D3D12Velocity {
     }
 
     private fun releaseResources() {
+        this.currentView?.close()
+        this.currentView = null
+        this.previousView?.close()
+        this.previousView = null
         this.current?.close()
         this.current = null
         this.previous?.close()

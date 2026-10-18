@@ -270,6 +270,37 @@ object MCDRLayout {
         I32.withName("_pad2")
     ).withName("mcdr_dlss_input")
 
+    // P112：Streamline 的 sl::Constants 数据源。只收 viewProj / prevViewProj 两个矩阵，
+    // 其余三个矩阵由 native 的 mat4Inverse/mat4Multiply 派生（见 d3d12_dlss.cpp）。
+    @JvmField
+    val DLSS_CONSTANTS: MemoryLayout = MemoryLayout.structLayout(
+        MemoryLayout.sequenceLayout(16L, F32).withName("viewProjection"),
+        MemoryLayout.sequenceLayout(16L, F32).withName("prevViewProjection"),
+        F32.withName("jitterOffsetX"),
+        F32.withName("jitterOffsetY"),
+        F32.withName("mvecScaleX"),
+        F32.withName("mvecScaleY"),
+        F32.withName("cameraPosX"), F32.withName("cameraPosY"), F32.withName("cameraPosZ"),
+        F32.withName("_pad0"),
+        F32.withName("cameraUpX"), F32.withName("cameraUpY"), F32.withName("cameraUpZ"),
+        F32.withName("_pad1"),
+        F32.withName("cameraRightX"), F32.withName("cameraRightY"), F32.withName("cameraRightZ"),
+        F32.withName("_pad2"),
+        F32.withName("cameraFwdX"), F32.withName("cameraFwdY"), F32.withName("cameraFwdZ"),
+        F32.withName("_pad3"),
+        F32.withName("cameraNear"),
+        F32.withName("cameraFar"),
+        F32.withName("cameraFovRadians"),
+        F32.withName("cameraAspectRatio"),
+        I32.withName("depthInverted"),
+        I32.withName("cameraMotionIncluded"),
+        I32.withName("motionVectors3D"),
+        I32.withName("reset"),
+        I32.withName("renderingGameFrames"),
+        I32.withName("motionVectorsJittered"),
+        // P120：投影矩阵本身（列主序、无 jitter）。`cameraViewToClip` 要的是这张，不是 VP。
+        MemoryLayout.sequenceLayout(16L, F32).withName("projection")
+    ).withName("mcdr_dlss_constants")
     private val EXPECTED_C_SIZES: Array<Array<Any>> = arrayOf(
     // ------------------------------------------------------------------
         arrayOf<Any>("mcdr_binding_slot",         BINDING_SLOT,        40L),
@@ -281,6 +312,7 @@ object MCDRLayout {
         arrayOf<Any>("mcdr_pipeline_desc",        PIPELINE_DESC,       96L),
         arrayOf<Any>("mcdr_mesh_pipeline_desc",   MESH_PIPELINE_DESC,  96L),
         arrayOf<Any>("mcdr_dlss_input",          DLSS_INPUT,        112L),
+        arrayOf<Any>("mcdr_dlss_constants",      DLSS_CONSTANTS,    312L),
         arrayOf<Any>("mcdr_abi_field",            ABI_FIELD,           24L),
     )
 

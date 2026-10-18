@@ -31,18 +31,11 @@ object D3D12DebugInfo {
     fun extraSystemLines(windowWidth: Int, windowHeight: Int): List<String> {
         val info = D3D12AdapterInfo.current ?: return emptyList<String>()
         val luid = if (info.luid.isEmpty()) "unknown" else info.luid
-        val driver = if (info.driverVersion.isEmpty()) "unknown" else info.driverVersion
         val lines = mutableListOf<String>()
-        // 呈现分辨率（actual）与渲染分辨率（rendered）分开报：renderScale 非 100% 或 SMAA/超采样
-        // 介入时两者不再相等，只报一个数会让人以为缩放没生效。rendered 直接读主渲染目标纹理的
-        // 真实尺寸（与 D3D12GUISplit 用的同一个来源），拿不到就退回窗口尺寸。
         val rendered = mainTargetSize() ?: (windowWidth to windowHeight)
-        lines.add("Resolution: actual ${windowWidth}x${windowHeight}" +
-            ", rendered ${rendered.first}x${rendered.second}")
+        lines.add("Resolution: output ${windowWidth}x${windowHeight}, rendered ${rendered.first}x${rendered.second}")
         lines.add("VRAM: ${info.vramMiB()} MiB dedicated / ${info.sharedMiB()} MiB shared")
-        lines.add("Illusion: ${info.backendName()} (MCDR ABI v${MCDR_ABI.MCDR_ABI_VERSION}" +
-            ") - LUID ${luid} - feature level ${info.featureLevel}" +
-            " - driver ${driver} - ${info.vendorName()}")
+        lines.add("Illusion: ${info.backendName()} (MCDR ABI v${MCDR_ABI.MCDR_ABI_VERSION}) - LUID: $luid")
         return lines
     }
 
