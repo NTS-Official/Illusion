@@ -866,7 +866,14 @@ object D3D12Velocity {
             // 即 `prevPos - curPos`。旧写法是 `uv - prevUv`，方向整体反了 —— 静止时两边都是 0
             // 所以看不出来，一旦相机移动 DLSS 就照着**反向**位移去历史缓冲取样，于是运动方向
             // 上拖出一条永不收敛的残影（用户 m10388：静止好了，走动/转视角的拖影还在）。
-            float2 motion = (prevUv - uv) * ScreenSize + PrevJitterPixels;
+            // P134：MV 现在写成**真实运动**（不含 jitter）。jitter 由消费方自己补偿：
+            // TAA 在 historyUv 里加 (PrevJitter - Jitter)，DLSS 用 motionVectorsJittered=0 + jitterOffset。
+            // P139：uv 在**抖动**网格上（栅格被 jitterProjection 位移了 −J），而 PrevViewProj 是
+            // 未抖动的上一帧投影、InvCurrViewProj 反投影出的世界点也是真实位置。所以直接相减的
+            // 差里混着本帧 jitter：本帧像素 q 对应的表面点，在未抖动网格上是 q + J。
+            // 减掉 JitterPixels 才是真实运动（静止时正好归零；走动时 TAA 的 historyUv = p + mv
+            // 才落在同一表面点上，否则每帧偏 0.5px，表现为 p107 的"走动有拖影"）。
+            float2 motion = (prevUv - uv) * ScreenSize - JitterPixels;
             // NaN/inf 兜底：NaN 参与的比较恒为假，所以用"取反的 <=" 写法把它一并挡掉。上一条
             // 守卫之后这里理论上不会触发，留着是因为一旦传出去就是一整块画面的错色。
             if (!(dot(motion, motion) <= 1.0e12)) {
@@ -897,12 +904,13 @@ object D3D12Velocity {
                 }
                 float2 prevObjectNdc = prevObjectClip.xy / prevObjectClip.w;
                 float2 prevObjectUv = float2(prevObjectNdc.x * 0.5 + 0.5, 0.5 - prevObjectNdc.y * 0.5);
-                float2 objectMotion = (prevObjectUv - uv) * ScreenSize;
+                // 同上：uv 在抖动网格上，prevObjectUv 在未抖动网格上。
+                float2 objectMotion = (prevObjectUv - uv) * ScreenSize - JitterPixels;
                 // 坏匹配（张冠李戴的行）位移会大得离谱，直接丢掉，回退相机重投影。
                 if (dot(objectMotion, objectMotion) > ObjectParams.y * ObjectParams.y) {
                     continue;
                 }
-                return float4(objectMotion + PrevJitterPixels, 0.0, 0.0);
+                return float4(objectMotion, 0.0, 0.0);
             }
             return float4(motion, 0.0, 0.0);
         }

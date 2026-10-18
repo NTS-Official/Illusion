@@ -10,6 +10,7 @@ import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.adapter.D3D12Device
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12TAA
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12Temporal
+import dev.nts.expdxr.d3d12.render.advanced.D3D12Sharpen
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12Velocity
 import dev.nts.expdxr.d3d12.render.core.*
 import org.joml.Vector4fc
@@ -336,6 +337,18 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
         }
         this.ensureListOpen()
         D3D12Velocity.record(this.ctx, this.device)
+    }
+
+    /**
+     * P121：后置锐化（TAA / DLAA / DLSS 共用）。`src == dst`、锐化关闭、旧 DLL 都返回 false，
+     * 调用方应回退到普通 blit。
+     */
+    fun recordSharpen(src: Long, dst: Long): Boolean {
+        if (!D3D12Sharpen.isEnabled()) {
+            return false
+        }
+        this.ensureListOpen()
+        return D3D12Sharpen.record(this.ctx, src, dst)
     }
 
     /**

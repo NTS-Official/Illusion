@@ -7,6 +7,7 @@ import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.extern.MCDRPipelineDesc
 import dev.nts.expdxr.d3d12.render.adapter.D3D12Device
 import dev.nts.expdxr.d3d12.render.advanced.D3D12AntiAliasing
+import dev.nts.expdxr.d3d12.render.advanced.D3D12Sharpen
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuBuffer
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuTexture
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuTextureView
@@ -241,7 +242,11 @@ object D3D12TAA {
         // 本帧投影实际用了多大的亚像素偏移；历史取样必须按它换回未抖动网格（见 PIXEL_HLSL 里的 historyUv）。
         val jitterX = D3D12Temporal.currentJitterX.toFloat()
         val jitterY = D3D12Temporal.currentJitterY.toFloat()
-        if (!writeParameters(params, w, h, reset, jitterX, jitterY)) {
+        // P134：上一帧 jitter 也要进参数块 —— MV 现在是真实运动，historyUv 用 (PrevJitter - Jitter) 补偿。
+        val prevJitterPair = D3D12Temporal.previousJitter()
+        val prevJitterX = prevJitterPair[0].toFloat()
+        val prevJitterY = prevJitterPair[1].toFloat()
+        if (!writeParameters(params, w, h, reset, jitterX, jitterY, prevJitterX, prevJitterY)) {
             return false
         }
         if (!loggedParams) {
@@ -287,7 +292,11 @@ object D3D12TAA {
 
         // ---- 第二趟：把历史整屏回填到主渲染目标（RGBA16F -> RGBA8，必须走采样 blit）----
         // 不成功也不致命：主目标保持本帧原样（等于没开 TAA），但历史照旧累积。
-        if (!MCDR_ABI.dx12BlitTextureToTexture(ctx, write.handle(), scene.handle())) {
+        // P121：开了后置锐化时，这一趟顺便做 5-tap unsharp（历史本身仍是未锐化的 —— 锐化
+        // 绝不能写进历史，否则会随每帧的 lerp 递归叠加出振铃）。锐化不可用时回退到直通 blit。
+        val blitted = D3D12Sharpen.record(ctx, write.handle(), scene.handle(), D3D12Sharpen.taaAmount) ||
+            MCDR_ABI.dx12BlitTextureToTexture(ctx, write.handle(), scene.handle())
+        if (!blitted) {
             countSkip("blit back failed")
         }
 
@@ -452,6 +461,8 @@ object D3D12TAA {
         reset: Boolean,
         jitterX: Float,
         jitterY: Float,
+        prevJitterX: Float,
+        prevJitterY: Float,
     ): Boolean {
         return try {
             buffer.map(0L, CBV_SIZE, false, true).use { view ->
@@ -464,6 +475,8 @@ object D3D12TAA {
                 fb.put(if (reset) 1.0f else 0.0f)
                 fb.put(jitterX)   // Jitter：本帧投影的亚像素偏移（像素单位）
                 fb.put(jitterY)
+                fb.put(prevJitterX)   // P134：上一帧 jitter
+                fb.put(prevJitterY)
                 // 补齐到 256 B（= 64 个 float），与 velocity 的参数块粒度一致。
                 while (fb.position() < 64) {
                     fb.put(0.0f)
@@ -539,6 +552,7 @@ object D3D12TAA {
             float Blend;
             float ResetHistory;
             float2 Jitter;
+            float2 PrevJitter;   // P134：上一帧的 jitter（MV 已是真实运动，补偿由本着色器做）
         };
 
         Texture2D<float4> Scene : register(t1, space0);
@@ -560,19 +574,42 @@ object D3D12TAA {
             return tex.Load(int3(clamp(coord, int2(0, 0), maxCoord), 0)).rgb;
         }
 
+        // 双线性取样（同样手算：理由见类注释里"为什么全部用 Load"）。取的是本帧颜色在
+        // 未抖动网格上的值，`ScreenSize` 是渲染分辨率。
+        float3 bilinearClamped(Texture2D<float4> tex, float2 uv, int2 maxCoord) {
+            float2 texel = uv * ScreenSize - 0.5;
+            int2 baseCoord = int2(floor(texel));
+            float2 f = texel - float2(baseCoord);
+            float3 c00 = fetchClamped(tex, baseCoord, maxCoord);
+            float3 c10 = fetchClamped(tex, baseCoord + int2(1, 0), maxCoord);
+            float3 c01 = fetchClamped(tex, baseCoord + int2(0, 1), maxCoord);
+            float3 c11 = fetchClamped(tex, baseCoord + int2(1, 1), maxCoord);
+            return lerp(lerp(c00, c10, f.x), lerp(c01, c11, f.x), f.y);
+        }
+
         float4 main(float4 position : SV_Position) : SV_Target0 {
             int2 size = int2(ScreenSize + 0.5);
             int2 maxCoord = size - 1;
             int2 coord = clamp(int2(position.xy), int2(0, 0), maxCoord);
-            float4 current = Scene.Load(int3(coord, 0));
+            // P138（p105 的结论 + 机理）：**把累加放进固定的未抖动网格**。
+            //
+            // 之前两个版本都把 jitter 补偿放在 history 一侧（`(PrevJitter - Jitter)` 或反向），
+            // 那等于让历史住在一个每帧都在动的网格里：静止画面累加收敛出的是 `I(p - J_cur)`，
+            // 显示时整幅图就随 jitter 序列每帧位移一次 —— 这就是"不拖影、但一直抖"的来源，
+            // 而且换符号只会改变抖的方向，不会消失（p103 轻微 / p105 更明显，幅度其实一样）。
+            //
+            // 现在：本帧颜色按 +Jitter 重采样回**未抖动网格**，历史只按真实运动 mv 取样。
+            // 于是历史永远是 `I(p)`，静止画面真正收敛，抖动在数学上就不存在了；
+            // 亚像素抗锯齿由"每帧在不同 jitter 位置采样再平均"提供，与网格无关。
+            // 符号：`jitterProjection` 做的是 `m02 -= 2J/W`，图像整体位移 −J，于是本帧栅格像素 q
+            // 上放的是未抖动图像在 `q + J` 处的值（C(q) = I(q + J)）。要取回 I(p)，就得采 `p − J`。
+            float2 curUv = (float2(coord) + 0.5 - Jitter) * RcpScreenSize;
+            float3 currentRgb = bilinearClamped(Scene, curUv, maxCoord);
+            float currentA = Scene.Load(int3(coord, 0)).a;
 
-            // mv 的约定是 prevPos - curPos（见 D3D12Velocity 的 `(prevUv - uv) * ScreenSize`），
-            // 所以本像素的内容在上一帧的位置 = 本像素 + mv。
+            // mv 的约定是 prevPos - curPos（见 D3D12Velocity 的 `(prevUv - uv) * ScreenSize`）；
+            // P134 起它是**真实运动**（不含 jitter），正好是未抖动网格上的位移，直接拿来取历史。
             float2 mv = Motion.Load(int3(coord, 0)).xy;
-            // `mv` 是**抖动空间**位移：D3D12Velocity 的 `currViewProj` 带本帧 jitter、着色器再加
-            // `PrevJitterPixels`，所以它已经是 `prevJitPx - curJitPx`（两个渲染位置都在抖动网格上）。
-            // 因此本像素（抖动位置）对应的历史位置就是 `coord + mv`，**不能再减一次 Jitter** ——
-            // 旧写法 `- Jitter` 等于每帧按 jitter 序列错开采样历史，静止相机也会把画面摊成低频渐变。
             float2 historyUv = (float2(coord) + 0.5 + mv) * RcpScreenSize;
 
             // 3x3 邻域的 YCoCg 统计（variance clipping 的包围盒）。
@@ -601,8 +638,23 @@ object D3D12TAA {
             float3 h11 = fetchClamped(HistoryBuffer, baseCoord + int2(1, 1), maxCoord);
             float3 history = lerp(lerp(h00, h10, f.x), lerp(h01, h11, f.x), f.y);
 
-            float3 clamped = clamp(toYCoCg(history), lo, hi);
-            float3 resolved = lerp(fromYCoCg(clamped), current.rgb, Blend);
+            // P140（p108 的结论 + 机理）：variance clipping 只能把历史**钳**回包围盒，钳不动
+            // "历史本来就该被丢弃"这件事。静态世界在相机走动时，包围盒里同时有前景和背景
+            // 两种颜色，于是被钳到边界的历史会把邻居的颜色一帧一帧地带进来，累加器就沿着运动
+            // 方向拖出一条长度约 `1 / Blend`（= 16 px）的渐隐尾 —— 这与用户看到的"能拖出十几
+            // 像素"完全吻合。DLAA 没有这个问题（同一个 MV、同一张深度），说明 MV 是对的，
+            // 问题在累加器本身。
+            //
+            // 修法（Playdead 的 TAA clipping 思路）：**被钳掉多少，就把历史权重压掉多少**。
+            // 历史离包围盒越远，说明它越不可信，权重越接近 0，直接退回本帧颜色；静止时钳量≈0，
+            // 权重仍是 1/16，抗锯齿与收敛速度不受影响。
+            float3 histY = toYCoCg(history);
+            float3 clamped = clamp(histY, lo, hi);
+            float3 clipDelta = abs(histY - clamped);
+            float clipDist = max(clipDelta.x, max(clipDelta.y, clipDelta.z));
+            float confidence = 1.0 / (1.0 + clipDist * 8.0);
+            float historyWeight = (1.0 - Blend) * confidence;
+            float3 resolved = lerp(currentRgb, fromYCoCg(clamped), historyWeight);
 
             // 历史不可用/不可信时直接取本帧：首帧与代数变化（ResetHistory）、位移荒谬或非有限
             // （镜头瞬移、NaN）、历史 UV 出界（新露出的区域）。
@@ -611,9 +663,9 @@ object D3D12TAA {
                 || (historyUv.x > 1.0) || (historyUv.y > 1.0);
             bool absurd = !(motionLength <= 0.25 * max(ScreenSize.x, ScreenSize.y));
             if (ResetHistory > 0.5 || outside || absurd) {
-                resolved = current.rgb;
+                resolved = currentRgb;
             }
-            return float4(resolved, current.a);
+            return float4(resolved, currentA);
         }
     """.trimIndent()
 }

@@ -173,6 +173,7 @@ object MCDR_ABI {
     // P104b：世界层就地 SMAA（命令层：对一张纹理做三阶段后处理 + 拷回）。
     private var MH_applysmaatotexture: MethodHandle? = null
     private var MH_blittexturetotexture: MethodHandle? = null
+    private var MH_sharpentexturetotexture: MethodHandle? = null
 
     private var MH_creategraphicspipeline: MethodHandle? = null
     private var MH_destroypipeline: MethodHandle? = null
@@ -1347,6 +1348,28 @@ object MCDR_ABI {
         val handle = MH_blittexturetotexture ?: return false
         return try {
             ok(handle.invokeExact(ptr(ctx), ptr(src), ptr(dst)) as Int)
+        } catch (t: Throwable) {
+            throw unexpected(t)
+        }
+    }
+
+    /**
+     * P121：把 [src] 做 5-tap unsharp 写进 [dst]（TAA / DLAA / DLSS 的后置锐化）。
+     *
+     * `amount <= 0`、旧 DLL 没有该导出、或 native 拒绝（例如 `src == dst`）时返回 false，
+     * 调用方应回退到 [dx12BlitTextureToTexture]。
+     */
+    /** P121：当前 DLL 是否导出后置锐化（旧 DLL 没有时静默退化成 blit，需要能查出来）。 */
+    fun supportsSharpenTextureToTexture(): Boolean {
+        requireLoaded()
+        return MH_sharpentexturetotexture != null
+    }
+
+    fun dx12SharpenTextureToTexture(ctx: Long, src: Long, dst: Long, amount: Float): Boolean {
+        requireLoaded()
+        val handle = MH_sharpentexturetotexture ?: return false
+        return try {
+            ok(handle.invokeExact(ptr(ctx), ptr(src), ptr(dst), amount) as Int)
         } catch (t: Throwable) {
             throw unexpected(t)
         }
@@ -2937,6 +2960,9 @@ object MCDR_ABI {
         // 时只是 GUI 拆分不生效（回退到与世界共用主渲染目标），不影响其余渲染。
         MH_blittexturetotexture = skipOptional("mcdr_dx12BlitTextureToTexture",
             fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.PTR, MCDRLayout.PTR))
+        // P121：后置锐化（TAA / DLAA / DLSS 共用）。同样 skipOptional：旧 DLL 没有它时退化成 blit。
+        MH_sharpentexturetotexture = skipOptional("mcdr_dx12SharpenTextureToTexture",
+            fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.PTR, MCDRLayout.PTR, MCDRLayout.F32))
     }
 
     private fun bindPipelineSurfaceDraw() {

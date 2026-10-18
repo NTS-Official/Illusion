@@ -10,6 +10,7 @@ import dev.nts.expdxr.d3d12.extern.MCDRLayout.PTR
 import dev.nts.expdxr.d3d12.render.adapter.D3D12AdapterInfo
 import dev.nts.expdxr.d3d12.render.adapter.D3D12Device
 import dev.nts.expdxr.d3d12.render.advanced.D3D12AntiAliasing
+import dev.nts.expdxr.d3d12.render.advanced.D3D12Sharpen
 import dev.nts.expdxr.d3d12.render.advanced.smaa.D3D12GUISplit
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12Temporal
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12Velocity
@@ -508,6 +509,20 @@ object DeepLearningSuperSampling {
         // P108aa（用户 m11796）：DLAA 是"原生分辨率的 DLSS"，由**抗锯齿选项**接管。先把这件事
         // 同步过来，再决定 DLSS→AA 的锁定要不要施加。
         syncDlaaFromAntiAliasing()
+        // P130（p95/p96 的日志事实：同一次 options 处理里 native 先收到 enabled、紧接着又收到
+        // disabled）：`syncDlaaFromAntiAliasing` 只在**状态翻转**时推一次闸门，
+        // 而 `push(false)`（`options.txt` 里 `dxrMcDlss=false` 的加载、或用户关掉 DLSS 开关）
+        // 会随后把它关掉，之后没有任何路径再打开 —— native 的 `applyDlssToTexture` 在
+        // `!gCtx.dlssEnabled` 时直接 `return false`，连 `mcdr_dlss_evaluate` 都不会进
+        // （所以 P128/P124 一行都没有，而 JVM 侧 P121 一直在推常量）。
+        // 闸门因此必须**每帧对齐**到"DLAA 或 DLSS 开关"，而不是只在翻转时推一次。
+        // `setDlssEnabled` 只在值变化时打日志，所以每帧对齐不会刷屏。
+        //
+        // p96 实测：**不能**用"缓存上一次推的值"来省这次调用 —— 同一次 options 处理里
+        // `push(false)` 会在本函数之后把 native 改成 0，而缓存里仍是 true，于是下一帧
+        // 认为"已经一致"不再推，闸门永久关死（P129 的 23 条 `gate=dlss-switch-off` 就是这么来的）。
+        // 每帧无条件对齐，谁改过都不影响。
+        forceDlssGate(dlaaActive || OPTION.get())
         // DLAA 生效时**不能**把抗锯齿锁成 OFF（那样会立刻退出 DLAA，自相矛盾）。
         if (dlaaActive) {
             return
@@ -1191,6 +1206,19 @@ object DeepLearningSuperSampling {
         encoder.recordVelocityPass()
         val motionVectors = D3D12Velocity.currentHandle()
         if (motionVectors == 0L) {
+            // P123 诊断：DLSS 在拿到速度纹理之前就退出了。每 3 秒一行（stderr，必可见），
+            // 把速度 pass 的三态与句柄打出来，避免再靠猜。
+            val nowDiag = System.nanoTime()
+            if (nowDiag - diagLastNanos >= 3_000_000_000L) {
+                diagLastNanos = nowDiag
+                System.err.println(
+                    "[dxrmc] P123 diag: DLSS skipped, no MV texture." +
+                        " velocityActive=" + D3D12Velocity.isActive() +
+                        " temporalEnabled=" + D3D12Temporal.enabled +
+                        " render=" + renderWidth + "x" + renderHeight +
+                        " target=" + targetWidth + "x" + targetHeight,
+                )
+            }
             // native 在 pInMotionVectors == nullptr 时直接返回 0（d3d12_dlss.cpp:886），
             // 所以这里不必为了一次必然的跳过再下探一次。
             return noteState("no motion-vector texture (the velocity pass has no history yet on the "
@@ -1226,8 +1254,12 @@ object DeepLearningSuperSampling {
         }
         when (result) {
             // 1 = 这一帧真的评价了：结果已经写进 pInOutput，本帧不能再做世界层 blit。
-            1 -> onEvaluated(level, renderWidth, renderHeight, targetWidth, targetHeight, scalePercent,
-                window.width, window.height, jitter[0].toFloat(), jitter[1].toFloat(), resetReason)
+            1 -> {
+                onEvaluated(level, renderWidth, renderHeight, targetWidth, targetHeight, scalePercent,
+                    window.width, window.height, jitter[0].toFloat(), jitter[1].toFloat(), resetReason)
+                // P121：升采样之后的后置锐化（SDK 自带 sharpness 已废弃）。
+                sharpenUpscaledFrame(encoder, output, targetWidth, targetHeight)
+            }
             // 0 = native 自己跳过（模式/尺寸/特征未就绪），它已经打过自己的 WARN；这里只在状态
             // 变化时报一行，绝不每帧刷屏。
             0 -> {
@@ -1458,6 +1490,39 @@ object DeepLearningSuperSampling {
         return out
     }
 
+        /** P121 诊断：jitter 对照行的节流时间戳（排查完删）。 */
+    private var diagLastNanos = 0L
+    /** P125 diag: throttle for the "constants not pushed" line (remove with the diagnostic). */
+    private var nullDiagLastNanos = 0L
+
+    /**
+     * P131：DLAA / DLSS 的**升采样之后**锐化，目标由调用方给出（`output`）。
+     *
+     * `output` 有两种来源（见 `applyIfEnabled` 里 `val output = ...`）：
+     * - `renderScale != 100%`：`D3D12GUISplit.targetForFrame()` 的窗口目标；
+     * - **DLAA（renderScale == 100%）**：该函数**返回 null**，输出是主渲染目标的颜色纹理。
+     *
+     * 之前这里自己去取 `targetForFrame()`，于是 DLAA 永远在 `target == null` 静默返回
+     * （p97 里 `P121: record() entered` 一条都没有，就是这个原因）。
+     *
+     * 两趟：native 的 `sharpenTextureToTexture`/`blitTextureToTexture` 都拒绝 `src == dst`，
+     * 所以 `target -> scratch`（锐化）再 `scratch -> target`（blit）。
+     */
+    private fun sharpenUpscaledFrame(encoder: D3D12CommandEncoderBackend, target: D3D12GpuTexture,
+        width: Int, height: Int) {
+        if (!D3D12Sharpen.isEnabled()) {
+            return
+        }
+        val scratch = D3D12Sharpen.scratchForFrame(width, height) ?: return
+        if (!encoder.recordSharpen(target.handle(), scratch.handle())) {
+            return
+        }
+        if (!MCDR_ABI.dx12BlitTextureToTexture(encoder.nativeHandle(), scratch.handle(),
+                target.handle())) {
+            noteState("post-sharpen: the blit back into the output target failed; the frame keeps "
+                + "the unsharpenened DLSS output")
+        }
+    }
     private fun pushDlssConstants(renderWidth: Int, renderHeight: Int, targetWidth: Int,
         targetHeight: Int, jitterX: Float, jitterY: Float, reset: Boolean) {
         val proj = D3D12Temporal.currentProjection()
@@ -1465,6 +1530,17 @@ object DeepLearningSuperSampling {
         val view = D3D12Temporal.currentCameraView()
         val prevView = D3D12Temporal.previousCameraView()
         if (proj == null || prevProj == null || view == null || prevView == null) {
+            // P125 诊断（排查完删）：常量推送在拿到这几项之前就退出了 —— 之前 p92 里
+            // `P121 diag` 一条都没有，而速度 pass 明明在跑，说明就在这里退出。
+            val nowNull = System.nanoTime()
+            if (nowNull - nullDiagLastNanos >= 2_000_000_000L) {
+                nullDiagLastNanos = nowNull
+                System.err.println(
+                    "[dxrmc] P125 diag: constants not pushed. proj=" + (proj != null) +
+                        " prevProj=" + (prevProj != null) + " view=" + (view != null) +
+                        " prevView=" + (prevView != null),
+                )
+            }
             return
         }
         // P119：`view` 只有旋转、没有平移（世界层是相机相对空间），而 `clipToPrevClip` 必须包含
@@ -1499,8 +1575,21 @@ object DeepLearningSuperSampling {
             // P120：`cameraViewToClip` 的语义是 view->clip（就是这张投影），不是 world->clip 的 VP。
             MemorySegment.copy(proj, 0, seg, ValueLayout.JAVA_FLOAT,
                 layout.byteOffset(PathElement.groupElement("projection")), 16)
-            seg.set(F32, layout.byteOffset(PathElement.groupElement("jitterOffsetX")), jitterX)
-            seg.set(F32, layout.byteOffset(PathElement.groupElement("jitterOffsetY")), jitterY)
+            // P122（用户 m14320「DLAA 抖动还在」）：jitter 的**符号**按 NVIDIA 的约定取负。
+            // `sl::Constants::jitterOffset` = "加到投影矩阵上的那个偏移（像素）"，而我们的注入是
+            // `out[8] = out[8] - 2J/W`（即 m02 上**加**的是 -2J/W），所以"加到矩阵上的像素值"是 -J。
+            // 之前直接送 +J，SL 的去抖动方向就反了：静止时每一帧都多出约 2×jitter 的位移（最多 1 px），
+            // 表现为"TAA 稳、DLAA 抖"——TAA 根本不读这个字段，所以只有 DLSS/DLAA 受影响。
+            // P132：符号做成可切换的 A/B，理由见下方 doc —— P122（符号）与 P130（闸门）
+            // 是同一版落地的，"真 jitter 下 DLAA 仍抖"这条观察无法把责任归到符号上。
+            // `-Pdxrmc.dlssJitterSign=1` → 传 +J（读法 B）；不传 → 传 -J（读法 A，当前默认）。
+            // P136：注入实测是 `m02 -= 2J/W` ⇒ 像素位移 = NDC*W/2 = **-J**。
+            // 而 "矩阵上加的像素值" 也正好是 -J（δ 换算成像素 = -J）。两种读法同号，
+            // 所以符号没有二义性，之前 P132 的 A/B 开关可以去掉。
+            val slJitterX = -jitterX
+            val slJitterY = -jitterY
+            seg.set(F32, layout.byteOffset(PathElement.groupElement("jitterOffsetX")), slJitterX)
+            seg.set(F32, layout.byteOffset(PathElement.groupElement("jitterOffsetY")), slJitterY)
             seg.set(F32, layout.byteOffset(PathElement.groupElement("mvecScaleX")),
                 1.0f / renderWidth.toFloat())
             seg.set(F32, layout.byteOffset(PathElement.groupElement("mvecScaleY")),
@@ -1547,8 +1636,35 @@ object DeepLearningSuperSampling {
             seg.set(I32, layout.byteOffset(PathElement.groupElement("motionVectors3D")), 0)
             seg.set(I32, layout.byteOffset(PathElement.groupElement("reset")), if (reset) 1 else 0)
             seg.set(I32, layout.byteOffset(PathElement.groupElement("renderingGameFrames")), 1)
-            seg.set(I32, layout.byteOffset(PathElement.groupElement("motionVectorsJittered")), 1)
+            // P134：MV 现在是真实运动（D3D12Velocity 不再加 PrevJitterPixels），所以必须报 0。
+            // 之前报 1 等于告诉 DLSS"MV 里已经含 jitter 差"，它会去减一个不存在的量 —— 这正是
+            // "关 jitter 不抖、开 jitter 抖、翻 jitterOffset 符号一样抖"的来源。
+            seg.set(I32, layout.byteOffset(PathElement.groupElement("motionVectorsJittered")), 0)
             // 旧 DLL 没有该导出时返回 Int.MIN_VALUE；这里静默跳过（native 会打自己的 P112 行）。
+            // P121 诊断（每秒一行，排查完删）：确认交给 SL 的 jitter 与真正注入投影的偏移
+            // 是同一帧、同一符号。注入值应为 out[8] = 0 - 2*jitterX/renderWidth（负号来自
+            // `D3D12Temporal.jitterProjection` 的 `out[8] = out[8] - clipX`）。
+            val diagNow = System.nanoTime()
+            if (diagNow - diagLastNanos >= 1_000_000_000L) {
+                diagLastNanos = diagNow
+                val injected = D3D12Temporal.lastInjectedClip()
+                val expectX = if (renderWidth > 0) 2.0f * jitterX / renderWidth.toFloat() else 0.0f
+                val expectY = if (renderHeight > 0) 2.0f * jitterY / renderHeight.toFloat() else 0.0f
+                // P135：把 CPU 侧投影的 m02/m12 也打出来 —— 若它已经含 jitter（≈ -2J/W），
+                // 说明我们对着"已经抖过的矩阵"再抖一次，渲染与重建用的矩阵不是同一个。
+                val pristineM02 = proj?.get(8) ?: 0.0f
+                val pristineM12 = proj?.get(9) ?: 0.0f
+                // 用 stderr：`Illusion.LOGGER` 的 INFO 在这套 log4j 配置下不进日志（P121 排查时踩过）。
+                System.err.println(
+                    "[dxrmc] P121 diag: jitter=(" + jitterX + ", " + jitterY + ")" +
+                        " injectedM02=" + injected[0] + " injectedM12=" + injected[1] +
+                        " expect=(" + expectX + ", " + expectY + ")" +
+                        " pristine=(" + pristineM02 + ", " + pristineM12 + ")" +
+                        " delta=(" + (injected[0] - pristineM02) + ", " + (injected[1] - pristineM12) + ")" +
+                        " reset=" + reset + " render=" + renderWidth + "x" + renderHeight,
+                )
+            }
+
             MCDR_ABI.dx12SetDlssConstants(seg)
         }
     }
@@ -1771,7 +1887,8 @@ object DeepLearningSuperSampling {
      * 逐字段写参数包。每个字段的数据来源：
      *  - `renderWidth/Height` = 世界层颜色附件的**真实纹理尺寸**（= `dxrMcRenderScale` 缩放后）；
      *  - `targetWidth/Height` = pInOutput（P106 的 GUI/呈现目标）的真实纹理尺寸 = 窗口尺寸；
-     *  - `jitterOffsetX/Y` = `D3D12Temporal.jitter()`（渲染空间像素，[-0.5, +0.5)，不取负不归一化）；
+     *  - `jitterOffsetX/Y` = **-`D3D12Temporal.jitter()`**（渲染空间像素，[-0.5, +0.5)，P122 起取负：
+ *    SL 的约定是"加到投影矩阵 m02/m12 上的那个像素偏移"，而我们注入时 m02 上加减的是 `-2J/W`）；
      *  - `reset` = [resetReason] 是否非空；
      *  - `depthFormatOrdinal` = 主目标深度附件的 `GpuFormat` ordinal（诊断用）。
      */
@@ -1782,8 +1899,8 @@ object DeepLearningSuperSampling {
         packet.set(I32, offset("renderHeight"), renderHeight)
         packet.set(I32, offset("targetWidth"), targetWidth)
         packet.set(I32, offset("targetHeight"), targetHeight)
-        packet.set(F32, offset("jitterOffsetX"), jitterX)
-        packet.set(F32, offset("jitterOffsetY"), jitterY)
+        packet.set(F32, offset("jitterOffsetX"), -jitterX)
+        packet.set(F32, offset("jitterOffsetY"), -jitterY)
         packet.set(F32, offset("mvScaleX"), MV_SCALE)
         packet.set(F32, offset("mvScaleY"), MV_SCALE)
         packet.set(F32, offset("preExposure"), PRE_EXPOSURE)

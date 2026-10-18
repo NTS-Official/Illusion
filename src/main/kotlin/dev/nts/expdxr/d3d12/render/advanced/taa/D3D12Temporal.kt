@@ -113,10 +113,7 @@ object D3D12Temporal {
     private var previousJitterX: Double = 0.0
     private var previousJitterY: Double = 0.0
 
-    /** 诊断：自上次 [logStatus] 以来 `"Camera projection matrix UBO level"` 上的写入条数。 */
-    private var levelProjectionWrites: Long = 0L
-
-    /**
+   /**
      * 本帧投影实际使用的亚像素偏移（像素单位，`[-0.5, 0.5)`）。
      *
      * TAA 的历史取样用它把本像素换回"上一帧的抖动位置"；速度场输出的是**抖动空间**位移
@@ -391,14 +388,17 @@ object D3D12Temporal {
      * 关卡投影矩阵的 jitter 注入（只在 [interceptWrite] 里被调用）。
      * 见类注释"为什么投影矩阵是注入点"。
      */
+    /** P121 诊断：本帧真正写进投影 UBO 的 m[0][2]/m[1][2]（校验交给 SL 的 jitter 是否同帧同号）。 */
+    private var lastInjectedM02: Float = Float.NaN
+    private var lastInjectedM12: Float = Float.NaN
+
     private fun interceptLevelProjectionWrite(destination: GpuBufferSlice, data: ByteBuffer): ByteBuffer? {
         if (data.remaining() != 64) {
             return null
         }
         val size = renderSize() ?: return null
         val pristine = readFloats(data, 0, 16) ?: return null
-        levelProjectionWrites++
-        val now = System.nanoTime()
+       val now = System.nanoTime()
         val jittered: FloatArray = if (now - lastProjectionUploadNanos < SAME_FRAME_NANOS
             && projection != null && lastSizeWidth == size[0] && lastSizeHeight == size[1]) {
             // 同帧重复写入：不滚动历史，沿用当前 jitter（投影本体已被本帧第一次写入捕获）。
@@ -414,6 +414,8 @@ object D3D12Temporal {
         // 返回新缓冲时，`uploadStaging` 会用一个剩余长度相同的陌生缓冲，而调用方后续若有基于原缓冲
         // 的假设（长度/生命周期/身份）就会错位；就地改写的语义与"vanilla 写了一个抖动过的矩阵"
         // 完全一致，也顺带避免了 position 非 0 时读错字节（见上面的取证行）。
+        lastInjectedM02 = jittered[8]
+        lastInjectedM12 = jittered[9]
         return try {
             val view = data.duplicate().order(ByteOrder.LITTLE_ENDIAN)
             view.position(data.position())
@@ -503,8 +505,7 @@ object D3D12Temporal {
         }
         lastLogMillis = now
         LOGGER.info("[backend] temporal: {}", describe())
-        levelProjectionWrites = 0L
-    }
+   }
 
     /**
      * 渲染目标像素尺寸：窗口帧缓冲尺寸 × `[render] renderScale`（P105）。
@@ -625,6 +626,12 @@ object D3D12Temporal {
     /** 上一帧的 jitter（像素单位）。 */
     @Synchronized
     fun previousJitter(): DoubleArray = doubleArrayOf(previousJitterX, previousJitterY)
+
+    /** P121 diag: the clip offsets most recently injected into the projection UBO. */
+    @JvmStatic
+    @Synchronized
+    fun lastInjectedClip(): FloatArray =
+        floatArrayOf(lastInjectedM02, lastInjectedM12)
 
     /** 本帧 jitter 换算到 clip 空间的 X 偏移（NDC 的 [-1,1] 对应整屏宽度）。 */
     @Synchronized
@@ -904,8 +911,7 @@ object D3D12Temporal {
             + " jitter=(${jitterX},${jitterY})"
             + " prevJitter=(${previousJitterX},${previousJitterY})"
             + " projection=${if (projection == null) "null" else "set"}"
-            + " levelWrites=${levelProjectionWrites}"
-            + " prevProjection=${if (previousProjection == null) "null" else "set"}"
+           + " prevProjection=${if (previousProjection == null) "null" else "set"}"
             + " modelViews(thisFrame/prevFrame)=${modelViews.size}/${previousModelViews.size}"
             + " chunkSections(thisFrame/prevFrame)=${chunkSections.size}/"
             + previousChunkSections.size
