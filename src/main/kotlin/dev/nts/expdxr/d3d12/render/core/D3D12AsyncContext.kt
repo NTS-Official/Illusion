@@ -1,5 +1,6 @@
 package dev.nts.expdxr.d3d12.render.core
 
+import dev.nts.expdxr.d3d12.D3D12Settings
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
@@ -35,7 +36,7 @@ class D3D12AsyncContext private constructor() : AutoCloseable {
     private var closed = false
 
     init {
-        val requested = parseWorkerCount()
+        val requested = D3D12Settings.asyncWorkers
         this.workerCount = requested
         this.descriptorAlloc = MCDR_ABI.D3D12AsyncDescriptorCreate(requested)
         this.bundlePool = MCDR_ABI.D3D12AsyncBundlePoolCreate(requested)
@@ -141,24 +142,9 @@ class D3D12AsyncContext private constructor() : AutoCloseable {
     companion object {
         private val LOGGER: Logger = LoggerFactory.getLogger("dxrmc")
 
-        private const val PROP_ENABLE = "backend.async"
-        private const val PROP_WORKERS = "backend.async.workers"
-        /** 与 native kMaxAsyncWorkers 一致。 */
-        private const val MAX_WORKERS = 8
-        /** 默认 worker 数：每帧段 24576 槽给 worker 分区，8 worker 时每区 3072 槽。 */
-        private const val DEFAULT_WORKERS = 8
-
-        /** 全局开关：默认开启。环境变量 DX12_ASYNC=0 优先，其次系统属性 -Ddx12.async=0。 */
+        /** 全局开关：默认开启，见配置 `[renderer] asyncCommandLists`。 */
         @JvmField
-        val ENABLED: Boolean = resolveEnabled()
-
-        private fun resolveEnabled(): Boolean {
-            val env: String? = System.getenv("DX12_ASYNC")
-            if (env != null && !env.isBlank()) {
-                return "0" != env.trim()
-            }
-            return "0" != System.getProperty(PROP_ENABLE, "1")
-        }
+        val ENABLED: Boolean = D3D12Settings.asyncCommandLists
 
         @Volatile
         private var instance: D3D12AsyncContext? = null
@@ -167,7 +153,7 @@ class D3D12AsyncContext private constructor() : AutoCloseable {
         @JvmStatic
         fun init(): Boolean {
             if (!ENABLED) {
-                LOGGER.info("[backend] P33 async disabled via -D{}=0", PROP_ENABLE)
+                LOGGER.info("[backend] P33 async command lists disabled by config ([renderer] asyncCommandLists = false)")
                 return false
             }
             if (instance != null) {
@@ -198,22 +184,7 @@ class D3D12AsyncContext private constructor() : AutoCloseable {
             return instance
         }
 
-        private fun parseWorkerCount(): Int {
-            var n = DEFAULT_WORKERS
-            // 环境变量优先（PCL 等启动器不方便传 -D），其次系统属性；均非法则回退默认。
-            var raw: String? = System.getenv("DX12_ASYNC_WORKERS")
-            if (raw == null || raw.isBlank()) {
-                raw = System.getProperty(PROP_WORKERS)
-            }
-            if (raw != null) {
-                try {
-                    n = raw.trim().toInt()
-                } catch (ignored: NumberFormatException) {
-                    // 非法值回退默认
-                }
-            }
-            return n.coerceAtMost(MAX_WORKERS).coerceAtLeast(1)
-        }
+
 
         /** 运行时统计：本帧回退到串行路径的批次数（仅诊断用）。 */
         private val fallbackCount = AtomicInteger()

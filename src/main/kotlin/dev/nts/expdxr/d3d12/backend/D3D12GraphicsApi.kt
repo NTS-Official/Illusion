@@ -19,34 +19,21 @@ import org.slf4j.LoggerFactory
  * enum's `<clinit>` has run through the mixin.
  */
 object D3D12GraphicsApi {
-    /** Serialized name written to `options.txt`. */
-    const val SERIALIZED_NAME: String = "d3d12"   // 必须稳定：它是 options.txt 里持久化过的值（曾用 "backend" 导致原版解析失败回落 OpenGL）
-
-    /** Translation key of the cycle-button caption. */
-    const val CAPTION_KEY: String = "options.graphicsApi.d3d12"   // 必须与 SERIALIZED_NAME/ lang 键一致（重构曾误改成 backend）
-
-    /** Translation key of the extra tooltip paragraph (vanilla's "experimental" note). */
-    const val TOOLTIP_KEY: String = "options.graphicsApi.tooltip.d3d12"
-
-    /** Ordinal handed to `Enum.<init>`; vanilla occupies 0, 1 and 2. */
-    const val ORDINAL: Int = 3
+    const val SERIALIZED_NAME = "d3d12"
+    const val CAPTION_KEY = "options.graphicsApi.d3d12"
+    const val TOOLTIP_KEY = "options.graphicsApi.tooltip.d3d12"
+    const val ORDINAL = 3
 
     private const val ENUM_NAME: String = "D3D12"
 
     private val LOGGER = LoggerFactory.getLogger("backend")
 
-    @Volatile
-    private var installed: PreferredGraphicsApi? = null
+    @Volatile private var installed: PreferredGraphicsApi? = null
 
-    /** The appended constant, or null when the mixin has not run yet. */
-    @JvmStatic
-    fun constant(): PreferredGraphicsApi? = installed
+    @JvmStatic fun constant(): PreferredGraphicsApi? = installed
 
-    /** Called once from the enum's `<clinit>` tail. Idempotent. */
-    @JvmStatic
-    fun install(value: PreferredGraphicsApi) {
-        installed = value
-    }
+    @JvmStatic fun install(value: PreferredGraphicsApi) { installed = value }
+
 
     /**
      * Records the resulting cycle-button size. Called by the mixin right after `CODEC`
@@ -76,11 +63,7 @@ object D3D12GraphicsApi {
         return value === current
     }
 
-    /** The "experimental" tooltip paragraph, mirroring `options.graphicsApi.tooltip.vulkan`. */
-    @JvmStatic
-    fun dx12TooltipLine(): Component = Component.translatable(TOOLTIP_KEY)
+    @JvmStatic fun dx12TooltipLine(): Component = Component.translatable(TOOLTIP_KEY)
 
-    /** Enum constant name; kept here so the mixin does not repeat the string. */
-    @JvmStatic
-    fun enumName(): String = ENUM_NAME
+    @JvmStatic fun enumName(): String = ENUM_NAME
 }

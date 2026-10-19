@@ -7,8 +7,6 @@ import com.mojang.blaze3d.buffers.GpuBufferSlice
 import com.mojang.blaze3d.systems.TransientMemory
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.nio.FloatBuffer
 import java.util.ArrayList
 import java.util.ArrayDeque
 import java.util.Deque
@@ -124,9 +122,6 @@ class D3D12TransientMemory(private val ctx: Long, private val ensureListOpen: Ru
             total += buffer.remaining().toLong()
         }
         require(total != 0L) { "Cannot upload zero bytes" }
-        if (IllusionLogger.debugEnabled()) {
-            checkForNanInfinity(data, "uploadStaging")
-        }
         // P108z（用户 m11203 的崩溃：`dx12MapBuffer returned null`）：staging 块不可映射
         // **绝不能**把整帧打断。分配 + 写入 + 换块重试全在 [writeIntoStagingBlock] 里。
         val write = writeIntoStagingBlock(total, alignment) { dst ->
@@ -237,9 +232,6 @@ class D3D12TransientMemory(private val ctx: Long, private val ensureListOpen: Ru
         if (data.isEmpty()) {
             return mutableListOf<GpuBufferSlice>()
         }
-        if (IllusionLogger.debugEnabled()) {
-            checkForNanInfinity(data, "multiUploadStaging")
-        }
         // P54：每个输入在本帧 staging 块内独立占一段，全部返回块内切片。
         // P108z：与 [uploadStaging] 共用同一条"坏块就换一块重试"的写入口。
         val result = mutableListOf<GpuBufferSlice>()
@@ -339,9 +331,6 @@ class D3D12TransientMemory(private val ctx: Long, private val ensureListOpen: Ru
      */
     private fun upload(data: MutableList<ByteBuffer>, usage: Int, total: Long): GpuBufferSlice {
         require(total != 0L) { "Cannot upload zero bytes" }
-        if (IllusionLogger.debugEnabled()) {
-            checkForNanInfinity(data, "upload")
-        }
         val staging = D3D12GpuBuffer(
             GpuBuffer.USAGE_MAP_WRITE or GpuBuffer.USAGE_COPY_SRC, total
         )
@@ -367,9 +356,6 @@ class D3D12TransientMemory(private val ctx: Long, private val ensureListOpen: Ru
         }
         if (total == 0L) {
             return mutableListOf<GpuBufferSlice>()
-        }
-        if (IllusionLogger.debugEnabled()) {
-            checkForNanInfinity(data, "multiUpload")
         }
         val staging = D3D12GpuBuffer(
             GpuBuffer.USAGE_MAP_WRITE or GpuBuffer.USAGE_COPY_SRC, total
@@ -534,38 +520,5 @@ class D3D12TransientMemory(private val ctx: Long, private val ensureListOpen: Ru
             return (value + alignment - 1L) / alignment * alignment
         }
 
-        /**
-         * 检查所有 input buffers 的 float 值是否含 NaN 或 Infinity。
-         * 在上传到 GPU 之前调用，定位污染源。
-         *
-         * <p>注意：某些合法数据（如 self-test 的 0xFC,0xFD,0xFE,0xFF 字节模式）按
-         * float 读恰为 NaN，因此这里仅提示一次，避免逐帧刷屏，也不应阻断上传。
-         *
-         * <p>P54：该扫描会遍历全部待上传 float，属上传热路径上的纯诊断开销，
-         * 现仅在 {@code DX12_LOG_VERBOSE=1} 时执行。
-         */
-        private fun checkForNanInfinity(data: MutableList<ByteBuffer>, method: String) {
-            if (nanWarned) return
-            for (bi in data.indices) {
-                val buf = data[bi]
-                if (buf.remaining() < 4) continue
-                // 使用 FloatBuffer 视图逐 float 检测（不修改原始 buffer position）
-                val fb: FloatBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
-                while (fb.hasRemaining()) {
-                    val v = fb.get()
-                    if (v.isNaN() || v.isInfinite()) {
-                        IllusionLogger.warnFormat("[backend-java] NaN/Inf detected in %s: buffer[%d] floatIdx=%d value=%s (数据未修改；仅提示一次)%n",
-                            method, bi, fb.position() - 1,
-                            if (v.isNaN()) "NaN" else "Infinity")
-                        System.err.flush()
-                        nanWarned = true
-                        return  // 只报一次
-                    }
-                }
-            }
-        }
-
-        /** 进程内仅提示一次，避免合法字节模式（如 0xFC..0xFF）被反复误报刷屏。 */
-        private var nanWarned: Boolean = false
     }
 }

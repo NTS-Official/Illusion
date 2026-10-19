@@ -1,6 +1,7 @@
 package dev.nts.expdxr.d3d12.backend
 
 import com.mojang.blaze3d.GLFWErrorCapture
+import dev.nts.expdxr.d3d12.render.advanced.mesh.D3D12MeshShader
 import com.mojang.blaze3d.GpuFormat
 import com.mojang.blaze3d.buffers.GpuBuffer
 import com.mojang.blaze3d.buffers.GpuFence
@@ -13,8 +14,10 @@ import com.mojang.blaze3d.textures.AddressMode
 import com.mojang.blaze3d.textures.FilterMode
 import com.mojang.blaze3d.textures.GpuSampler
 import com.mojang.blaze3d.textures.GpuTexture
+import dev.nts.expdxr.Illusion.Companion.NATIVE_NAME
+import dev.nts.expdxr.MeshDiagnostics
 import dev.nts.expdxr.utils.IllusionLogger
-import dev.nts.expdxr.d3d12.backend.D3D12Backend.Companion.SURFACE_SELF_TEST_ENABLED
+import dev.nts.expdxr.d3d12.D3D12Settings
 import dev.nts.expdxr.d3d12.debug.D3D12Fatal
 import dev.nts.expdxr.d3d12.extern.MCDRMeshPipelineDesc
 import dev.nts.expdxr.d3d12.extern.MCDRPipelineDesc
@@ -25,7 +28,6 @@ import net.minecraft.client.renderer.RenderPipelines
 import org.lwjgl.glfw.GLFW
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
-import java.io.File
 import java.nio.ByteBuffer
 import java.util.*
 
@@ -53,26 +55,14 @@ class D3D12Backend : GpuBackend {
         // 2) GL 侧本来就从不呈现：26.2 里唯一的 GL 呈现点是 GlSurface.present() 的 glfwSwapBuffers，
         //    我们的后端不会走到那里，因此那条 GL 上下文只是白白让 RTSS 误判进程类型。
         //
-        // 逃生开关（万一将来有功能或别的 mod 需要真实 GL 上下文）：
-        //   -Ddxrmc.noApi=false ／ 环境变量 DXR_MC_GL_CONTEXT=1 ／ 游戏工作目录（Illusion/run）放 gl_context.flag
-        // 三者任一命中就退回带 GL 上下文的旧行为。
-        val useNoApi = !glContextRequested()
-        if (useNoApi) {
-            GLFW.glfwWindowHint(GLFW.GLFW_CLIENT_API, GLFW.GLFW_NO_API)
-        }
-        LOGGER.info("[backend] GLFW window hints: GLFW_CLIENT_API={} ({})",
-            if (useNoApi) "GLFW_NO_API" else "GLFW_OPENGL_API",
-            if (useNoApi)
-                "default: no GL context in this process — required so RTSS/Afterburner draws its D3D12 OSD"
-            else
-                "escape hatch active (-Ddxrmc.noApi=false / DXR_MC_GL_CONTEXT=1 / gl_context.flag): a real GL context will be created")
-    }
+        // 逃生开关在配置里：[renderer] glContext（config/dxr_mc-client.toml）。打开后退回带 GL 上下文的旧行为。
+        val useNoApi = !D3D12Settings.glContext
+        if (useNoApi) GLFW.glfwWindowHint(GLFW.GLFW_CLIENT_API, GLFW.GLFW_NO_API)
 
-    /** 逃生开关：显式要求保留真实 GL 上下文（即关掉默认的 GLFW_NO_API）。 */
-    private fun glContextRequested(): Boolean {
-        if (System.getProperty("dxrmc.noApi") == "false") return true
-        if (System.getenv("DXR_MC_GL_CONTEXT") == "1") return true
-        return File("gl_context.flag").exists()
+        LOGGER.info("[$NATIVE_NAME] GLFW window hints: GLFW_CLIENT_API={} ({})",
+            if (useNoApi) "GLFW_NO_API" else "GLFW_OPENGL_API",
+            if (useNoApi) "default: no GL context in this process — required so RTSS/Afterburner draws its D3D12 OSD"
+            else "escape hatch active ([renderer] glContext = true): a real GL context will be created")
     }
 
     @Throws(BackendCreationException::class)
@@ -96,39 +86,45 @@ class D3D12Backend : GpuBackend {
         // (reset preferredGraphicsBackend + crash with an explanatory report) instead of
         // rethrowing BackendCreationException, which the game would swallow before
         // silently trying GL.
-        // P73 测试钩子：-Ddxrmc.failDevice=true 让后端在第一步就失败，用来端到端验证
+        // P73 测试钩子：[debug] failDevice = true 让后端在第一步就失败，用来端到端验证
         // "不再回退 + 还原 preferredGraphicsBackend + 生成带说明的崩溃报告"这条策略。
-        // 正常运行不会设置该属性（build.gradle 里的 runClient 默认值是 false）。
-        if (System.getProperty("dxrmc.failDevice") == "true") {
-            D3D12Fatal.crash("simulated Direct3D 12 device failure (-Ddxrmc.failDevice=true)", null)
+        // 正常运行不会打开它（config/dxr_mc-client.toml 里的默认值是 false）。
+        if (D3D12Settings.failDevice) {
+            D3D12Fatal.crash("simulated Direct3D 12 device failure ([debug] failDevice = true)", null)
         }
         try {
+            // 原生侧在建设备时从进程环境读几个开关（调试层、DLSS 实现、原生日志文件…）。
+            // 配置是唯一入口，这里在建 D3D12Device 之前把它们推进原生进程环境。
+            D3D12Settings.pushToNative()
             val device = D3D12Device(defaultShaderSource)
+
+            // P124：mesh 能力与原因的唯一下发点（UI 置灰、路径分流都读它）。
+            D3D12MeshShader.isSupported()
             try {
                 selfTestJavaResources(device)
                 selfTestCommandLayer(device)
                 selfTestPipelines(device)
                 // P72：mesh shader 自检（DXC 编译 → mesh PSO → DispatchMesh → 离屏像素回读）。
                 // 默认关闭：它要用 DXC 现场编译 HLSL，没必要塞进每次启动的关键路径；
-                // 打开方式：JVM 参数 -Ddxrmc.selfTestMesh=true。
-                if (SELF_TEST_MESH_ENABLED) {
+                // 打开方式：配置 `[debug] selfTestMesh = true`。
+                if (D3D12Settings.selfTestMesh) {
                     selfTestMesh(device)
                 }
-                // 诊断（DX12_MESH_DIAG=clear|pass）：把"写纹理 → 回读"做最小化隔离，
+                // 诊断（[debug] meshDiagnostics = clear|pass）：把"写纹理 → 回读"做最小化隔离，
                 // 用来区分「回读通路坏了」和「render pass 没落到纹理上」。只在取证时使用。
-                System.getenv("DX12_MESH_DIAG")?.takeIf { it.isNotEmpty() }?.let {
-                    selfTestMeshDiag(it)
+                D3D12Settings.meshDiagnostics.takeIf { it != MeshDiagnostics.NONE }?.let {
+                    selfTestMeshDiag(it.name.lowercase())
                 }
                 // 注意：surface 自检会在真实窗口上创建、Present 并立刻销毁一条交换链。
                 // RTSS/Afterburner 的 OSD 绑定到它注入(默认约 15s)之后看到的第一条被 Present 的
                 // 交换链上；自检链一旦抢先 Present，真正的游戏交换链就再也拿不到 OSD（表现为
                 // 装了 RTSS 也完全看不到 OSD）。探针矩阵已验证：只要有 GL/其它交换链先 Present，
-                // OSD 会永久留在那条链上。因此默认跳过，需要时用 -Ddxrmc.selfTestSurface=true 打开。
-                if (SURFACE_SELF_TEST_ENABLED) {
+                // OSD 会永久留在那条链上。因此默认跳过，需要时用配置 `[debug] selfTestSurface = true` 打开。
+                if (D3D12Settings.selfTestSurface) {
                     selfTestSurface(device, window)
                 } else {
                     LOGGER.info("[backend] Surface self-test skipped: swapped-chain self-test would steal "
-                        + "the RTSS OSD binding (enable with -Ddxrmc.selfTestSurface=true)")
+                        + "the RTSS OSD binding (enable with [debug] selfTestSurface = true)")
                 }
             } catch (t: Throwable) {
                 device.close()
@@ -151,21 +147,6 @@ class D3D12Backend : GpuBackend {
     companion object {
         private val LOGGER: Logger = LoggerFactory.getLogger("dxr_mc")
 
-        /**
-         * 真实窗口的交换链自检默认关闭：见 createDevice 中关于 RTSS OSD 绑定第一条被 Present
-         * 交换链的说明。打开方式：JVM 参数 -Ddxrmc.selfTestSurface=true。
-         */
-        private val SURFACE_SELF_TEST_ENABLED: Boolean =
-            System.getProperty("dxrmc.selfTestSurface") == "true"
-
-        /**
-         * P72：mesh shader 自检默认关闭，打开方式：JVM 参数 -Ddxrmc.selfTestMesh=true。
-         * 门控写法与 [SURFACE_SELF_TEST_ENABLED] 一致。它用 DXC 现场编译 HLSL、建 mesh 管线、
-         * DispatchMesh 并回读离屏纹理像素，属于"证明这条能力链可用"的一次性验证，
-         * 不该出现在每次启动的关键路径上。
-         */
-        private val SELF_TEST_MESH_ENABLED: Boolean =
-            System.getProperty("dxrmc.selfTestMesh") == "true"
 
         /**
          * Exercise every P2 resource method through the real JNI path so a broken
@@ -463,7 +444,7 @@ class D3D12Backend : GpuBackend {
          * @param device 只为与其他自检保持一致的签名——本自检只调用 ABI 静态入口，不经由 D3D12Device。
          */
         /**
-         * 诊断（`DX12_MESH_DIAG=clear|pass`）：把"写纹理 → 回读"这一对操作最小化隔离。
+         * 诊断（`[debug] meshDiagnostics` = clear|pass）：把"写纹理 → 回读"这一对操作最小化隔离。
          *
          * - `clear`：只调 `dx12ClearColorTexture`（不涉及 render pass）；
          * - `pass` ：只做一次 render pass + 不透明黑清屏（不涉及 mesh/PSO/描述符）。

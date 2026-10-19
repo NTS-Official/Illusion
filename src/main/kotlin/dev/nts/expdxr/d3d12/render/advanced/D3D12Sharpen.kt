@@ -3,6 +3,7 @@ package dev.nts.expdxr.d3d12.render.advanced
 import com.mojang.blaze3d.GpuFormat
 import com.mojang.blaze3d.textures.GpuTexture
 import org.slf4j.LoggerFactory
+import dev.nts.expdxr.d3d12.D3D12Settings
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuTexture
 
@@ -22,7 +23,7 @@ import dev.nts.expdxr.d3d12.render.core.D3D12GpuTexture
  * 2. native 拒绝 `src == dst`（`blitTextureToTexture` / `sharpenTextureToTexture` 都检查），
  *    所以就地锐化必须准备第二张同尺寸纹理。
  *
- * 强度：系统属性 `-Ddxrmc.sharpen=<0..1>`，默认 [DEFAULT_AMOUNT]；0 = 完全关闭（调用方回退到 blit）。
+ * 强度：配置 `[renderer] sharpenAmount` / `[renderer] taaSharpenAmount`（0..1，0 = 完全关闭，调用方回退到 blit）。
  */
 object D3D12Sharpen {
     /** 独立的 logger：`Illusion.LOGGER` 的 INFO 在这套 log4j 配置下不进日志（P121 排查时踩过）。 */
@@ -37,27 +38,13 @@ object D3D12Sharpen {
      */
     const val TAA_AMOUNT: Float = 0.816f
 
-    private const val AMOUNT_PROPERTY = "dxrmc.sharpen"
-
-    /** 实际使用的强度，类加载时解析一次。 */
+    /** DLAA / DLSS 用的强度，见配置 `[renderer] sharpenAmount`（0 = 调用方回退到 blit）。 */
     @JvmField
-    val amount: Float = run {
-        val raw = System.getProperty(AMOUNT_PROPERTY)
-        val parsed = raw?.toFloatOrNull()
-        when {
-            parsed == null -> DEFAULT_AMOUNT
-            parsed.isNaN() -> DEFAULT_AMOUNT
-            else -> parsed.coerceIn(0.0f, 1.0f)
-        }
-    }
+    val amount: Float = D3D12Settings.sharpenAmount
 
-    /** TAA 用的强度，同样可被 `-Ddxrmc.sharpen=` 覆盖（覆盖值对两边都生效）。 */
+    /** TAA 用的强度，见配置 `[renderer] taaSharpenAmount`。 */
     @JvmField
-    val taaAmount: Float = run {
-        val raw = System.getProperty(AMOUNT_PROPERTY)
-        val parsed = raw?.toFloatOrNull()
-        if (parsed == null || parsed.isNaN()) TAA_AMOUNT else parsed.coerceIn(0.0f, 1.0f)
-    }
+    val taaAmount: Float = D3D12Settings.taaSharpenAmount
 
     /** 中间纹理的用途：既能当渲染目标写，也能被采样（锐化的第二趟读它）。 */
     private val SCRATCH_USAGE =
@@ -75,8 +62,6 @@ object D3D12Sharpen {
     private var supported = false
     /** 失败原因只报一次，避免每帧刷屏。 */
     private var failureLogged = false
-    /** P121 diag：record() 是否已经进过一次（排查完删）。 */
-    private var enteredOnce = false
 
     /** 用户是否开了锐化。 */
     fun isEnabled(): Boolean = this.amount > 0.0f
@@ -90,16 +75,6 @@ object D3D12Sharpen {
      */
     @JvmStatic
     fun record(ctx: Long, src: Long, dst: Long, strength: Float = this.amount): Boolean {
-        // P121 diag（排查完删）：第一次调用无条件打一行 —— 如果连这行都没有，说明调用点没跑到，
-        // 而不是"被 guard 挡掉"。
-        if (!enteredOnce) {
-            enteredOnce = true
-            LOGGER.info(
-                "[dxrmc] P121: record() entered amount={} enabled={} src={} dst={} same={}",
-                strength, isEnabled(strength), src, dst, src == dst,
-            )
-            System.err.println("[dxrmc] P121: record() entered amount=$strength src=$src dst=$dst")
-        }
         if (!isEnabled(strength) || src == 0L || dst == 0L || src == dst) {
             noteFailureOnce("guard: enabled=${isEnabled(strength)} src=$src dst=$dst")
             return false

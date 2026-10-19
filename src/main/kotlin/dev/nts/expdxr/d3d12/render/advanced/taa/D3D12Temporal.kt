@@ -2,6 +2,7 @@ package dev.nts.expdxr.d3d12.render.advanced.taa
 
 import com.mojang.blaze3d.buffers.GpuBuffer
 import com.mojang.blaze3d.buffers.GpuBufferSlice
+import dev.nts.expdxr.d3d12.D3D12Settings
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuBuffer
 import dev.nts.expdxr.dxrmc.dlss.DeepLearningSuperSampling
@@ -65,21 +66,9 @@ object D3D12Temporal {
     /** vanilla `GlobalSettingsUniform` 的 buffer label（`GlobalSettingsUniform.java:18`）：相机世界坐标来源。 */
     const val GLOBALS_LABEL: String = "Global Settings UBO"
 
-    /**
-     * 开关来源：`-Ddxrmc.temporal=true`（Gradle 会像 `dxrmc.noPopup` 一样把 `-Pdxrmc.temporal=true`
-     * 转发成 Loom run config 的系统属性）。默认 **false**：在速度附件接线完成前不允许影响现有画面。
-     */
-    private const val TEMPORAL_PROPERTY: String = "dxrmc.temporal"
-
-    /**
-     * 诊断开关：`-Ddxrmc.temporal.jitter=false` 只关掉**投影 jitter**、保留逐物体矩阵与相机捕获，
-     * 用来把"画面异常"在 jitter 注入与 UBO 捕获两条路径之间二分定位。默认 true。
-     */
-    private const val JITTER_PROPERTY: String = "dxrmc.temporal.jitter"
-
-    /** 总开关。P75 默认关闭。 */
+    /** 总开关，见配置 `[debug] temporalChain`（默认关闭，出货只靠 TAA/DLSS 选项点亮这条链路）。 */
     @Volatile
-    var enabled: Boolean = "true" == System.getProperty(TEMPORAL_PROPERTY)
+    var enabled: Boolean = D3D12Settings.temporalChain
 
     /**
      * P77：时间性数据面是否需要滚动。
@@ -95,9 +84,9 @@ object D3D12Temporal {
     @JvmStatic
     fun isActive(): Boolean = enabled || D3D12TAA.isSelected() || DeepLearningSuperSampling.isEnabled()
 
-    /** 是否真的把 jitter 注入投影矩阵（捕获路径不受它影响，便于 A/B 诊断）。 */
+    /** 是否真的把 jitter 注入投影矩阵（捕获路径不受它影响），见配置 `[debug] temporalJitter`。 */
     @Volatile
-    var jitterEnabled: Boolean = "false" != System.getProperty(JITTER_PROPERTY)
+    var jitterEnabled: Boolean = D3D12Settings.temporalJitter
 
     /** jitter 循环长度（可被外部按画质档位调整，至少 1）。 */
     @Volatile
@@ -283,8 +272,6 @@ object D3D12Temporal {
         // 所以这里采到的就是本帧渲染要用的那批位置。
         D3D12ObjectMotion.beginFrame()
         D3D12ObjectMotion.harvestVisible()
-        // P76b 诊断：采集计数与写出行数（每 ~300 帧一行）。
-        D3D12ObjectMotion.logProbe()
     }
 
     /**
@@ -303,8 +290,6 @@ object D3D12Temporal {
         beginFrame()
         // P76g：优先用 CPU 渲染状态那份（权威、且实测正常）；UBO 字节实测是垃圾，只留作兜底与对照。
         projection = stateProjection?.copyOf() ?: pristine.copyOf()
-        // 低频诊断：挂钩点是否真的在跑、逐物体捕获有没有数据（P75 验证用，每 ~5s 一行）。
-        logStatus()
         if (!isActive() || !jitterEnabled) {
             return pristine.copyOf()
         }
@@ -328,6 +313,18 @@ object D3D12Temporal {
     /** 本帧的 jitter（像素单位，[-0.5, +0.5)）。未启用时恒为 0。 */
     @Synchronized
     fun jitter(): DoubleArray = doubleArrayOf(jitterX, jitterY)
+
+    /**
+     * 帧边界：由 `D3D12GpuSurface.present()` 每帧调用一次，递增"帧身份"。
+     *
+     * 关卡投影矩阵在一帧里可能被上传多次（每个渲染 pass 一次），而历史/jitter 只能在帧首**滚动一次**。
+     * 用 present 计数而不是时间窗判定"同一帧"：时间窗在低帧率下会把同帧的第二次上传误判成新帧
+     * （jitter 多滚一次 ⇒ 光栅与 TAA 补偿的 jitter 不一致 ⇒ 整幅画面逐帧轻微跳动）。
+     */
+    @Synchronized
+    fun onFramePresented() {
+        presentedFrameId++
+    }
 
     /**
      * 写出拦截（由 [dev.nts.expdxr.d3d12.backend.D3D12CommandEncoderBackend.writeToBuffer] 调用）：
@@ -388,23 +385,22 @@ object D3D12Temporal {
      * 关卡投影矩阵的 jitter 注入（只在 [interceptWrite] 里被调用）。
      * 见类注释"为什么投影矩阵是注入点"。
      */
-    /** P121 诊断：本帧真正写进投影 UBO 的 m[0][2]/m[1][2]（校验交给 SL 的 jitter 是否同帧同号）。 */
-    private var lastInjectedM02: Float = Float.NaN
-    private var lastInjectedM12: Float = Float.NaN
-
     private fun interceptLevelProjectionWrite(destination: GpuBufferSlice, data: ByteBuffer): ByteBuffer? {
         if (data.remaining() != 64) {
             return null
         }
         val size = renderSize() ?: return null
         val pristine = readFloats(data, 0, 16) ?: return null
-       val now = System.nanoTime()
-        val jittered: FloatArray = if (now - lastProjectionUploadNanos < SAME_FRAME_NANOS
+        // 帧身份用 present 计数（见 [onFramePresented]），不再用时间窗：时间窗在低帧率下会把
+        // 同一帧的第二次上传当成新帧 —— jitter 与历史在帧中途多滚一次，于是本帧光栅用的 jitter
+        // 和 TAA 补偿的 jitter 不是同一个，整幅画面逐帧轻微跳动（用户 m15912「整个画面均匀地
+        // 轻微一跳一跳」）；高帧率下又会把相邻两帧并成一帧。
+        val jittered: FloatArray = if (lastRollFrameId == presentedFrameId
             && projection != null && lastSizeWidth == size[0] && lastSizeHeight == size[1]) {
             // 同帧重复写入：不滚动历史，沿用当前 jitter（投影本体已被本帧第一次写入捕获）。
             jitterProjection(pristine, clipJitterX(size[0]), clipJitterY(size[1]))
         } else {
-            lastProjectionUploadNanos = now
+            lastRollFrameId = presentedFrameId
             lastSizeWidth = size[0]
             lastSizeHeight = size[1]
             onLevelProjectionUpload(pristine, size[0], size[1])
@@ -414,8 +410,6 @@ object D3D12Temporal {
         // 返回新缓冲时，`uploadStaging` 会用一个剩余长度相同的陌生缓冲，而调用方后续若有基于原缓冲
         // 的假设（长度/生命周期/身份）就会错位；就地改写的语义与"vanilla 写了一个抖动过的矩阵"
         // 完全一致，也顺带避免了 position 非 0 时读错字节（见上面的取证行）。
-        lastInjectedM02 = jittered[8]
-        lastInjectedM12 = jittered[9]
         return try {
             val view = data.duplicate().order(ByteOrder.LITTLE_ENDIAN)
             view.position(data.position())
@@ -486,26 +480,14 @@ object D3D12Temporal {
         }
     }
 
-    /** 同一帧判定的时间窗（远小于 60fps 的 16.7ms）。 */
-    private const val SAME_FRAME_NANOS: Long = 2_000_000L
+    /** 已 present 的帧数，作为"帧身份"（见 [onFramePresented]）。 */
+    private var presentedFrameId: Long = 0L
 
-    /** 诊断日志的最小间隔。 */
-    private const val LOG_INTERVAL_MILLIS: Long = 5_000L
+    /** 最近一次滚动历史时所在的帧身份；同一帧内的重复上传不再滚动。 */
+    private var lastRollFrameId: Long = -1L
 
-    private var lastProjectionUploadNanos: Long = 0L
     private var lastSizeWidth: Int = 0
     private var lastSizeHeight: Int = 0
-    private var lastLogMillis: Long = 0L
-
-    /** 低频诊断（每 [LOG_INTERVAL_MILLIS] 一行）：P75 靠它确认挂钩点生效。 */
-    private fun logStatus() {
-        val now = System.currentTimeMillis()
-        if (now - lastLogMillis < LOG_INTERVAL_MILLIS) {
-            return
-        }
-        lastLogMillis = now
-        LOGGER.info("[backend] temporal: {}", describe())
-   }
 
     /**
      * 渲染目标像素尺寸：窗口帧缓冲尺寸 × `[render] renderScale`（P105）。
@@ -626,12 +608,6 @@ object D3D12Temporal {
     /** 上一帧的 jitter（像素单位）。 */
     @Synchronized
     fun previousJitter(): DoubleArray = doubleArrayOf(previousJitterX, previousJitterY)
-
-    /** P121 diag: the clip offsets most recently injected into the projection UBO. */
-    @JvmStatic
-    @Synchronized
-    fun lastInjectedClip(): FloatArray =
-        floatArrayOf(lastInjectedM02, lastInjectedM12)
 
     /** 本帧 jitter 换算到 clip 空间的 X 偏移（NDC 的 [-1,1] 对应整屏宽度）。 */
     @Synchronized
@@ -896,31 +872,6 @@ object D3D12Temporal {
         }
         return out
     }
-
-    /**
-     * 诊断用：一行描述当前时间性状态。
-     *
-     * 注意 `modelViews`/`chunkSections` 打印的是 **`本帧已捕获数 / 上一帧捕获数`**，而本行是在
-     * [onLevelProjectionUpload] 里 `beginFrame()` **之后**打的 —— 此时本帧还没开始绘制，所以
-     * 稳定的形态是 `0/N`：本帧 0 条、上一帧 N 条。`N` 持续 > 0 就说明逐物体/区块矩阵捕获正常工作。
-     */
-    @Synchronized
-    fun describe(): String = ("enabled=${enabled} jitterOn=${jitterEnabled}"
-            + " frame=${frameIndex}"
-            + " samples=${jitterSamples}"
-            + " jitter=(${jitterX},${jitterY})"
-            + " prevJitter=(${previousJitterX},${previousJitterY})"
-            + " projection=${if (projection == null) "null" else "set"}"
-           + " prevProjection=${if (previousProjection == null) "null" else "set"}"
-            + " modelViews(thisFrame/prevFrame)=${modelViews.size}/${previousModelViews.size}"
-            + " chunkSections(thisFrame/prevFrame)=${chunkSections.size}/"
-            + previousChunkSections.size
-            + " camera=${if (cameraPosition == null) "null" else "set"}"
-            // P76f 诊断：相机世界坐标与"上一帧 → 本帧"的位移量。与 native 侧
-            // `DXRMC_P108X_DUMP_MV=1` 打出的运动矢量读数按时间戳对齐，就能回答
-            // "mv 全 0 到底是通路坏了、还是这一刻相机根本没动"。
-            + " camPos=${cameraPosition?.joinToString("/") ?: "-"}"
-            + " camDelta=${cameraDelta()?.joinToString("/") ?: "-"}")
 
     /**
      * Halton 序列：van der Corput 基的 radical inverse。

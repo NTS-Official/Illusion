@@ -232,26 +232,9 @@ class D3D12IntermediaryShaderModule(
                 }
                 val address = pointer.get(0)
                 val hlsl = MemoryUtil.memUTF8(address)
-                // P7 诊断：打印 raw spvc 输出，确认 }}; 来自 spvc 还是注入逻辑
-                // P29：全量 HLSL dump 是同步 I/O 洪泛（每帧数千行），仅 verbose 模式输出。
-                if (IllusionLogger.debugEnabled()
-                        && (name.contains("gui") || name.contains("debug") || name.contains("position")
-                        || name.contains("animate") || name.contains("sprite") || name.contains("text")
-                        || name.contains("entity") || name.contains("item"))) {
-                    IllusionLogger.debugMessage("[backend-java] [${name}] RAW spvc HLSL:\n${hlsl}")
-                }
                 // Fix S2：语义通过 spvc_compiler_hlsl_add_vertex_attribute_remap 在编译前注入，
                 // 确保 spvc HLSL 后端输出正确的 D3D12 语义（POSITION/TEXCOORD<n>）。
                 val result = hlsl
-                // P7 诊断：打印 raw spvc 输出，确认语义已正确生成
-                // P27：条件同步包含 animate/sprite，确保 animate_sprite_blit 的完整 HLSL 也输出
-                // P29：同 RAW dump，全量 HLSL 仅 verbose 模式输出，避免同步 I/O 洪泛。
-                if (IllusionLogger.debugEnabled()
-                        && (name.contains("gui") || name.contains("debug") || name.contains("position")
-                        || name.contains("animate") || name.contains("sprite") || name.contains("text")
-                        || name.contains("entity") || name.contains("item"))) {
-                    IllusionLogger.debugMessage("[backend-java] [${name}] spvc HLSL (no inject):\n${result}")
-                }
                 result
             } finally {
                 Spvc.spvc_context_destroy(context)

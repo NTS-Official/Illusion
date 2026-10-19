@@ -64,7 +64,7 @@ object NvidiaReflex {
 
     /** Reflex 是否可用（native 三个入口都解析到才算）。 */
     @JvmStatic
-    fun isAvailable(): Boolean = MCDR_ABI.dx12ReflexAvailable() == 1
+    fun isAvailable(): Boolean = MCDR_ABI.D3D12ReflexAvailable() == 1
 
     /** 最后一次真正推给 native 的模式；`save` 以它为准（见 [save] 的说明）。 */
     private var currentMode: Int = DEFAULT_MODE
@@ -72,7 +72,7 @@ object NvidiaReflex {
     /** 把模式推给 native；下一帧 Present 前生效。 */
     private fun push(mode: Int) {
         currentMode = mode
-        MCDR_ABI.dx12SetReflexMode(mode)
+        MCDR_ABI.D3D12SetReflexMode(mode)
     }
 
     /** 从 `options.txt` 读回模式（认名字与数字两种写法），并立刻推给 native。 */

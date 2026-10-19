@@ -3,6 +3,7 @@ package dev.nts.expdxr.d3d12.render.advanced.taa
 import com.mojang.blaze3d.GpuFormat
 import com.mojang.blaze3d.buffers.GpuBuffer
 import com.mojang.blaze3d.textures.GpuTexture
+import dev.nts.expdxr.d3d12.D3D12Settings
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.extern.MCDRPipelineDesc
 import dev.nts.expdxr.d3d12.render.adapter.D3D12Device
@@ -79,9 +80,6 @@ private const val STEP_PIPELINE: Int = 4
 object D3D12Velocity {
     private val LOGGER: Logger = LoggerFactory.getLogger("dxrmc-velocity")
 
-    /** 开关来源（Gradle 侧转发成 Loom run config 的系统属性，同 `dxrmc.temporal`）。 */
-    private const val VELOCITY_PROPERTY: String = "dxrmc.temporal.velocity"
-
     /** 速度格式：两个 16 位有符号浮点（像素单位够用，且是 TAAU 的常见选择；native ordinal 41）。 */
     val FORMAT: GpuFormat = GpuFormat.RG16_FLOAT
 
@@ -131,14 +129,12 @@ object D3D12Velocity {
     /** 第一帧（还没有上一帧相机）时的平移增量回退值。 */
     private val CAMERA_DELTA_NONE: FloatArray = floatArrayOf(0.0f, 0.0f, 0.0f)
 
-    private const val LOG_INTERVAL_MILLIS: Long = 5_000L
-
     /** [recordedFrame] 的初值："这一帧还没录过"。 */
     private const val FRAME_NONE: Long = -1L
 
-    /** 总开关。默认 false：速度附件在没有 resolve 之前只是"多写一张纹理"。 */
+    /** 总开关。默认 false：速度附件在没有 resolve 之前只是"多写一张纹理"。与 `[debug] temporalChain` 联动。 */
     @Volatile
-    var enabled: Boolean = "true" == System.getProperty(VELOCITY_PROPERTY)
+    var enabled: Boolean = D3D12Settings.temporalChain
 
     /** 乒乓速度纹理（current = 本帧写入，previous = 上一帧结果，供 P77 resolve 当历史用）。 */
     private var current: D3D12GpuTexture? = null
@@ -177,9 +173,6 @@ object D3D12Velocity {
     private var depthViewFor: Long = 0L
 
     private var frameIndex: Long = 0L
-    private var passCount: Long = 0L
-    private var skippedCount: Long = 0L
-    private var lastLogMillis: Long = 0L
 
     /**
      * 本帧已经录过速度 pass 的帧号（[beginFrame] 每帧 +1，初值 [FRAME_NONE]）。
@@ -255,8 +248,6 @@ object D3D12Velocity {
     /** 释放全部资源（关设备/退出世界/错误自检时调用）。 */
     @Synchronized
     fun reset() {
-        passCount = 0L
-        skippedCount = 0L
         frameIndex = 0L
         recordedFrame = FRAME_NONE
         disabledReason = null
@@ -322,11 +313,9 @@ object D3D12Velocity {
         val prevProjection = D3D12Temporal.previousProjection()
         if (view == null || previousView == null || curProjection == null || prevProjection == null) {
             // 第一帧（还没有历史）或本帧没有任何区块绘制：跳过，速度纹理保持上一帧内容。
-            countSkip("no history/view")
             return false
         }
         if (device == null) {
-            countSkip("no device")
             return false
         }
         if (!ensurePipeline(device)) {
@@ -348,10 +337,7 @@ object D3D12Velocity {
             D3D12Temporal.clipJitterX(w), D3D12Temporal.clipJitterY(h))
         val currViewProj = D3D12Temporal.multiply(jittered, view)
         val prevViewProj = D3D12Temporal.multiply(prevProjection, previousView)
-        val invCurr = invert(currViewProj) ?: run {
-            countSkip("singular currViewProj")
-            return false
-        }
+        val invCurr = invert(currViewProj) ?: return false
         // P76b：把物体快照写进行缓冲。速度 pass 在本帧渲染完成之后录制、像素来自本帧，而它要回答的
         // 是"这个像素上一帧在哪" —— extract 阶段跑在 [D3D12Temporal.beginFrame] 之后，所以
         // 本帧 extract 采到的那份快照**就是**该配对的「上一帧」，滚动点因此放在
@@ -406,10 +392,8 @@ object D3D12Velocity {
             disable("dx12Draw failed: ${MCDR_ABI.D3D12LastError()}", STEP_PIPELINE)
         }
         MCDR_ABI.D3D12EndRenderPass(ctx)
-        passCount++
         // P108：记住这一帧已经录过，供同一帧稍后的那次调用短路（见 [recordedFrame]）。
         recordedFrame = frameIndex
-        logStatus()
         return true
     }
 
@@ -505,7 +489,7 @@ object D3D12Velocity {
      * P76b：把上一帧的物体快照写进行缓冲，返回写入的行数（0 = 这一帧没有逐物体修正）。
      *
      * 写失败只是**降级**（这一帧退回纯相机重投影），不算放弃：所以这里不像 [writeParameters]
-     * 那样调 [disable]，只把行数归零并每 [LOG_INTERVAL_MILLIS] 报一次。
+     * 那样调 [disable]，只把行数归零。
      */
     private fun uploadObjects(): Int {
         val buffer = this.objects
@@ -659,26 +643,6 @@ object D3D12Velocity {
         return out
     }
 
-    private fun countSkip(reason: String) {
-        skippedCount++
-        val now = System.currentTimeMillis()
-        if (now - lastLogMillis >= LOG_INTERVAL_MILLIS) {
-            lastLogMillis = now
-            LOGGER.info("[backend] velocity: skipped ({}) {}", reason, describe())
-        }
-    }
-
-    private fun logStatus() {
-        val now = System.currentTimeMillis()
-        if (now - lastLogMillis < LOG_INTERVAL_MILLIS) {
-            return
-        }
-        lastLogMillis = now
-        // P76b：逐物体快照的采集计数一起打出来，这样「物体身份/端点有没有采到」可以独立于
-        // GPU 侧的绑定先验证（见 known_bugs 里「先看日志再看画面」的约定）。
-        LOGGER.info("[backend] velocity: {} | {}", describe(), D3D12ObjectMotion.describe())
-    }
-
     /** 一次性关闭（出错时），并给出原因。 */
     private fun disable(reason: String) {
         disable(reason, 0)
@@ -721,16 +685,6 @@ object D3D12Velocity {
         this.width = 0
         this.height = 0
     }
-
-    /** 诊断用一行状态。 */
-    @Synchronized
-    fun describe(): String = ("enabled=${enabled} active=${isActive()}"
-            + " frame=${frameIndex} passes=${passCount} skipped=${skippedCount}"
-            + " size=${width}x${height}"
-            + " pipeline=${if (pipeline == 0L) "none" else "ok"}"
-            + " depthView=${if (depthView == null) "none" else "ok"}"
-            + " objects=${objectCount}"
-            + (if (disabledReason == null) "" else " disabledReason=${disabledReason}"))
 
     // ------------------------------------------------------------------
     // HLSL（native 侧入口固定 main；P84 起优先 DXC + SM 6.x/DXIL，退回 D3DCompile SM 5.1）
@@ -866,14 +820,16 @@ object D3D12Velocity {
             // 即 `prevPos - curPos`。旧写法是 `uv - prevUv`，方向整体反了 —— 静止时两边都是 0
             // 所以看不出来，一旦相机移动 DLSS 就照着**反向**位移去历史缓冲取样，于是运动方向
             // 上拖出一条永不收敛的残影（用户 m10388：静止好了，走动/转视角的拖影还在）。
-            // P134：MV 现在写成**真实运动**（不含 jitter）。jitter 由消费方自己补偿：
-            // TAA 在 historyUv 里加 (PrevJitter - Jitter)，DLSS 用 motionVectorsJittered=0 + jitterOffset。
-            // P139：uv 在**抖动**网格上（栅格被 jitterProjection 位移了 −J），而 PrevViewProj 是
-            // 未抖动的上一帧投影、InvCurrViewProj 反投影出的世界点也是真实位置。所以直接相减的
-            // 差里混着本帧 jitter：本帧像素 q 对应的表面点，在未抖动网格上是 q + J。
-            // 减掉 JitterPixels 才是真实运动（静止时正好归零；走动时 TAA 的 historyUv = p + mv
-            // 才落在同一表面点上，否则每帧偏 0.5px，表现为 p107 的"走动有拖影"）。
-            float2 motion = (prevUv - uv) * ScreenSize - JitterPixels;
+            // P148（p116 之后重推，取代 P139/P146）：jitter 注入的是**列 2**（`out[8]`/`out[9]`，
+            // 即 `m20`/`m21`），它乘的是 view.z；而透视的 `w = -view.z`（`m32 = -1`，
+            // 见 D3D12Temporal.kt:142），所以 `clip.x += j*z` 经透视除法后的实际 NDC 位移是
+            // `-j`。也就是说注入 `δ = -2j/尺寸` 的效果是内容在 NDC 里移动 `+2j/尺寸`：
+            // 像素坐标（y 向下）里内容整体位移 `(+j.x, -j.y)` —— **y 轴反号**，这正是
+            // 抖动"看起来是竖直方向"的原因（用户 m16153）。
+            // 因此抖动栅格像素 p 上的内容在未抖动网格上位于 `p - (+J.x, -J.y)`，
+            // 而 `prevUv` 来自未抖动的 `PrevViewProj`，MV 要的是未抖动网格之间的位移：
+            // `prevUv - (uv - (+J.x, -J.y)) = 原式 + (+J.x, -J.y)`。
+            float2 motion = (prevUv - uv) * ScreenSize + float2(JitterPixels.x, -JitterPixels.y);
             // NaN/inf 兜底：NaN 参与的比较恒为假，所以用"取反的 <=" 写法把它一并挡掉。上一条
             // 守卫之后这里理论上不会触发，留着是因为一旦传出去就是一整块画面的错色。
             if (!(dot(motion, motion) <= 1.0e12)) {
@@ -904,8 +860,9 @@ object D3D12Velocity {
                 }
                 float2 prevObjectNdc = prevObjectClip.xy / prevObjectClip.w;
                 float2 prevObjectUv = float2(prevObjectNdc.x * 0.5 + 0.5, 0.5 - prevObjectNdc.y * 0.5);
-                // 同上：uv 在抖动网格上，prevObjectUv 在未抖动网格上。
-                float2 objectMotion = (prevObjectUv - uv) * ScreenSize - JitterPixels;
+                // 同上（P148）：未抖动网格之间的位移；jitter 在像素坐标里的实际位移是
+                // `(+J.x, -J.y)`（y 反号，理由见上面 motion 的注释）。
+                float2 objectMotion = (prevObjectUv - uv) * ScreenSize + float2(JitterPixels.x, -JitterPixels.y);
                 // 坏匹配（张冠李戴的行）位移会大得离谱，直接丢掉，回退相机重投影。
                 if (dot(objectMotion, objectMotion) > ObjectParams.y * ObjectParams.y) {
                     continue;

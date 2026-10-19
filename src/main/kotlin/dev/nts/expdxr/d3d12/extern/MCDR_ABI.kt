@@ -2,6 +2,7 @@
 
 package dev.nts.expdxr.d3d12.extern
 
+import dev.nts.expdxr.d3d12.D3D12Settings
 import dev.nts.expdxr.utils.IllusionLogger
 import dev.nts.expdxr.d3d12.backend.D3D12FenceCallback
 import java.lang.foreign.*
@@ -46,20 +47,19 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 object MCDR_ABI {
     /**
-     * 高频诊断日志开关：设置环境变量 DX12_LOG_VERBOSE=1 开启，默认关闭。
-     * 与 native 侧日志级别同款环境变量；Java 端每帧/每调用的诊断打印均以此门控，
+     * 高频诊断日志开关：由日志级别决定 —— 配置文件 `[logging] logLevel = DEBUG`（或更低），
+     * 环境变量 `DX12_LOG_VERBOSE=1` 仍是开发期逃生口。Java 端每帧/每调用的诊断打印均以此门控，
      * 避免海量 System.err 同步 I/O 拖垮帧率（P29 帧数修复）。
      */
-    @JvmField
-    val LOG_VERBOSE = "1" == System.getenv("DX12_LOG_VERBOSE")
+    val LOG_VERBOSE: Boolean
+        get() = IllusionLogger.debugEnabled()
 
     /**
-     * 帧时间插桩开关（P3）：设置环境变量 DX12_PROF=1 开启，默认关闭。
-     * 与 LOG_VERBOSE 分离——后者会附带大量诊断日志，会干扰计时。
+     * 帧时间插桩开关（P3）：配置 `[debug] profiling`，默认关闭。与 LOG_VERBOSE 分离——
+     * 后者会附带大量诊断日志，会干扰计时。
      */
-    @JvmField
-    val PROF = LOG_VERBOSE || "1" == System.getenv("DX12_PROF")
-
+    val PROF: Boolean
+        get() = D3D12Settings.profiling || LOG_VERBOSE
     private const val LIB_NAME = "MCDR.dll"
     private const val EXTRACT_DIR = "dxrmc"
 
@@ -96,6 +96,7 @@ object MCDR_ABI {
     private var MH_lasterror: MethodHandle? = null
     private var MH_setlogverbose: MethodHandle? = null
     private var MH_setloglevel: MethodHandle? = null
+    private var MH_setenvironment: MethodHandle? = null
     private var MH_setpixcapture: MethodHandle? = null
     private var MH_setshadingrate: MethodHandle? = null
     private var MH_setantialiasing: MethodHandle? = null
@@ -104,19 +105,21 @@ object MCDR_ABI {
     private var MH_querydlss: MethodHandle? = null
     /** P108b：DLSS 自己的开关（不再借 `aaMode == 4`）。 */
     private var MH_setdlssenabled: MethodHandle? = null
-    /** P108e：把世界层深度快照进 native 私有 D32 纹理（见 [dx12SnapshotDlssDepth]）。 */
+    /** P108e：把世界层深度快照进 native 私有 D32 纹理（见 [D3D12SnapshotDlssDepth]）。 */
     private var MH_snapshotdlssdepth: MethodHandle? = null
-    /** P108y：DLSS 挡位（Performance/Balanced/Quality，见 [dx12SetDlssQuality]）。 */
+    /** P108y：DLSS 挡位（Performance/Balanced/Quality，见 [D3D12SetDlssQuality]）。 */
     private var MH_setdlssquality: MethodHandle? = null
-    /** P108ac：DLSS 模型（NGX render preset，见 [dx12SetDlssRenderPreset]）。 */
+    /** P108ac：DLSS 模型（NGX render preset，见 [D3D12SetDlssRenderPreset]）。 */
     private var MH_setdlssrenderpreset: MethodHandle? = null
-    /** P108z：把 JVM 建的输出纹理交给 native（见 [dx12SetDlssOutput]）。 */
+    /** P108z：把 JVM 建的输出纹理交给 native（见 [D3D12SetDlssOutput]）。 */
     private var MH_setdlssoutput: MethodHandle? = null
     /** P112：每帧相机常量（Streamline 的 sl::Constants）。 */
     private var MH_setdlssconstants: MethodHandle? = null
     /** P117：PCL stats —— 帧开始与通用标记。 */
     private var MH_reflexframebegin: MethodHandle? = null
     private var MH_reflexmarker: MethodHandle? = null
+    /** P124：mesh shader 能力查询（native 侧判断 GPU/驱动是否支持 MS 管线）。 */
+    private var MH_meshsupport: MethodHandle? = null
     /** P122：Reflex 模式与可用性。 */
     private var MH_setreflexmode: MethodHandle? = null
     private var MH_reflexavailable: MethodHandle? = null
@@ -193,11 +196,8 @@ object MCDR_ABI {
     private var MH_presentsurface: MethodHandle? = null
     private var MH_getbackbufferhandle: MethodHandle? = null
     private var MH_issurfacesuboptimal: MethodHandle? = null
-    private var MH_readbacksurfacepixels: MethodHandle? = null
     private var MH_readbacktexturepixels: MethodHandle? = null
-    private var MH_dumptexturetofile: MethodHandle? = null
     private var MH_destroysurface: MethodHandle? = null
-    private var MH_getactivesurfacehandle: MethodHandle? = null
 
     private var MH_setpipeline: MethodHandle? = null
     private var MH_setscissor: MethodHandle? = null
@@ -298,8 +298,6 @@ object MCDR_ABI {
                             + "（配置加载前；生效级别由 config/dxr_mc-client.toml 的 [logging] logLevel 决定，"
                             + "加载后会另行打印一行；开发时可用环境变量 DX12_LOG_VERBOSE=1 强制 DEBUG）"
                 )
-                println("[backend] 诊断 GREEN 着色器注入已关闭，如需开启请设置环境变量 DX12_DIAG_GREEN=1")
-                println("[backend] 诊断 WHITE 着色器注入已关闭，如需开启请设置环境变量 DX12_DIAG_WHITE=1")
             }
         }
     }
@@ -613,6 +611,28 @@ object MCDR_ABI {
     }
 
     /**
+     * Set one process-wide environment variable, or clear it when [value] is null.
+     *
+     * <p>The configuration is the single place users look; a few native switches are still
+     * read with `getenv`, so this pushes the configured value into the process right before the
+     * device is created. Optional export: an older DLL simply ignores the call.
+     */
+    fun D3D12SetEnvironment(name: String, value: String?) {
+        if (LOAD_FAILURE != null) {
+            return
+        }
+        val handle = MH_setenvironment ?: return
+        try {
+            Arena.ofConfined().use { arena ->
+                val key = cstringUtf8(arena, name)
+                val valSeg = if (value == null) MemorySegment.NULL else cstringUtf8(arena, value)
+                handle.invokeExact(key, valSeg)
+            }
+        } catch (ignored: Throwable) {
+            // configuration propagation must never fail start-up
+        }
+    }
+    /**
      * Load Microsoft PIX's GPU capture layer (`WinPixGpuCapturer.dll`) into this process.
      *
      * <p>PIX hooks Direct3D 12 from inside that DLL, so it has to be in place **before the first
@@ -677,7 +697,7 @@ object MCDR_ABI {
      * device context and takes effect on the next blit.
      *
      * <p>P108b: DLSS is no longer a mode of this option — it has its own switch
-     * ([dx12SetDlssEnabled]) — so `4` is not a legal value here any more. The one remaining caller
+     * ([D3D12SetDlssEnabled]) — so `4` is not a legal value here any more. The one remaining caller
      * that still passes `4` is the temporary legacy bridge for DLLs predating P108b, in
      * `dev.nts.expdxr.dxrmc.dlss.D3D12Dlss`.
      *
@@ -711,7 +731,7 @@ object MCDR_ABI {
      *     [Int.MIN_VALUE] = 本地 DLL 没有这个导出（旧 DLL 仍只认 `aaMode == 4`，JVM 侧为此保留了一段
      *     临时桥：`dev.nts.expdxr.dxrmc.dlss.DeepLearningSuperSampling`）。Never throws.
      */
-    fun dx12SetDlssEnabled(enabled: Int): Int {
+    fun D3D12SetDlssEnabled(enabled: Int): Int {
         if (LOAD_FAILURE != null) {
             return Int.MIN_VALUE
         }
@@ -737,7 +757,7 @@ object MCDR_ABI {
      * @return 1 = 已记录，0 = 接受但本机 DLSS 不可用，-1 = 参数非法，
      *     [Int.MIN_VALUE] = 本地 DLL 没有这个导出。Never throws.
      */
-    fun dx12SetDlssQuality(quality: Int): Int {
+    fun D3D12SetDlssQuality(quality: Int): Int {
         if (LOAD_FAILURE != null) {
             return Int.MIN_VALUE
         }
@@ -766,7 +786,7 @@ object MCDR_ABI {
      * @return 已记录的预设值，-1 = 参数非法（越界），[Int.MIN_VALUE] = 本地 DLL 没有这个导出。
      *     Never throws.
      */
-    fun dx12SetDlssRenderPreset(preset: Int): Int {
+    fun D3D12SetDlssRenderPreset(preset: Int): Int {
         if (LOAD_FAILURE != null) {
             return Int.MIN_VALUE
         }
@@ -781,38 +801,38 @@ object MCDR_ABI {
 
     /**
      * P108：按 [input]（`MCDRLayout.DLSS_INPUT`）在 `ctx` 上建/重建 DLSS 特征。尺寸或模式变化时调它，
-     * 也可以完全不调 —— [dx12EvaluateDlss] 内部会按需创建。
+     * 也可以完全不调 —— [D3D12EvaluateDlss] 内部会按需创建。
      *
      * @return 1 = 真的建了/复用了特征，0 = 跳过（DLSS 开关是关的、尺寸没变或 DLSS 不可用），
      *     -1 = 参数非法，[Int.MIN_VALUE] = 本地 DLL 没有这个导出。Never throws.
      */
-    fun dx12CreateDlssFeature(ctx: Long, input: MemorySegment): Int =
+    fun D3D12CreateDlssFeature(ctx: Long, input: MemorySegment): Int =
         dlssCall(MH_createdlssfeature, "[backend-java] dx12CreateDlssFeature failed: ", ctx, input)
 
     /**
      * P108：每帧调一次，让 NGX 用 [input] 里的 render/target 尺寸、jitter、运动矢量、深度与曝光
      * 做一次 DLSS 评价，结果写进 `pInOutput`。native 侧只在 DLSS 开关打开时真正执行（P108b 是
-     * [dx12SetDlssEnabled]，旧 DLL 是 `aaMode == 4`）；抗锯齿模式是独立的另一件事。
+     * [D3D12SetDlssEnabled]，旧 DLL 是 `aaMode == 4`）；抗锯齿模式是独立的另一件事。
      *
      * @return 1 = 这一帧真的评价了，0 = 跳过（开关是关的/不可用/尺寸非法），-1 = 参数非法，
      *     [Int.MIN_VALUE] = 本地 DLL 没有这个导出。
      */
-    fun dx12EvaluateDlss(ctx: Long, input: MemorySegment): Int =
+    fun D3D12EvaluateDlss(ctx: Long, input: MemorySegment): Int =
         dlssCall(MH_evaluatedlss, "[backend-java] dx12EvaluateDlss failed: ", ctx, input)
 
     /**
      * P108e：在**深度还没被清空**的时刻，把主渲染目标的深度拷进 native 的私有 D32 快照纹理
-     * （`mcdr_dx12SnapshotDlssDepth`）；之后 [dx12EvaluateDlss] 优先用那张快照，而不是调用方传的
+     * （`mcdr_dx12SnapshotDlssDepth`）；之后 [D3D12EvaluateDlss] 优先用那张快照，而不是调用方传的
      * `pInDepth`。native 自己负责 `depth → COPY_SOURCE`、`CopyResource`、以及**把 `depth` 恢复成
      * 调用前的状态**，所以调用方的资源状态机不受影响。
      *
-     * 每帧调一次（幂等，开销就是一次 D32 拷贝）。返回值语义与 [dx12EvaluateDlss] 一致：
+     * 每帧调一次（幂等，开销就是一次 D32 拷贝）。返回值语义与 [D3D12EvaluateDlss] 一致：
      *
      * @return 1 = 快照已就位（本帧或复用），0 = 参数不可用（跳过，评价退回用调用方给的深度），
      *     -1 = 创建/拷贝失败（native 只 WARN 一次，同样退回调用方的深度），
      *     [Int.MIN_VALUE] = 本地 DLL 没有这个导出（旧 DLL，退回调用方的深度）。Never throws.
      */
-    fun dx12SnapshotDlssDepth(ctx: Long, depth: Long): Int =
+    fun D3D12SnapshotDlssDepth(ctx: Long, depth: Long): Int =
         dlssCall(MH_snapshotdlssdepth, "[backend-java] dx12SnapshotDlssDepth failed: ", ctx, ptr(depth))
 
     /**
@@ -837,7 +857,7 @@ object MCDR_ABI {
      * （`mcdr_dx12SetDlssConstants`）。旧 DLL 没有该导出时返回 [Int.MIN_VALUE]，调用方静默跳过。
      */
     /** P117：PCL stats 的帧开始 —— native 建本帧 SL frame token 并发 eSimulationStart。 */
-    fun dx12ReflexFrameBegin() {
+    fun D3D12ReflexFrameBegin() {
         if (LOAD_FAILURE != null) return
         val handle = MH_reflexframebegin ?: return
         try {
@@ -848,7 +868,7 @@ object MCDR_ABI {
     }
 
     /** P122：Reflex 模式（0=off 1=on 2=on+boost）。 */
-    fun dx12SetReflexMode(mode: Int) {
+    fun D3D12SetReflexMode(mode: Int) {
         if (LOAD_FAILURE != null) return
         val handle = MH_setreflexmode ?: return
         try {
@@ -859,7 +879,7 @@ object MCDR_ABI {
     }
 
     /** P122：Reflex 是否可用（1=可用；旧 DLL 没有导出时返回 0）。 */
-    fun dx12ReflexAvailable(): Int {
+    fun D3D12ReflexAvailable(): Int {
         if (LOAD_FAILURE != null) return 0
         val handle = MH_reflexavailable ?: return 0
         return try {
@@ -870,8 +890,25 @@ object MCDR_ABI {
         }
     }
 
+    /**
+     * P124：mesh shader 能力查询。
+     *
+     * <p>返回 1 = 支持，0 = 不支持；[reasonOut] 收到一句原因（不支持时是 GPU/驱动/API 的哪一种），
+     * 供日志与「不可用按钮」的提示用。旧 DLL 没有该导出时返回 -1（调用方按"不支持"处理）。
+     */
+    fun D3D12QueryMeshSupport(reasonOut: MemorySegment, capacity: Int): Int {
+        if (LOAD_FAILURE != null) return -1
+        val handle = MH_meshsupport ?: return -1
+        return try {
+            (handle.invokeExact(reasonOut, capacity) as Int)
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12QueryMeshSupport failed: ${t}")
+            -1
+        }
+    }
+
     /** P117：PCL 通用标记（取值见 sl::PCLMarker，1=eSimulationEnd 2=eRenderSubmitStart）。 */
-    fun dx12ReflexMarker(marker: Int) {
+    fun D3D12ReflexMarker(marker: Int) {
         if (LOAD_FAILURE != null) return
         val handle = MH_reflexmarker ?: return
         try {
@@ -881,7 +918,7 @@ object MCDR_ABI {
         }
     }
 
-    fun dx12SetDlssConstants(constants: MemorySegment): Int {
+    fun D3D12SetDlssConstants(constants: MemorySegment): Int {
         if (LOAD_FAILURE != null) {
             return Int.MIN_VALUE
         }
@@ -893,7 +930,7 @@ object MCDR_ABI {
             Int.MIN_VALUE
         }
     }
-    fun dx12SetDlssOutput(textureHandle: Long): Int {
+    fun D3D12SetDlssOutput(textureHandle: Long): Int {
         if (LOAD_FAILURE != null) {
             return Int.MIN_VALUE
         }
@@ -923,7 +960,7 @@ object MCDR_ABI {
      * P108：把 DLSS/NGX 的可用性写进 [note]（UTF-8，最多 [cap] 字节，可为 NULL）并返回
      * 1 = 可用 / 0 = 不可用 / -1 = 参数非法。无副作用（首次会尝试 NGX init）。
      */
-    fun dx12QueryDlss(note: MemorySegment, cap: Int): Int {
+    fun D3D12QueryDlss(note: MemorySegment, cap: Int): Int {
         if (LOAD_FAILURE != null) {
             return Int.MIN_VALUE
         }
@@ -1899,10 +1936,6 @@ object MCDR_ABI {
         }
     }
 
-    /** P6 diagnostic: 3x3 sampled back-buffer pixels as int[36] (9 px x RGBA); null on failure. */
-    fun D3D12ReadbackSurfacePixels(surface: Long): IntArray? {
-        return readback36(MH_readbacksurfacepixels, surface, "dx12ReadbackSurfacePixels")
-    }
 
     /** P6 diagnostic: 3x3 sampled texture pixels as int[36] (9 px x RGBA); null on failure. */
     fun D3D12ReadbackTexturePixels(texHandle: Long): IntArray? {
@@ -1928,47 +1961,12 @@ object MCDR_ABI {
         }
     }
 
-    /**
-     * P27 diagnostic: dump a texture to `dx12_dump_<tag>.bmp` plus an ASCII thumbnail.
-     *
-     * 注意（FFM 签名多态陷阱）：`invokeExact` 的调用点描述符是 Kotlin 按表达式上下文推出来的，
-     * 一旦它处在 lambda 尾表达式位置就会被推成 `(…)Object`，而 native 导出是 `void` ⇒ 抛
-     * `WrongMethodTypeException: handle's method type (MemorySegment,MemorySegment)void
-     * but found (MemorySegment,MemorySegment)Object`。
-     * 2026-10-14 实测：这个异常从 `D3D12CommandEncoderBackend.submit()` 冒到
-     * `Minecraft.renderFrame`，正好发生在 quick-play 的 `WorldOpenFlows.openWorld` 里，
-     * 直接把**世界加载打断**（游戏卡在标题界面，tick 346 之后不再前进）。
-     * 因此这里改用非签名多态的 `invokeWithArguments`，并且把诊断自身的异常全部吞掉：
-     * 诊断永远不能中断渲染或世界加载。
-     */
-    fun D3D12DumpTextureToFile(texHandle: Long, tag: String?) {
-        requireLoaded()
-        try {
-            Arena.ofConfined().use { arena ->
-                val cTag = arena.allocateFrom(if (tag == null) "tex" else tag)
-                MH_dumptexturetofile!!.invokeWithArguments(ptr(texHandle), cTag)
-            }
-        } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12DumpTextureToFile failed (tex=0x"
-                + "${texHandle.toULong().toString(16)}): ${t}")
-        }
-    }
 
     /** Destroy a surface created by [D3D12CreateSurface]. */
     fun D3D12DestroySurface(surface: Long) {
         requireLoaded()
         try {
             MH_destroysurface!!.invokeExact(ptr(surface))
-        } catch (t: Throwable) {
-            throw unexpected(t)
-        }
-    }
-
-    /** P6 diagnostic: native handle of the active surface, for reading back the real frame. */
-    fun D3D12GetActiveSurfaceHandle(): Long {
-        requireLoaded()
-        try {
-            return addr(MH_getactivesurfacehandle!!.invokeExact() as MemorySegment)
         } catch (t: Throwable) {
             throw unexpected(t)
         }
@@ -2735,6 +2733,8 @@ object MCDR_ABI {
         MH_setlogverbose = skip("mcdrSetLogVerbose", fdv(MCDRLayout.I32))
         // P77:分级日志（0=error 1=warning 2=info 3=debug）。旧 DLL 没有这个导出，此时
         // dx12SetLogLevel 退回布尔版本的 mcdrSetLogVerbose。
+        // 配置 → native 环境变量（可选导出）：native 侧仍有少量开关用 getenv() 读取。
+        MH_setenvironment = skipOptional("mcdr_dx12SetEnvironment", fdv(MCDRLayout.PTR, MCDRLayout.PTR))
         MH_setloglevel = skipOptional("mcdrSetLogLevel", fdv(MCDRLayout.I32))
         // PIX GPU 捕获层（可选导出）：必须在首个 D3D12 设备创建之前调用 —— 捕获层靠挂钩 D3D12
         // 工作，晚一步就抓不到已经建好的对象。旧 DLL 没有这个导出，此时调用返回 MIN_VALUE。
@@ -2776,6 +2776,11 @@ object MCDR_ABI {
             fd(MCDRLayout.I32, MCDRLayout.PTR))
         MH_reflexframebegin = skipOptional("mcdr_dx12ReflexFrameBegin", fdv())
         MH_reflexmarker = skipOptional("mcdr_dx12ReflexMarker", fdv(MCDRLayout.I32))
+        MH_meshsupport = skipOptional("mcdr_dx12QueryMeshSupport", fd(
+            MCDRLayout.I32,
+            MCDRLayout.PTR,
+            MCDRLayout.I32
+        ))
         MH_setreflexmode = skipOptional("mcdr_dx12SetReflexMode", fdv(MCDRLayout.I32))
         MH_reflexavailable = skipOptional("mcdr_dx12ReflexAvailable", fd(MCDRLayout.I32))
         MH_setdlssoutput = skipOptional("mcdr_dx12SetDlssOutput",
@@ -3029,19 +3034,12 @@ object MCDR_ABI {
         MH_presentsurface = skip("mcdr_dx12PresentSurface", fdv(MCDRLayout.PTR))
         MH_getbackbufferhandle = skip("mcdr_dx12GetBackBufferHandle", fd(MCDRLayout.I64, MCDRLayout.PTR))
         MH_issurfacesuboptimal = skip("mcdr_dx12IsSurfaceSuboptimal", fd(MCDRLayout.I32, MCDRLayout.PTR))
-        MH_readbacksurfacepixels = skip("mcdr_dx12ReadbackSurfacePixels", fd(
-            MCDRLayout.I32,
-            MCDRLayout.PTR,
-            MCDRLayout.PTR
-        ))
         MH_readbacktexturepixels = skip("mcdr_dx12ReadbackTexturePixels", fd(
             MCDRLayout.I32,
             MCDRLayout.PTR,
             MCDRLayout.PTR
         ))
-        MH_dumptexturetofile = skip("mcdr_dx12DumpTextureToFile", fdv(MCDRLayout.PTR, MCDRLayout.PTR))
         MH_destroysurface = skip("mcdr_dx12DestroySurface", fdv(MCDRLayout.PTR))
-        MH_getactivesurfacehandle = skip("mcdr_dx12GetActiveSurfaceHandle", fd(MCDRLayout.PTR))
 
         MH_setpipeline = skip("mcdr_dx12SetPipeline", fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.PTR, MCDRLayout.I32))
         MH_setscissor = skip("mcdr_dx12SetScissor", fd(

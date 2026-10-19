@@ -2,6 +2,7 @@ package dev.nts.expdxr.dxrmc.dlss
 
 import dev.nts.expdxr.Illusion
 import dev.nts.expdxr.d3d12.backend.D3D12CommandEncoderBackend
+import dev.nts.expdxr.d3d12.D3D12Settings
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.extern.MCDRLayout
 import dev.nts.expdxr.d3d12.extern.MCDRLayout.F32
@@ -126,13 +127,6 @@ object DeepLearningSuperSampling {
     private const val PRE_EXPOSURE: Float = 1.0f
 
     /**
-     * P108z 验收开关的系统属性名。`Illusion\build.gradle` 的 `runs{client{}}` 用
-     * `systemProperty 'dxrmc.dlssOutput'` 转发，命令行写作 `-Pdxrmc.dlssOutput=handover`。
-     * 取值 `handover` 才打开，其余（含默认 `off`）关闭 —— 见 [dlssOutputHandoverEnabled]。
-     */
-    private const val DLSS_OUTPUT_PROPERTY: String = "dxrmc.dlssOutput"
-
-    /**
      * P108z 失效保护：native 连续 evaluate 失败多少帧后打一行 WARN。失败帧不会跳过世界层 blit
      * （见 [countEvaluateFailure] / [onEvaluated]），所以这个阈值只影响日志，不影响画面。
      */
@@ -160,12 +154,6 @@ object DeepLearningSuperSampling {
     /** `dx12QueryDlss` 的说明文本缓冲（native 用 snprintf 写，最多 255 字符 + NUL）。 */
     private const val NOTE_CAPACITY: Int = 256
 
-    /** P108x 取证：前几行评价打点不限速的条数。 */
-    private const val EVALUATED_LOG_LIMIT: Int = 5
-
-    /** P108x 取证：限流之后每行之间的最小间隔（1 秒）。 */
-    private const val EVALUATED_LOG_INTERVAL_MILLIS: Long = 1000L
-
     /** 成功闸门的哨兵（[lastState] 用），与"没跑"的各种原因串区分开。 */
     private const val STATUS_EVALUATED: String = "evaluated"
 
@@ -189,9 +177,6 @@ object DeepLearningSuperSampling {
 
     /** 写包/调用抛出异常时置位：只报一次，之后本会话不再喂数据。 */
     private var broken = false
-    /** P112 阶段 3：每帧计数（applyIfEnabled 每帧一次），每秒打一行真实 fps 供 A/B。 */
-    private var fpsFrames = 0
-    private var fpsLastNanos = System.nanoTime()
 
     /**
      * 是否已经在 DLSS 模式下跑过（用来判断"离开 DLSS"要不要复位状态）。
@@ -242,18 +227,6 @@ object DeepLearningSuperSampling {
 
     /** 每会话一次的"数据真的喂进去了"结论行。 */
     private var loggedFed = false
-
-    /**
-     * P108x（用户 m11686）："DLSS 到底有没有写进目标"的取证打点（只在渲染线程读写）。
-     *
-     * [evaluatedFrames] 累加 native 明确回答 1 的帧数；[lastEvaluatedLogMillis] 是上一次限流打点的
-     * `System.currentTimeMillis()`，[evaluatedLogCount] 是已经打了几行 —— 前 [EVALUATED_LOG_LIMIT]
-     * 行不限速（开局那几帧最关键），之后最多每 [EVALUATED_LOG_INTERVAL_MILLIS] 毫秒一行，
-     * 两个上限都不会刷屏。
-     */
-    private var evaluatedFrames: Long = 0
-    private var lastEvaluatedLogMillis: Long = 0
-    private var evaluatedLogCount: Int = 0
 
     private var lastState: String? = null
 
@@ -362,7 +335,7 @@ object DeepLearningSuperSampling {
      * 选择，不刷屏、不影响其它功能；`MCDR_ABI_VERSION` 保持 2（走 `skipOptional`）。
      */
     private fun pushQuality(value: Int) {
-        val status = MCDR_ABI.dx12SetDlssQuality(value)
+        val status = MCDR_ABI.D3D12SetDlssQuality(value)
         when {
             status == value -> Illusion.LOGGER.info(
                 "[dxrmc] $PREFIX DLSS quality = {}", QUALITY_NAMES[value])
@@ -458,7 +431,7 @@ object DeepLearningSuperSampling {
      */
     private fun pushPreset(index: Int) {
         val value = PRESET_VALUES[index]
-        val status = MCDR_ABI.dx12SetDlssRenderPreset(value)
+        val status = MCDR_ABI.D3D12SetDlssRenderPreset(value)
         when {
             status == value -> Illusion.LOGGER.info(
                 "[dxrmc] $PREFIX DLSS model preset = {} (NGX render preset {})",
@@ -587,7 +560,7 @@ object DeepLearningSuperSampling {
         val flag = if (enabled) 1 else 0
         try {
             // 契约：返回的是**调用后的状态**（1=开 / 0=关），0 不是错误（见 [push] 的说明）。
-            when (val status = MCDR_ABI.dx12SetDlssEnabled(flag)) {
+            when (val status = MCDR_ABI.D3D12SetDlssEnabled(flag)) {
                 1 -> if (!enabled) Illusion.LOGGER.warn(
                     "[dxrmc] $PREFIX asked to open the DLSS gate for DLAA but native reports it is off")
                 0 -> if (enabled) Illusion.LOGGER.warn(
@@ -611,7 +584,7 @@ object DeepLearningSuperSampling {
         try {
             // 契约同 [pushQuality]：成功时返回**传进来的档位本身**（0 = Performance 也是成功），
             // -1 = 越界，MIN_VALUE = 没有该导出。
-            val status = MCDR_ABI.dx12SetDlssQuality(value)
+            val status = MCDR_ABI.D3D12SetDlssQuality(value)
             when {
                 status == value -> Illusion.LOGGER.info(
                     "[dxrmc] $PREFIX DLSS quality = {}", QUALITY_NAMES.getOrElse(value) { "DLAA" })
@@ -662,7 +635,7 @@ object DeepLearningSuperSampling {
         // 立刻自洽（玩家刚点完 DLSS，回头就该看到抗锯齿已置灰）。
         reconcileAntiAliasing()
         val flag = if (enabled) 1 else 0
-        when (val status = MCDR_ABI.dx12SetDlssEnabled(flag)) {
+        when (val status = MCDR_ABI.D3D12SetDlssEnabled(flag)) {
             1 -> Illusion.LOGGER.info("[dxrmc] $PREFIX DLSS upscaling = on")
             0 -> Illusion.LOGGER.info(
                 "[dxrmc] $PREFIX DLSS upscaling = off (the world layer goes through the linear blit)")
@@ -1007,26 +980,20 @@ object DeepLearningSuperSampling {
     fun isDlssOutputHandoverEnabled(): Boolean = dlssOutputHandoverEnabled()
 
     /**
-     * P108z：DLSS 输出纹理交接的开关 —— **默认开启**（[DLSS_OUTPUT_PROPERTY] 未设置时视为开）。
+     * P108z：DLSS 输出纹理交接的开关 —— **默认开启**，见配置 `[dlss] outputHandover`。
      *
      * <p>默认 `handover`：JVM 建 target 尺寸的 UAV 纹理、交给 native 当 NGX 的输出目标，评价完
      * 拷回 GUI 目标。这是正式路径 —— native 自建的 `CreateCommittedResource` 纹理存不住 NGX 的
      * 写入，模块 `createTexture` 建的可以（用户 m11787 实机确认不崩、且有可见效果）。
      *
-     * <p>`-Pdxrmc.dlssOutput=off` 关闭：退回让 native 用它私有的 UAV 兜底（那条路在这台机器上
+     * <p>配置 `[dlss] outputHandover = false` 关闭：退回让 native 用它私有的 UAV 兜底（那条路在这台机器上
      * 写不进内容），`pInOutput` 仍是 `D3D12GUISplit.targetForFrame()`。仅用于排查。
      *
      * <p>失效保护与它无关、始终生效：只有"本帧 handover 成功 + native 报 evaluate 成功"时，
      * [onEvaluated] 才允许跳过世界层 blit（见 [countEvaluateFailure]）。
      */
     private fun dlssOutputHandoverEnabled(): Boolean {
-        val raw = try {
-            System.getProperty(DLSS_OUTPUT_PROPERTY)
-        } catch (t: Throwable) {
-            null
-        }
-        // 默认开：只有显式写 off 才关。
-        val enabled = raw == null || !raw.trim().equals("off", ignoreCase = true)
+        val enabled = D3D12Settings.dlssOutputHandover
         if (enabled != loggedHandoverMode) {
             loggedHandoverMode = enabled
             if (enabled) {
@@ -1035,13 +1002,13 @@ object DeepLearningSuperSampling {
                         + "target-sized UAV texture and native writes NGX's output into it. If "
                         + "this ever makes the world black, check that the handover succeeded and "
                         + "that native reports 'Evaluate succeeded' (the blit is only skipped then).",
-                    DLSS_OUTPUT_PROPERTY, raw ?: "default")
+                    "outputHandover", enabled)
             } else {
                 Illusion.LOGGER.warn(
                     "[dxrmc] $PREFIX DLSS output handover is OFF ({}={}): native falls back to its "
                         + "own private UAV, which cannot be written on this machine, so DLSS will "
                         + "have no visible effect. This is a troubleshooting setting only.",
-                    DLSS_OUTPUT_PROPERTY, raw)
+                    "outputHandover", enabled)
             }
         }
         return enabled
@@ -1103,19 +1070,18 @@ object DeepLearningSuperSampling {
     /** P117：PCL stats —— 帧开始（世界渲染之前）：建本帧 token + eSimulationStart。 */
     @JvmStatic
     fun pclFrameBegin() {
-        MCDR_ABI.dx12ReflexFrameBegin()
+        MCDR_ABI.D3D12ReflexFrameBegin()
     }
 
     /** P117：世界层画完、即将提交本帧 —— eSimulationEnd + eRenderSubmitStart。 */
     @JvmStatic
     fun pclRenderSubmitStart() {
-        MCDR_ABI.dx12ReflexMarker(1)  // sl::PCLMarker::eSimulationEnd
-        MCDR_ABI.dx12ReflexMarker(2)  // sl::PCLMarker::eRenderSubmitStart
+        MCDR_ABI.D3D12ReflexMarker(1)  // sl::PCLMarker::eSimulationEnd
+        MCDR_ABI.D3D12ReflexMarker(2)  // sl::PCLMarker::eRenderSubmitStart
     }
 
     @JvmStatic
     fun applyIfEnabled() {
-        tickFps()
         // 闸门：只看 DLSS 自己的开关（`dxrMcDlss`）。关掉时把数据面与状态复位。
         // 与抗锯齿无关：抗锯齿的模式在本类这一侧只是被锁成 OFF（用户 m05600），两件事各判各的开关。
         if (!isEnabled()) {
@@ -1176,8 +1142,7 @@ object DeepLearningSuperSampling {
 
         // P108z：把 JVM 建的 target 尺寸 UAV 纹理交给 native 当 DLSS 输出 —— **默认路径**。
         //
-        // 开关：`-Pdxrmc.dlssOutput=off` 才关闭（默认 `handover`，见 `Illusion\build.gradle` 的
-        // `systemProperty 'dxrmc.dlssOutput'` 与 [DLSS_OUTPUT_PROPERTY]）。
+        // 开关：配置 `[dlss] outputHandover = false` 才关闭（默认 handover）。
         //
         // 为什么是默认：native 自建的 `CreateCommittedResource` 纹理存不住 NGX 的写入，而模块
         // `createTexture` 建的（这张）可以 —— 用户 m11787 实机确认"不崩了、DLSS 有明显可见效果"。
@@ -1206,19 +1171,6 @@ object DeepLearningSuperSampling {
         encoder.recordVelocityPass()
         val motionVectors = D3D12Velocity.currentHandle()
         if (motionVectors == 0L) {
-            // P123 诊断：DLSS 在拿到速度纹理之前就退出了。每 3 秒一行（stderr，必可见），
-            // 把速度 pass 的三态与句柄打出来，避免再靠猜。
-            val nowDiag = System.nanoTime()
-            if (nowDiag - diagLastNanos >= 3_000_000_000L) {
-                diagLastNanos = nowDiag
-                System.err.println(
-                    "[dxrmc] P123 diag: DLSS skipped, no MV texture." +
-                        " velocityActive=" + D3D12Velocity.isActive() +
-                        " temporalEnabled=" + D3D12Temporal.enabled +
-                        " render=" + renderWidth + "x" + renderHeight +
-                        " target=" + targetWidth + "x" + targetHeight,
-                )
-            }
             // native 在 pInMotionVectors == nullptr 时直接返回 0（d3d12_dlss.cpp:886），
             // 所以这里不必为了一次必然的跳过再下探一次。
             return noteState("no motion-vector texture (the velocity pass has no history yet on the "
@@ -1387,10 +1339,6 @@ object DeepLearningSuperSampling {
             noteHandoverNotSkippingBlit()
         }
         consecutiveEvaluateFailures = 0
-        // P108x（用户 m11686）：取证 —— native 回答 1 到底有没有走到"我们真的用了它的结果"这一步。
-        // 读回标记是 JVM 侧唯一能证明"世界层不再走老 blit"的证据（native 的私有 UAV 读数只能证明
-        // NGX 写没写）。限流见 [logEvaluated]。
-        logEvaluated(renderWidth, renderHeight, targetWidth, targetHeight)
         lastState = STATUS_EVALUATED
         if (resetReason != null) {
             Illusion.LOGGER.info(
@@ -1414,35 +1362,6 @@ object DeepLearningSuperSampling {
     }
 
     /**
-     * P108x（用户 m11686）：「ngx 说评价成功」之后的两条事实，限流打一行 INFO：
-     *
-     *  - `markWorldLayerDone` 已经在本方法的第一行被调用（否则我们走不到这里），并读回
-     *    [D3D12GUISplit.isWorldLayerDoneThisFrame] == true，证明"这一帧世界层不再走老 blit"
-     *    这件事**真的发生**（不是被别处覆盖）；
-     *  - 打印累计评价帧数，配合 native 的 `private-uav-after-evaluate` 才能判定
-     *    「NGX 没写 + 我们却以为用了它的结果」还是「我们根本没用它的结果」。
-     *
-     * 限流：前 [EVALUATED_LOG_LIMIT] 行每帧一行（开局最关键），之后每
-     * [EVALUATED_LOG_INTERVAL_MILLIS] 毫秒最多一行。
-     */
-    private fun logEvaluated(renderWidth: Int, renderHeight: Int, targetWidth: Int, targetHeight: Int) {
-        evaluatedFrames += 1
-        val now = System.currentTimeMillis()
-        val first = evaluatedLogCount < EVALUATED_LOG_LIMIT
-        if (!first && now - lastEvaluatedLogMillis < EVALUATED_LOG_INTERVAL_MILLIS) {
-            return
-        }
-        lastEvaluatedLogMillis = now
-        evaluatedLogCount += 1
-        Illusion.LOGGER.info(
-            "[dxrmc] $PREFIX evaluate ok #{} - markWorldLayerDone() called, "
-                + "isWorldLayerDoneThisFrame={} (worldLayerAlreadyInTarget read back), "
-                + "render {}x{} -> target {}x{}",
-            evaluatedFrames, D3D12GUISplit.isWorldLayerDoneThisFrame(),
-            renderWidth, renderHeight, targetWidth, targetHeight)
-    }
-
-    /**
      * `reset` 的判定：首帧（本 DLSS 会话第一次真正评价）、世界切换、渲染尺寸变化、
      * 目标尺寸变化、`dxrMcRenderScale` 变化、窗口尺寸变化。返回 null 表示这一帧不用丢历史。
      *
@@ -1455,20 +1374,6 @@ object DeepLearningSuperSampling {
      * jitter、mvecScale（像素空间 MV ⇒ 1/renderSize）、相机基与位置；其余三个矩阵由 native 派生。
      * 旧 DLL 没有该导出时返回 `Int.MIN_VALUE`，这里静默跳过。
      */
-    /** P112 阶段 3：真实帧率（applyIfEnabled 每帧一次；不是 evaluate 调用次数）。 */
-    private fun tickFps() {
-        fpsFrames++
-        val now = System.nanoTime()
-        val elapsed = now - fpsLastNanos
-        if (elapsed >= 1_000_000_000L) {
-            val fps = (fpsFrames * 1_000_000_000L / elapsed).toInt()
-            val impl = System.getenv("MCDR_DLSS_IMPL") ?: "ngx"
-            Illusion.LOGGER.info("[dxrmc] P112 fps={} impl={}", fps, impl)
-            fpsFrames = 0
-            fpsLastNanos = now
-        }
-    }
-
     /**
      * P119：把相机平移烘进「纯旋转」的视图矩阵，得到真正的 world→view。
      *
@@ -1489,11 +1394,6 @@ object DeepLearningSuperSampling {
         }
         return out
     }
-
-        /** P121 诊断：jitter 对照行的节流时间戳（排查完删）。 */
-    private var diagLastNanos = 0L
-    /** P125 diag: throttle for the "constants not pushed" line (remove with the diagnostic). */
-    private var nullDiagLastNanos = 0L
 
     /**
      * P131：DLAA / DLSS 的**升采样之后**锐化，目标由调用方给出（`output`）。
@@ -1530,17 +1430,6 @@ object DeepLearningSuperSampling {
         val view = D3D12Temporal.currentCameraView()
         val prevView = D3D12Temporal.previousCameraView()
         if (proj == null || prevProj == null || view == null || prevView == null) {
-            // P125 诊断（排查完删）：常量推送在拿到这几项之前就退出了 —— 之前 p92 里
-            // `P121 diag` 一条都没有，而速度 pass 明明在跑，说明就在这里退出。
-            val nowNull = System.nanoTime()
-            if (nowNull - nullDiagLastNanos >= 2_000_000_000L) {
-                nullDiagLastNanos = nowNull
-                System.err.println(
-                    "[dxrmc] P125 diag: constants not pushed. proj=" + (proj != null) +
-                        " prevProj=" + (prevProj != null) + " view=" + (view != null) +
-                        " prevView=" + (prevView != null),
-                )
-            }
             return
         }
         // P119：`view` 只有旋转、没有平移（世界层是相机相对空间），而 `clipToPrevClip` 必须包含
@@ -1575,19 +1464,19 @@ object DeepLearningSuperSampling {
             // P120：`cameraViewToClip` 的语义是 view->clip（就是这张投影），不是 world->clip 的 VP。
             MemorySegment.copy(proj, 0, seg, ValueLayout.JAVA_FLOAT,
                 layout.byteOffset(PathElement.groupElement("projection")), 16)
-            // P122（用户 m14320「DLAA 抖动还在」）：jitter 的**符号**按 NVIDIA 的约定取负。
-            // `sl::Constants::jitterOffset` = "加到投影矩阵上的那个偏移（像素）"，而我们的注入是
-            // `out[8] = out[8] - 2J/W`（即 m02 上**加**的是 -2J/W），所以"加到矩阵上的像素值"是 -J。
-            // 之前直接送 +J，SL 的去抖动方向就反了：静止时每一帧都多出约 2×jitter 的位移（最多 1 px），
-            // 表现为"TAA 稳、DLAA 抖"——TAA 根本不读这个字段，所以只有 DLSS/DLAA 受影响。
-            // P132：符号做成可切换的 A/B，理由见下方 doc —— P122（符号）与 P130（闸门）
-            // 是同一版落地的，"真 jitter 下 DLAA 仍抖"这条观察无法把责任归到符号上。
-            // `-Pdxrmc.dlssJitterSign=1` → 传 +J（读法 B）；不传 → 传 -J（读法 A，当前默认）。
-            // P136：注入实测是 `m02 -= 2J/W` ⇒ 像素位移 = NDC*W/2 = **-J**。
-            // 而 "矩阵上加的像素值" 也正好是 -J（δ 换算成像素 = -J）。两种读法同号，
-            // 所以符号没有二义性，之前 P132 的 A/B 开关可以去掉。
+            // P154（用户 m16527 让核对 jitter 的 x/y 方向）：**只有 y 反号**。
+            //
+            // 注入实测（P136）：`m02 -= 2J/W`、`m12 -= 2J/H`。换算到 D3D 的像素空间（y 向下）
+            // 就是位移 `(-Jx, +Jy)` —— x 与 NDC 同向，y 因为屏幕 y 向下而反号。这一点在 TAA
+            // 侧已被实测钉死：p115 起 `curUv = c - (Jx, -Jy)` 才能把画面换回未抖动网格。
+            //
+            // `sl::Constants::jitterOffset` 的注释是 "pixel space jitter offset"，即
+            // D3D 像素空间（y 向下），所以这里应传 `(-Jx, +Jy)`。旧写法两轴都取负，等于少翻转
+            // 了 y：DLSS 每帧会按 `2Jy` 多做一次竖直去抖，正是 DLAA 静态残余抖动（m15149）的
+            // 量级。P132 的 A/B 只翻了**两轴一起**（180° 旋转），错误量的模长不变，所以当时
+            // 测出"一样抖"（m14989）—— 那次实验设计不足以分辨单轴反号。
             val slJitterX = -jitterX
-            val slJitterY = -jitterY
+            val slJitterY = jitterY
             seg.set(F32, layout.byteOffset(PathElement.groupElement("jitterOffsetX")), slJitterX)
             seg.set(F32, layout.byteOffset(PathElement.groupElement("jitterOffsetY")), slJitterY)
             seg.set(F32, layout.byteOffset(PathElement.groupElement("mvecScaleX")),
@@ -1641,31 +1530,8 @@ object DeepLearningSuperSampling {
             // "关 jitter 不抖、开 jitter 抖、翻 jitterOffset 符号一样抖"的来源。
             seg.set(I32, layout.byteOffset(PathElement.groupElement("motionVectorsJittered")), 0)
             // 旧 DLL 没有该导出时返回 Int.MIN_VALUE；这里静默跳过（native 会打自己的 P112 行）。
-            // P121 诊断（每秒一行，排查完删）：确认交给 SL 的 jitter 与真正注入投影的偏移
-            // 是同一帧、同一符号。注入值应为 out[8] = 0 - 2*jitterX/renderWidth（负号来自
-            // `D3D12Temporal.jitterProjection` 的 `out[8] = out[8] - clipX`）。
-            val diagNow = System.nanoTime()
-            if (diagNow - diagLastNanos >= 1_000_000_000L) {
-                diagLastNanos = diagNow
-                val injected = D3D12Temporal.lastInjectedClip()
-                val expectX = if (renderWidth > 0) 2.0f * jitterX / renderWidth.toFloat() else 0.0f
-                val expectY = if (renderHeight > 0) 2.0f * jitterY / renderHeight.toFloat() else 0.0f
-                // P135：把 CPU 侧投影的 m02/m12 也打出来 —— 若它已经含 jitter（≈ -2J/W），
-                // 说明我们对着"已经抖过的矩阵"再抖一次，渲染与重建用的矩阵不是同一个。
-                val pristineM02 = proj?.get(8) ?: 0.0f
-                val pristineM12 = proj?.get(9) ?: 0.0f
-                // 用 stderr：`Illusion.LOGGER` 的 INFO 在这套 log4j 配置下不进日志（P121 排查时踩过）。
-                System.err.println(
-                    "[dxrmc] P121 diag: jitter=(" + jitterX + ", " + jitterY + ")" +
-                        " injectedM02=" + injected[0] + " injectedM12=" + injected[1] +
-                        " expect=(" + expectX + ", " + expectY + ")" +
-                        " pristine=(" + pristineM02 + ", " + pristineM12 + ")" +
-                        " delta=(" + (injected[0] - pristineM02) + ", " + (injected[1] - pristineM12) + ")" +
-                        " reset=" + reset + " render=" + renderWidth + "x" + renderHeight,
-                )
-            }
 
-            MCDR_ABI.dx12SetDlssConstants(seg)
+            MCDR_ABI.D3D12SetDlssConstants(seg)
         }
     }
     private fun resetReason(level: Any, renderWidth: Int, renderHeight: Int, targetWidth: Int,
@@ -1744,8 +1610,8 @@ object DeepLearningSuperSampling {
      * P108e：**额度制改成限速制**。旧实现是"每会话一次"（额度只在 [onEvaluated] 里第一次评价
      * 成功之后批一次），那是个闭环死锁：首帧速度通道就闩锁 ⇒ 没有运动矢量 ⇒ DLSS 一帧都不评价
      * ⇒ 永远不批额度 ⇒ 这里永远返回 ⇒ 闩锁永远不清。现在只要 DLSS 开着且
-     * [D3D12Velocity.isLatched]，就最多每 [VELOCITY_RETRY_INTERVAL_NANOS] 重试一次（每次一行
-     * INFO），于是"偶发失败"与"首帧就失败"都能自救，"修不好的失败"也不会每帧重建资源 + 刷屏；
+     * [D3D12Velocity.isLatched]，就最多每 [VELOCITY_RETRY_INTERVAL_NANOS] 重试一次，于是
+     * "偶发失败"与"首帧就失败"都能自救，"修不好的失败"也不会每帧重建资源；
      * [leaveDlssMode] 复位计时。
      */
     private fun retryVelocityIfLatched() {
@@ -1759,9 +1625,6 @@ object DeepLearningSuperSampling {
         }
         lastVelocityRetryNanos = now
         D3D12Velocity.forceEnable()
-        Illusion.LOGGER.info(
-            "[dxrmc] $PREFIX the velocity pass had disabled itself; DLSS cleared its latch so it "
-                + "retries (rate-limited to one attempt per second while the switch stays on)")
     }
 
     /** 离开 DLSS：复位本会话的输入状态（下次回来必须 reset=1），并把我们打开的数据面还回去。 */
@@ -1826,7 +1689,7 @@ object DeepLearningSuperSampling {
             return false
         }
         val result = try {
-            MCDR_ABI.dx12QueryDlss(note, NOTE_CAPACITY)
+            MCDR_ABI.D3D12QueryDlss(note, NOTE_CAPACITY)
         } catch (t: Throwable) {
             disable("dx12QueryDlss threw: $t")
             return false
@@ -1887,8 +1750,8 @@ object DeepLearningSuperSampling {
      * 逐字段写参数包。每个字段的数据来源：
      *  - `renderWidth/Height` = 世界层颜色附件的**真实纹理尺寸**（= `dxrMcRenderScale` 缩放后）；
      *  - `targetWidth/Height` = pInOutput（P106 的 GUI/呈现目标）的真实纹理尺寸 = 窗口尺寸；
-     *  - `jitterOffsetX/Y` = **-`D3D12Temporal.jitter()`**（渲染空间像素，[-0.5, +0.5)，P122 起取负：
- *    SL 的约定是"加到投影矩阵 m02/m12 上的那个像素偏移"，而我们注入时 m02 上加减的是 `-2J/W`）；
+     *  - `jitterOffsetX/Y` = **x 取负、y 保持**（D3D 像素空间，y 向下；P154 起 y 单轴反号，
+     *    因为该字段注释写明是 "pixel space jitter offset"，而注入在像素空间里是 `(-Jx, +Jy)`）；
      *  - `reset` = [resetReason] 是否非空；
      *  - `depthFormatOrdinal` = 主目标深度附件的 `GpuFormat` ordinal（诊断用）。
      */
@@ -1899,8 +1762,8 @@ object DeepLearningSuperSampling {
         packet.set(I32, offset("renderHeight"), renderHeight)
         packet.set(I32, offset("targetWidth"), targetWidth)
         packet.set(I32, offset("targetHeight"), targetHeight)
-        packet.set(F32, offset("jitterOffsetX"), -jitterX)
-        packet.set(F32, offset("jitterOffsetY"), -jitterY)
+        packet.set(F32, offset("jitterOffsetX"), -jitterX)   // P154：y 单轴反号，见 pushDlssConstants
+        packet.set(F32, offset("jitterOffsetY"), jitterY)
         packet.set(F32, offset("mvScaleX"), MV_SCALE)
         packet.set(F32, offset("mvScaleY"), MV_SCALE)
         packet.set(F32, offset("preExposure"), PRE_EXPOSURE)

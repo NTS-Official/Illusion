@@ -108,7 +108,7 @@ object DLSSOutput {
             return true
         }
         val status = try {
-            MCDR_ABI.dx12SetDlssOutput(tex.handle())
+            MCDR_ABI.D3D12SetDlssOutput(tex.handle())
         } catch (t: Throwable) {
             note("mcdr_dx12SetDlssOutput threw ($t); DLSS keeps using the native private UAV",
                 warn = true)
@@ -179,7 +179,7 @@ object DLSSOutput {
         // 1) 先让 native 松手（就绪顺序：清 override -> 再销毁资源）。
         if (wasHandedOver) {
             try {
-                MCDR_ABI.dx12SetDlssOutput(0L)
+                MCDR_ABI.D3D12SetDlssOutput(0L)
             } catch (t: Throwable) {
                 Illusion.LOGGER.warn(
                     "[dxrmc] $PREFIX clearing the native DLSS output override before release threw: {}", t)

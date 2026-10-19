@@ -18,9 +18,7 @@ import net.minecraft.resources.Identifier
  * [dev.nts.expdxr.mixin.render.DebugEntrySystemSpecsMixin] appends to the same group.
  */
 object D3D12DebugInfo {
-    /** The vanilla F3 group every GPU/display line belongs to. */
-    @JvmField
-    val SYSTEM_GROUP: Identifier = Identifier.withDefaultNamespace("system")
+    @JvmField val SYSTEM_GROUP = Identifier.withDefaultNamespace("system")
 
     /**
      * @return the lines to append directly below the vanilla GPU/display block, or an

@@ -5,9 +5,7 @@ import net.minecraft.util.Mth
 import net.minecraft.world.entity.Entity
 import net.minecraft.world.entity.LivingEntity
 import org.slf4j.LoggerFactory
-import java.util.Locale
 import kotlin.math.max
-import kotlin.math.sqrt
 
 /**
  * P76b — 逐物体真运动矢量：CPU 侧的「本帧物体」快照采集。
@@ -87,9 +85,6 @@ object D3D12ObjectMotion {
     /** 单帧最多上报多少物体（超出即丢弃并计数）。 */
     const val MAX_OBJECTS: Int = 256
 
-    /** 诊断日志间隔（帧）。 */
-    private const val LOG_INTERVAL_FRAMES: Long = 300L
-
     /**
      * 距离裁剪半径（方块，相机到**实体原点**的欧氏距离）。
      *
@@ -148,33 +143,6 @@ object D3D12ObjectMotion {
     @Volatile
     private var overflowCount: Long = 0L
 
-    @Volatile
-    private var rejectedCount: Long = 0L
-
-    /** 诊断：累计 [harvest] 记录的物体数（每帧增量可从它算出来）。 */
-    @Volatile
-    private var harvestedTotal: Long = 0L
-
-    /** 诊断：上次报数时用掉的 [harvestedTotal]。 */
-    private var harvestedReported: Long = 0L
-
-    /** 诊断：自上次报数以来单帧采到的最多物体数。 */
-    private var peakThisWindow: Int = 0
-
-    /** 诊断：本帧采到的物体数。 */
-    private var harvestedThisFrame: Int = 0
-
-    /** 诊断：累计遍历过多少个实体（用来区分「循环没跑」与「跑了但没有一个合格」）。 */
-    @Volatile
-    private var examinedTotal: Long = 0L
-
-    /** 诊断：上一次报数时用掉的 [examinedTotal]。 */
-    private var examinedReported: Long = 0L
-
-    /** 诊断：最近一帧里离相机最近的实体距离（方块；无穷大表示这一帧一个实体都没有）。 */
-    @Volatile
-    private var nearestDistance: Double = Double.MAX_VALUE
-
     /**
      * 逐帧采集入口：遍历客户端世界里可参与渲染的实体，每个记一行。
      *
@@ -199,17 +167,12 @@ object D3D12ObjectMotion {
         val deltaTracker = minecraft.deltaTracker
         val localPlayer = minecraft.player
         val maxDistanceSq = MAX_DISTANCE_BLOCKS * MAX_DISTANCE_BLOCKS
-        var nearestSq = Double.MAX_VALUE
 
         for (entity in level.entitiesForRendering()) {
-            examinedTotal++
             val dx = entity.x - camX
             val dy = entity.y - camY
             val dz = entity.z - camZ
             val distanceSq = dx * dx + dy * dy + dz * dz
-            if (distanceSq < nearestSq) {
-                nearestSq = distanceSq
-            }
             if (entity.isRemoved || !entity.isAlive || entity.isInvisible) {
                 continue
             }
@@ -226,12 +189,6 @@ object D3D12ObjectMotion {
             val partial = deltaTracker.getGameTimeDeltaPartialTick(!tickRateManager.isEntityFrozen(entity))
             harvest(entity, partial)
         }
-
-        nearestDistance = if (nearestSq == Double.MAX_VALUE) Double.MAX_VALUE else sqrt(nearestSq)
-        if (harvestedThisFrame > peakThisWindow) {
-            peakThisWindow = harvestedThisFrame
-        }
-        harvestedThisFrame = 0
     }
 
     /**
@@ -247,7 +204,6 @@ object D3D12ObjectMotion {
         val y = Mth.lerp(partial, entity.yOld, entity.y)
         val z = Mth.lerp(partial, entity.zOld, entity.z)
         if (!x.isFinite() || !y.isFinite() || !z.isFinite()) {
-            rejectedCount++
             return
         }
         if (currentSnapshots.size >= MAX_OBJECTS && !currentSnapshots.containsKey(id)) {
@@ -276,8 +232,6 @@ object D3D12ObjectMotion {
             centerYOffset = halfHeight,
             yaw = entity.yRot
         )
-        harvestedThisFrame++
-        harvestedTotal++
     }
 
     /**
@@ -289,7 +243,6 @@ object D3D12ObjectMotion {
     @Synchronized
     fun beginFrame() {
         currentSnapshots.clear()
-        harvestedThisFrame = 0
         frameNumber++
     }
 
@@ -301,14 +254,6 @@ object D3D12ObjectMotion {
         lastConsumedFrame = -1L
         frameNumber = 0L
         overflowCount = 0L
-        rejectedCount = 0L
-        harvestedTotal = 0L
-        harvestedReported = 0L
-        examinedTotal = 0L
-        examinedReported = 0L
-        nearestDistance = Double.MAX_VALUE
-        peakThisWindow = 0
-        harvestedThisFrame = 0
     }
 
     /**
@@ -353,35 +298,6 @@ object D3D12ObjectMotion {
             written++
         }
         return written
-    }
-
-    /** 最近一次交给 GPU 的物体行数。 */
-    fun worldCount(): Int = writeSnapshots.size
-
-    fun describe(): String =
-        "objects(thisFrame=${currentSnapshots.size} written=${writeSnapshots.size} " +
-            "overflow=$overflowCount rejected=$rejectedCount peak=$peakThisWindow frame=$frameNumber)"
-
-    /**
-     * 诊断：每 [LOG_INTERVAL_FRAMES] 帧报一次采集情况。
-     *
-     * `harvested` 是区间内 [harvest] 记下的物体数增量。它是 0 就说明**这帧真的没有**满足
-     * 过滤条件的实体（而不是采集没接上）；非 0 而 `written` 还是 0，才是缓冲/上传那一段的问题。
-     */
-    @Synchronized
-    fun logProbe() {
-        if (frameNumber % LOG_INTERVAL_FRAMES != 0L) {
-            return
-        }
-        val harvested = harvestedTotal - harvestedReported
-        harvestedReported = harvestedTotal
-        val examined = examinedTotal - examinedReported
-        examinedReported = examinedTotal
-        val nearest = if (nearestDistance == Double.MAX_VALUE) "n/a" else "%.1f".format(Locale.ROOT, nearestDistance)
-        LOGGER.info(
-            "P76b 诊断: harvested=$harvested (累计 $harvestedTotal) peak=$peakThisWindow " +
-                "| examined=$examined nearest=${nearest}格 | ${describe()}"
-        )
     }
 
     /**

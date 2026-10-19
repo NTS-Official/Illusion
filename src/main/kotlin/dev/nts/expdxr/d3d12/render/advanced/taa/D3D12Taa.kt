@@ -73,7 +73,6 @@ object D3D12TAA {
      */
     private const val BLEND = 0.0625f
 
-    private const val LOG_INTERVAL_MILLIS = 5_000L
     private const val FRAME_NONE = -1L
 
     // ------------------------------------------------------------------
@@ -100,13 +99,6 @@ object D3D12TAA {
 
     private var frameIndex = 0L
     private var recordedFrame = FRAME_NONE
-    private var passCount = 0L
-    private var skippedCount = 0L
-    private var lastLogMillis = 0L
-    private var loggedHook = false
-
-    /** 诊断：参数块与各纹理的实际尺寸只打一次（尺寸对不上就是"整屏一片渐变"的直接原因）。 */
-    private var loggedParams = false
 
     /**
      * 历史是否可用（代数对上、尺寸对上、至少写过一帧）。false 时本帧 resolve 只把当前帧
@@ -154,11 +146,6 @@ object D3D12TAA {
         val view = minecraft.gameRenderer.mainRenderTarget().colorTextureView
         val texture = (view as? D3D12GpuTextureView)?.texture() as? D3D12GpuTexture ?: return
         val encoder = D3D12Device.sharedCommandEncoder() ?: return
-        if (!loggedHook) {
-            loggedHook = true
-            LOGGER.info("[dxrmc] P77: TAA resolve 挂钩生效（世界 {}x{}，历史格式 {}）",
-                texture.getWidth(0), texture.getHeight(0), FORMAT)
-        }
         encoder.recordTaaPass(texture)
     }
 
@@ -205,19 +192,16 @@ object D3D12TAA {
             return true
         }
         if (device == null) {
-            countSkip("no device")
             return false
         }
         val w = scene.getWidth(0)
         val h = scene.getHeight(0)
         if (w <= 0 || h <= 0) {
-            countSkip("bad world size")
             return false
         }
-        val motion = D3D12Velocity.currentMotionView() ?: run {
-            countSkip("no motion view")
-            return false
-        }
+        val motion = D3D12Velocity.currentMotionView() ?: return false
+        // P151：p119 的判词是"应用模糊的方向不对"，说明两帧重投影把位移多算了一帧 ——
+        // 历史就是上一帧的 resolve 结果，与 `mv` 描述的间隔一致。这里按单帧位移回溯。
         if (!ensurePipeline(device)) {
             return false
         }
@@ -248,16 +232,6 @@ object D3D12TAA {
         val prevJitterY = prevJitterPair[1].toFloat()
         if (!writeParameters(params, w, h, reset, jitterX, jitterY, prevJitterX, prevJitterY)) {
             return false
-        }
-        if (!loggedParams) {
-            loggedParams = true
-            val readTex = this.history[readIndex]
-            LOGGER.info("[backend] TAA: 参数与尺寸 scene={}x{} history(写)={}x{} history(读)={}x{}"
-                + " params={}x{} blend={} reset={}",
-                scene.getWidth(0), scene.getHeight(0),
-                write.getWidth(0), write.getHeight(0),
-                readTex?.getWidth(0) ?: -1, readTex?.getHeight(0) ?: -1,
-                w, h, BLEND, reset)
         }
 
         // ---- 第一趟：resolve 进历史纹理 ----
@@ -297,15 +271,13 @@ object D3D12TAA {
         val blitted = D3D12Sharpen.record(ctx, write.handle(), scene.handle(), D3D12Sharpen.taaAmount) ||
             MCDR_ABI.dx12BlitTextureToTexture(ctx, write.handle(), scene.handle())
         if (!blitted) {
-            countSkip("blit back failed")
+            // 不致命：主目标保持本帧原样（等于没开 TAA），历史照旧累积。
         }
 
         this.readIndex = this.writeIndex
         this.writeIndex = 1 - this.readIndex
         this.historyValid = true
         this.recordedFrame = this.frameIndex
-        this.passCount++
-        logStatus()
         return true
     }
 
@@ -330,23 +302,11 @@ object D3D12TAA {
     fun reset() {
         frameIndex = 0L
         recordedFrame = FRAME_NONE
-        passCount = 0L
-        skippedCount = 0L
         historyValid = false
         historyGeneration = -1L
         disabledReason = null
         pipelineError = null
-        this.loggedHook = false
-        this.loggedParams = false
     }
-
-    /** 诊断用一行状态。 */
-    @Synchronized
-    fun describe(): String = ("selected=${isSelected()} active=${isActive()}"
-        + " frame=${frameIndex} passes=${passCount} skipped=${skippedCount}"
-        + " size=${width}x${height} history=${if (historyValid) "valid" else "reset"}"
-        + " pipeline=${if (pipeline == 0L) "none" else "ok"}"
-        + (if (disabledReason == null) "" else " disabledReason=${disabledReason}"))
 
     // ------------------------------------------------------------------
     // 资源
@@ -489,28 +449,6 @@ object D3D12TAA {
         }
     }
 
-    // ------------------------------------------------------------------
-    // 记账
-    // ------------------------------------------------------------------
-
-    private fun countSkip(reason: String) {
-        this.skippedCount++
-        val now = System.currentTimeMillis()
-        if (now - this.lastLogMillis >= LOG_INTERVAL_MILLIS) {
-            this.lastLogMillis = now
-            LOGGER.info("[backend] TAA: {}（{}）", reason, describe())
-        }
-    }
-
-    private fun logStatus() {
-        val now = System.currentTimeMillis()
-        if (now - this.lastLogMillis < LOG_INTERVAL_MILLIS) {
-            return
-        }
-        this.lastLogMillis = now
-        LOGGER.info("[backend] TAA: {}", describe())
-    }
-
     private fun disable(reason: String) {
         if (this.disabledReason != null) {
             return
@@ -591,6 +529,7 @@ object D3D12TAA {
             int2 size = int2(ScreenSize + 0.5);
             int2 maxCoord = size - 1;
             int2 coord = clamp(int2(position.xy), int2(0, 0), maxCoord);
+
             // P138（p105 的结论 + 机理）：**把累加放进固定的未抖动网格**。
             //
             // 之前两个版本都把 jitter 补偿放在 history 一侧（`(PrevJitter - Jitter)` 或反向），
@@ -598,18 +537,30 @@ object D3D12TAA {
             // 显示时整幅图就随 jitter 序列每帧位移一次 —— 这就是"不拖影、但一直抖"的来源，
             // 而且换符号只会改变抖的方向，不会消失（p103 轻微 / p105 更明显，幅度其实一样）。
             //
-            // 现在：本帧颜色按 +Jitter 重采样回**未抖动网格**，历史只按真实运动 mv 取样。
+            // 现在：本帧颜色按 jitter 的反方向重采样回**未抖动网格**，历史只按真实运动 mv 取样。
             // 于是历史永远是 `I(p)`，静止画面真正收敛，抖动在数学上就不存在了；
             // 亚像素抗锯齿由"每帧在不同 jitter 位置采样再平均"提供，与网格无关。
-            // 符号：`jitterProjection` 做的是 `m02 -= 2J/W`，图像整体位移 −J，于是本帧栅格像素 q
-            // 上放的是未抖动图像在 `q + J` 处的值（C(q) = I(q + J)）。要取回 I(p)，就得采 `p − J`。
-            float2 curUv = (float2(coord) + 0.5 - Jitter) * RcpScreenSize;
+            // 符号（P148）：jitter 注入的是投影矩阵的列 2（`out[8]`/`out[9]`，乘 view.z），
+            // 而透视的 `w = -view.z`，所以注入 `δ = -2j/尺寸` 之后内容在 NDC 里是往 `+2j/尺寸`
+            // 走的；换算到像素坐标（y 向下）就是内容整体移动 `(+J.x, -J.y)` —— **y 轴反号**。
+            // 要取回未抖动网格上的 `I(c)`，就得采 `c - (+J.x, -J.y)`；旧写法 `c - J` 的 y 分量
+            // 符号反了，每帧把画面竖直推 2*J.y，正是"看起来是竖直方向"的那一跳（用户 m16153）。
+            // P158 已回退：本帧必须重采样回未抖动网格，否则静止抖动回来（p128 实测）。
+            float2 curUv = (float2(coord) + 0.5 - float2(Jitter.x, -Jitter.y)) * RcpScreenSize;
             float3 currentRgb = bilinearClamped(Scene, curUv, maxCoord);
             float currentA = Scene.Load(int3(coord, 0)).a;
+            // P159：被拒绝（首帧/出界/位移荒谬）的像素用**像素中心原始样本**，
+            // 而不是重采样值。重采样在不连续处按亚像素比例混合前景/背景，比例随 Jitter
+            // 每帧变化却不随场景移动 ⇒ 看起来就是"边缘不跟着摄像机抖、和内层脱节"。
+            // 原始样本虽然带一点锯齿，但它每帧正确落在该像素自己的位置上。
+            float3 rawRgb = Scene.Load(int3(coord, 0)).rgb;
 
             // mv 的约定是 prevPos - curPos（见 D3D12Velocity 的 `(prevUv - uv) * ScreenSize`）；
-            // P134 起它是**真实运动**（不含 jitter），正好是未抖动网格上的位移，直接拿来取历史。
+            // P134 起它是**真实运动**（不含 jitter），正好是未抖动网格上的位移。
             float2 mv = Motion.Load(int3(coord, 0)).xy;
+
+            // P151：p119 的判词是"应用模糊的方向不对"（m16391），说明两帧重投影把位移多算了
+            // 一帧 —— 历史就是上一帧的 resolve 结果，与 `mv` 描述的间隔一致。所以按单帧位移回溯。
             float2 historyUv = (float2(coord) + 0.5 + mv) * RcpScreenSize;
 
             // 3x3 邻域的 YCoCg 统计（variance clipping 的包围盒）。
@@ -617,14 +568,20 @@ object D3D12TAA {
             float3 sumSq = 0.0;
             [unroll] for (int dy = -1; dy <= 1; ++dy) {
                 [unroll] for (int dx = -1; dx <= 1; ++dx) {
-                    float3 y = toYCoCg(Scene.Load(int3(clamp(coord + int2(dx, dy),
-                        int2(0, 0), maxCoord), 0)).rgb);
+                    // P160：邻域样本必须和 `currentRgb` 处在**同一个域**（未抖动网格），
+                    // 否则包围盒本身逐帧随 Jitter 抖：`Scene.Load` 取的是抖动栅格上的
+                    // 固定像素，等价于在网格上每帧平移 (J.x, -J.y)。边缘处这种位移直接
+                    // 改变"邻域里前景/背景各占多少"，包围盒随之逐帧跳，被拒绝/被钳的像素
+                    // 跟着跳 —— 用户看到的就是"边缘不跟随摄像机、和内层脱节"（m16947）。
+                    float2 tapUv = curUv + float2(dx, dy) * RcpScreenSize;
+                    float3 y = toYCoCg(bilinearClamped(Scene, tapUv, maxCoord));
                     sum += y;
                     sumSq += y * y;
                 }
             }
-            float3 mean = sum / 9.0;
-            float3 variance = max(sumSq / 9.0 - mean * mean, 0.0);
+            const float samples = 9.0;
+            float3 mean = sum / samples;
+            float3 variance = max(sumSq / samples - mean * mean, 0.0);
             float3 lo = mean - 1.5 * sqrt(variance);
             float3 hi = mean + 1.5 * sqrt(variance);
 
@@ -638,23 +595,17 @@ object D3D12TAA {
             float3 h11 = fetchClamped(HistoryBuffer, baseCoord + int2(1, 1), maxCoord);
             float3 history = lerp(lerp(h00, h10, f.x), lerp(h01, h11, f.x), f.y);
 
-            // P140（p108 的结论 + 机理）：variance clipping 只能把历史**钳**回包围盒，钳不动
-            // "历史本来就该被丢弃"这件事。静态世界在相机走动时，包围盒里同时有前景和背景
-            // 两种颜色，于是被钳到边界的历史会把邻居的颜色一帧一帧地带进来，累加器就沿着运动
-            // 方向拖出一条长度约 `1 / Blend`（= 16 px）的渐隐尾 —— 这与用户看到的"能拖出十几
-            // 像素"完全吻合。DLAA 没有这个问题（同一个 MV、同一张深度），说明 MV 是对的，
-            // 问题在累加器本身。
+            // variance clipping（P76 起的老写法：只钳不拒）。
             //
-            // 修法（Playdead 的 TAA clipping 思路）：**被钳掉多少，就把历史权重压掉多少**。
-            // 历史离包围盒越远，说明它越不可信，权重越接近 0，直接退回本帧颜色；静止时钳量≈0，
-            // 权重仍是 1/16，抗锯齿与收敛速度不受影响。
-            float3 histY = toYCoCg(history);
-            float3 clamped = clamp(histY, lo, hi);
-            float3 clipDelta = abs(histY - clamped);
-            float clipDist = max(clipDelta.x, max(clipDelta.y, clipDelta.z));
-            float confidence = 1.0 / (1.0 + clipDist * 8.0);
-            float historyWeight = (1.0 - Blend) * confidence;
-            float3 resolved = lerp(currentRgb, fromYCoCg(clamped), historyWeight);
+            // P143：这里一度按"被钳掉多少就压多少权重"来调制历史权重（P140）。那条改动的
+            // 目的是治走动拖影，但 p109 实测无效（用户 m15388「仍然存在拖影」），真正的成因
+            // 是历史少补了一帧运动（P142）。反过来，它的副作用正是静止画面的高频闪烁：
+            // 静态边缘的 3x3 邻域里同时有前景和背景，`clipDist` 每帧都随 jitter 变化，
+            // 于是历史权重在 `1-Blend` 与 0 之间逐帧跳，输出在本帧颜色与历史之间来回选 ——
+            // 用户描述的"静止也有随机抖动"就是这个（p113 关掉锐化后依然存在，排除锐化）。
+            // 所以恢复成固定权重：钳到包围盒里，权重恒为 `1 - Blend`。
+            float3 clamped = clamp(toYCoCg(history), lo, hi);
+            float3 resolved = lerp(fromYCoCg(clamped), currentRgb, Blend);
 
             // 历史不可用/不可信时直接取本帧：首帧与代数变化（ResetHistory）、位移荒谬或非有限
             // （镜头瞬移、NaN）、历史 UV 出界（新露出的区域）。
@@ -662,9 +613,12 @@ object D3D12TAA {
             bool outside = (historyUv.x < 0.0) || (historyUv.y < 0.0)
                 || (historyUv.x > 1.0) || (historyUv.y > 1.0);
             bool absurd = !(motionLength <= 0.25 * max(ScreenSize.x, ScreenSize.y));
+
             if (ResetHistory > 0.5 || outside || absurd) {
-                resolved = currentRgb;
+                // P159：这类"历史真的不可用"的像素给像素中心原始样本（不重采样）。
+                resolved = rawRgb;
             }
+
             return float4(resolved, currentA);
         }
     """.trimIndent()

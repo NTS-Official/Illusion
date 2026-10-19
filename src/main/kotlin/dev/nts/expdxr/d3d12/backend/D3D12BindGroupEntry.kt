@@ -14,9 +14,7 @@ import org.jspecify.annotations.Nullable
 data class D3D12BindGroupEntry(
     val type: Type,
     val name: String,
-    val texelBufferFormat: @Nullable GpuFormat?,
-) {
-
+    val texelBufferFormat: @Nullable GpuFormat?, ) {
     enum class Type {
         UNIFORM_BUFFER,
         SAMPLED_IMAGE,

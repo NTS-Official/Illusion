@@ -1,5 +1,6 @@
 package dev.nts.expdxr.d3d12.backend
 
+
 import com.mojang.blaze3d.IndexType
 import com.mojang.blaze3d.buffers.GpuBuffer
 import com.mojang.blaze3d.buffers.GpuBufferSlice
@@ -11,8 +12,11 @@ import com.mojang.blaze3d.systems.RenderPassBackend
 import com.mojang.blaze3d.textures.GpuSampler
 import com.mojang.blaze3d.textures.GpuTexture
 import com.mojang.blaze3d.textures.GpuTextureView
+import dev.nts.expdxr.CommandBundleMode
+import dev.nts.expdxr.d3d12.D3D12Settings
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.adapter.D3D12Device
+import dev.nts.expdxr.d3d12.render.advanced.mesh.D3D12TerrainBatchClassifier
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12Temporal
 import dev.nts.expdxr.d3d12.render.core.D3D12AsyncContext
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuBuffer
@@ -23,25 +27,11 @@ import dev.nts.expdxr.utils.IllusionLogger
 import org.lwjgl.PointerBuffer
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
-import java.io.PrintStream
-import java.nio.ByteOrder
-import java.nio.FloatBuffer
 import java.nio.IntBuffer
 import java.util.*
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.function.Supplier
-
-/**
- * P22 NaN 扫描（[D3D12RenderPassBackend.setUniform] 里那个 read-map）的显式开关。
- *
- * ⚠️ 不能跟随 `DX12_LOG_VERBOSE`：vanilla 的动态 UBO usage=136（`UNIFORM|COPY_DST`）既无
- * MAP_READ 也无 MAP_WRITE，而 setUniform 每帧被调用上千次 —— 每次 read-map 都让 native 打一行
- * `[mcdr] mcdr_dx12MapBuffer: mapBuffer: buffer lacks MAP_READ`（同步 stderr I/O），
- * 实测把渲染线程拖死（`_port\invrun.err.log` 8 万行、世界永远加载不完，见 known_bugs.md）。
- * 要跑这个诊断就显式 `MCDR_NaN_CHECK=1`。
- */
-private val sNaNCheckEnabled: Boolean = "1" == System.getenv("MCDR_NaN_CHECK")
 
 /**
  * D3D12 render pass backend（P6 core 全链路）。
@@ -68,8 +58,6 @@ class D3D12RenderPassBackend(
     private var anyDescriptorDirty = false
     private val uniforms: MutableMap<String, GpuBufferSlice> = HashMap()
     private val textures: MutableMap<String, TextureViewAndSampler> = HashMap()
-    /** P22：帧计数，用于每帧打印一次 DynamicTransforms offset 诊断（确认 ring buffer rotate 生效）。 */
-    private var frameCount = 0
 
     private data class TextureViewAndSampler(val view: D3D12GpuTextureView, val sampler: D3D12GpuSampler)
 
@@ -155,13 +143,6 @@ class D3D12RenderPassBackend(
         val pipelineHasDepth = compiled.info().depthStencilState != null
         val useDepth = this.hasDepth && pipelineHasDepth
         val ok = MCDR_ABI.D3D12SetPipeline(this.ctx, compiled.handle(), useDepth)
-        // P29：诊断打印仅在 DX12_LOG_VERBOSE=1 时输出，避免每帧同步 I/O。
-        if (IllusionLogger.debugEnabled()) {
-            IllusionLogger.debugMessage("[backend-java] setPipeline: ${pipeline.getLocation()}"
-                    + " pso=${compiled.handle().toULong().toString(16)}"
-                    + " passHasDepth=${this.hasDepth} pipelineHasDepth=${pipelineHasDepth}"
-                    + " useDepth=${useDepth} ok=${ok}")
-        }
         if (!ok) {
             throw IllegalStateException("dx12SetPipeline failed for ${pipeline.getLocation()}")
         }
@@ -176,9 +157,9 @@ class D3D12RenderPassBackend(
             this.textures.remove(name)
             return
         }
-        this.textures.put(name, TextureViewAndSampler(
+        this.textures[name] = TextureViewAndSampler(
             textureView as D3D12GpuTextureView, sampler as D3D12GpuSampler
-        ))
+        )
         this.anyDescriptorDirty = true
     }
 
@@ -190,41 +171,11 @@ class D3D12RenderPassBackend(
         if (this.hasDepth) {
             D3D12Temporal.captureUniform(name, slice)
         }
-        this.uniforms.put(name, slice)
+        this.uniforms[name] = slice
         this.anyDescriptorDirty = true
     }
 
     override fun setUniform(name: String, value: GpuBufferSlice) {
-        // P22 诊断：检查 uniform 数据是否含 NaN/Inf（投影矩阵等异常值会污染着色器）。
-        // P29：每帧多次 GPU buffer map + 扫描开销大，仅在 DX12_LOG_VERBOSE=1 时执行。
-        // P29b（2026-10-14 实测）：**不能**跟随 verbose —— 这个 read-map 在 verbose 跑里把渲染线程
-        // 拖死了（见文件头 sNaNCheckEnabled 注释），改为显式 MCDR_NaN_CHECK=1。
-        if (sNaNCheckEnabled && value.length() >= 4) {
-            try {
-                value.buffer().map(value.offset(),
-                    minOf(value.length(), 64L), true, false).use { mv ->
-                    val fb: FloatBuffer =
-                        mv.data().order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
-                    val limit = fb.remaining().coerceAtMost(16)
-                    for (i in 0 until limit) {
-                        if (fb.hasRemaining()) {
-                            val fv = fb.get()
-                            if (fv.isNaN() || fv.isInfinite()) {
-                                val buf = value.buffer()
-                                val bufId = if (buf is D3D12GpuBuffer) buf.handle() else 0L
-                                IllusionLogger.debugFormat(
-                                    "[backend-java] NaN uniform '%s' buf=%x idx=%d val=%s%n",
-                                    name, bufId, i,
-                                    if (fv.isNaN()) "NaN" else "Inf")
-                                System.err.flush()
-                            }
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                // map 失败（如 READONLY buffer）时忽略
-            }
-        }
         // P75：捕获时间性渲染需要的逐物体 UBO：`"DynamicTransforms"`（模型视图矩阵）与
         // `"ChunkSection"`（区块模型矩阵 + 区块原点）。vanilla 的 DynamicTransforms 环由 CPU
         // 直接写（MappableRingBuffer, usage 130），所以这里 map(read) 读回是安全的。
@@ -233,7 +184,7 @@ class D3D12RenderPassBackend(
         if (this.hasDepth) {
             D3D12Temporal.captureUniform(name, value)
         }
-        this.uniforms.put(name, value)
+        this.uniforms[name] = value
         this.anyDescriptorDirty = true
     }
     /**
@@ -255,10 +206,8 @@ class D3D12RenderPassBackend(
             return
         }
         this.anyDescriptorDirty = false
-        // P22：每进入一次 pushDescriptors 视为一帧的新绘制批次
-        this.frameCount++
         val pipeline = this.pipeline
-        if (pipeline == null || !pipeline.isValid()) {
+        if (pipeline == null || !pipeline.isValid) {
             LOGGER.warn("pushDescriptors: SKIP (pipeline null or invalid)")
             return
         }
@@ -268,20 +217,6 @@ class D3D12RenderPassBackend(
             LOGGER.warn("pushDescriptors: SKIP (0 bindings)")
             return
         }
-        // P16 诊断：首帧打印 binding 名称列表（P29：仅 verbose 模式输出）
-        if (IllusionLogger.debugEnabled() && System.err is PrintStream) {
-            val text = buildString {
-                append("[backend-java] pushDesc pipeline=").append(pipeline.info().location).append(" count=").append(count)
-                var i = 0
-                while (i < count && i < 8) {
-                    append(" [").append(i).append("=").append(bindings.get(i).type)
-                        .append(":").append(bindings.get(i).name).append("]")
-                    i++
-                }
-            }
-            IllusionLogger.debugMessage(text)
-            System.err.flush()
-        }
         val types = IntArray(count)
         val buffers = LongArray(count)
         val offsets = LongArray(count)
@@ -289,7 +224,7 @@ class D3D12RenderPassBackend(
         val texelFormats = IntArray(count)
         val views = LongArray(count)
         for (i in 0 until count) {
-            val entry = bindings.get(i)
+            val entry = bindings[i]
             when (entry.type) {
                 D3D12BindGroupEntry.Type.UNIFORM_BUFFER -> {
                     val value = requireUniform(entry.name)
@@ -298,37 +233,15 @@ class D3D12RenderPassBackend(
                     buffers[i] = (buffer as D3D12GpuBuffer).handle()
                     offsets[i] = value.offset()
                     lengths[i] = value.length()
-                    // P20：诊断 binding 的 buffer 句柄、offset 和长度（P29：仅 verbose）
-                    // P22：打印 DynamicTransforms 的 offset，验证 ring buffer rotate 是否生效
-                    if (IllusionLogger.debugEnabled() && System.err is PrintStream) {
-                        IllusionLogger.debugFormat("[backend-java] pushDesc binding[%d]: name=%s type=UNIFORM buf=%x off=%d len=%d heapType=?%n",
-                            i, entry.name, buffers[i], offsets[i].toInt(), lengths[i].toInt())
-                        if ("DynamicTransforms" == entry.name) {
-                            IllusionLogger.debugFormat("[backend-java] pushDesc DynamicTransforms: frame=%d off=%d buf=%x%n",
-                                frameCount, offsets[i].toInt(), buffers[i])
-                        }
-                        System.err.flush()
-                    }
                 }
                 D3D12BindGroupEntry.Type.SAMPLED_IMAGE -> {
-                    val texture = this.textures.get(entry.name)
-                    if (texture == null) {
-                        throw IllegalStateException("Texture '${entry.name}' was not bound before core")
-                    }
-                    if (texture.view.isClosed()) {
+                    val texture = this.textures[entry.name]
+                        ?: throw IllegalStateException("Texture '${entry.name}' was not bound before core")
+                    if (texture.view.isClosed) {
                         throw IllegalStateException("Texture '${entry.name}' is closed")
                     }
                     types[i] = 1
                     views[i] = texture.view.handle()
-                    // P22：打印 Sampler0 view handle，验证纹理视图是否正常传递（P29：仅 verbose）
-                    if (IllusionLogger.debugEnabled() && "Sampler0" == entry.name
-                        && System.err is PrintStream) {
-                        val tex: GpuTexture = texture.view.texture()
-                        IllusionLogger.debugFormat("[backend-java] pushDesc Sampler0: frame=%d view=%x closed=%b fmt=%s w=%d h=%d%n",
-                            frameCount, views[i], texture.view.isClosed(),
-                            tex.format, tex.getWidth(0), tex.getHeight(0))
-                        System.err.flush()
-                    }
                 }
                 D3D12BindGroupEntry.Type.TEXEL_BUFFER -> {
                     val value = requireUniform(entry.name)
@@ -348,14 +261,9 @@ class D3D12RenderPassBackend(
     }
 
     private fun requireUniform(name: String): GpuBufferSlice {
-        val value = this.uniforms.get(name)
-        if (value == null) {
-            throw IllegalStateException("Uniform '${name}' was not set before core")
-        }
+        val value = this.uniforms[name] ?: throw IllegalStateException("Uniform '${name}' was not set before core")
         val buffer = value.buffer()
-        if (buffer.isClosed()) {
-            throw IllegalStateException("Uniform '${name}' buffer is closed")
-        }
+        if (buffer.isClosed) throw IllegalStateException("Uniform '${name}' buffer is closed")
         return value
     }
     // -----------------------------------------------------------------------
@@ -384,11 +292,8 @@ class D3D12RenderPassBackend(
 
     override fun disableScissor() {
         val area = this.renderArea
-        if (area != null) {
-            this.enableScissor(area.x(), area.y(), area.width(), area.height())
-        } else {
-            this.enableScissor(0, 0, this.outputWidth, this.outputHeight)
-        }
+        if (area != null) this.enableScissor(area.x(), area.y(), area.width(), area.height())
+        else this.enableScissor(0, 0, this.outputWidth, this.outputHeight)
     }
 
     // -----------------------------------------------------------------------
@@ -396,22 +301,19 @@ class D3D12RenderPassBackend(
     // -----------------------------------------------------------------------
 
     override fun setVertexBuffer(slot: Int, vertexBuffer: GpuBufferSlice?) {
-        if (vertexBuffer == null) {
-            return  // 与 Vulkan 语义一致：null 绑定不操作
-        }
+        if (vertexBuffer == null) return
+
         val buffer = vertexBuffer.buffer()
-        if (buffer.isClosed()) {
-            throw IllegalStateException("Vertex buffer at slot ${slot} has been closed!")
-        }
-        if ((buffer.usage() and USAGE_VERTEX) == 0) {
-            throw IllegalStateException("Vertex buffer at slot ${slot} doesn't have GpuBuffer.USAGE_VERTEX flag!")
-        }
+        if (buffer.isClosed) throw IllegalStateException("Vertex buffer at slot ${slot} has been closed!")
+
+        if ((buffer.usage() and USAGE_VERTEX) == 0) throw IllegalStateException("Vertex buffer at slot ${slot} doesn't have GpuBuffer.USAGE_VERTEX flag!")
+
         val pipeline = this.pipeline
         var stride = 0
         if (pipeline != null) {
             val info = pipeline.info()
             val bindings = info.vertexFormatBindings
-            if (bindings != null && slot < bindings.size) {
+            if (slot < bindings.size) {
                 val binding = bindings[slot]
                 if (binding != null) {
                     stride = binding.vertexSize
@@ -420,19 +322,9 @@ class D3D12RenderPassBackend(
         }
         if (stride == 0) {
             throw IllegalStateException(
-                "setVertexBuffer: cannot derive stride for slot ${slot}"
+                "setVertexBuffer: cannot derive stride for slot $slot"
                 + " (pipeline=${pipeline?.info()?.location ?: "null"}"
                 + "), vertexFormatBindings is empty or slot out of range")
-        }
-        // P22 诊断：记录顶点缓冲大小，用于排查 SizeInBytes 不足问题（P29：仅 verbose）
-        if (IllusionLogger.debugEnabled()) {
-            val bufSize = buffer.size()
-            val vbOffset = vertexBuffer.offset()
-            val vbRemaining = bufSize - vbOffset
-            IllusionLogger.debugFormat("[backend-java] setVB slot=%d stride=%d bufSize=%d offset=%d remaining=%d pipeline=%s%n",
-                slot, stride, bufSize.toInt(), vbOffset.toInt(), vbRemaining.toInt(),
-                pipeline?.info()?.location ?: "null")
-            System.err.flush()
         }
         if (!MCDR_ABI.D3D12SetVertexBuffer(this.ctx, slot,
             (buffer as D3D12GpuBuffer).handle(), vertexBuffer.offset(), stride)) {
@@ -441,16 +333,11 @@ class D3D12RenderPassBackend(
     }
 
     override fun setIndexBuffer(indexBuffer: GpuBuffer, indexType: IndexType) {
-        if (indexBuffer.isClosed()) {
-            throw IllegalStateException("Index buffer has been closed!")
-        }
-        if ((indexBuffer.usage() and USAGE_INDEX) == 0) {
-            throw IllegalStateException("Index buffer doesn't have GpuBuffer.USAGE_INDEX flag!")
-        }
-        if (!MCDR_ABI.D3D12SetIndexBuffer(this.ctx, (indexBuffer as D3D12GpuBuffer).handle(),
-            if (indexType == IndexType.INT) 1 else 0)) {
-            throw IllegalStateException("dx12SetIndexBuffer failed")
-        }
+        if (indexBuffer.isClosed) throw IllegalStateException("Index buffer has been closed!")
+
+        if ((indexBuffer.usage() and USAGE_INDEX) == 0) throw IllegalStateException("Index buffer doesn't have GpuBuffer.USAGE_INDEX flag!")
+
+        if (!MCDR_ABI.D3D12SetIndexBuffer(this.ctx, (indexBuffer as D3D12GpuBuffer).handle(), if (indexType == IndexType.INT) 1 else 0)) throw IllegalStateException("dx12SetIndexBuffer failed")
     }
 
     // ---- P3 插桩：绘制热路径的调用次数与主线程墙钟耗时（DX12_PROF=1 时由
@@ -467,66 +354,40 @@ class D3D12RenderPassBackend(
         /** DEBUG: true 时强制所有 pass 使用 withoutDepth PSO（禁用深度测试/写入），用于排查黑屏是否由深度问题导致。 */
         private const val DEBUG_DISABLE_DEPTH_TEST = false
 
-        @JvmField
-        var gProfMultiBatches = 0L      // drawMultipleIndexed 批次数
-        @JvmField
-        var gProfMultiDraws = 0L        // 批次内 core 总数
-        @JvmField
-        var gProfMultiPathNs = 0L       // 批量入口主线程墙钟耗时
-        @JvmField
-        var gProfDrawIndexedCalls = 0L  // drawIndexed 调用次数
-        @JvmField
-        var gProfDrawIndexedNs = 0L     // drawIndexed（pushDescriptors + JNI）耗时
+        @JvmField var gProfMultiBatches = 0L      // drawMultipleIndexed 批次数
+        @JvmField var gProfMultiDraws = 0L        // 批次内 core 总数
+        @JvmField var gProfMultiPathNs = 0L       // 批量入口主线程墙钟耗时
+        @JvmField var gProfDrawIndexedCalls = 0L  // drawIndexed 调用次数
+        @JvmField var gProfDrawIndexedNs = 0L     // drawIndexed（pushDescriptors + JNI）耗时
         // P3b：把并行批量路径拆成四段，定位主线程串行开销（8 worker 相对 4 worker 无收益，
         // 说明瓶颈在主线程串行段而非 worker 并行度）。
-        @JvmField
-        var gProfBuildNs = 0L      // materialize + 逐 core 参数/描述符取值
-        @JvmField
-        var gProfPrepareNs = 0L    // dx12AsyncPrepare{CBV,Index,Texture} 三连 JNI
-        @JvmField
-        var gProfWorkersNs = 0L    // dispatch 8 worker + CountDownLatch.await
-        @JvmField
-        var gProfExecuteNs = 0L    // ExecuteBundle 回放
-        @JvmField
-        var gProfFallbacks = 0L    // 并行录制失败回退串行次数
+        @JvmField var gProfBuildNs = 0L      // materialize + 逐 core 参数/描述符取值
+        @JvmField var gProfPrepareNs = 0L    // dx12AsyncPrepare{CBV,Index,Texture} 三连 JNI
+        @JvmField var gProfWorkersNs = 0L    // dispatch 8 worker + CountDownLatch.await
+        @JvmField var gProfExecuteNs = 0L    // ExecuteBundle 回放
+        @JvmField var gProfFallbacks = 0L    // 并行录制失败回退串行次数
         // P62 诊断：统计区块批量内各 core 是否共享顶点/索引缓冲。若共享，则可用
         // ExecuteIndirect（单次 indirect 覆盖整批，配合统一 VB/IB 绑定）替代逐 core
         // 录制，直接消掉 workers（bundle 内 1086 次 DrawIndexed）那 0.24ms。
-        @JvmField
-        var gProfSharedBatchDraws = 0L // 参与统计的 core 总数
-        @JvmField
-        var gProfSameVbBuf = 0L        // vbBuf[d]==vbBuf[0] 的 core 数
-        @JvmField
-        var gProfSameVbOff = 0L        // 且 vbOff[d]==vbOff[0]
-        @JvmField
-        var gProfSameIbBuf = 0L        // idxBuf[d]==idxBuf[0]
-        @JvmField
-        var gProfSameIdxType = 0L      // 且 idxType 一致
-        @JvmField
-        var gProfBatches = 0L          // 走批量路径的批次数
-        @JvmField
-        var gProfSharedDescBatches = 0L // 其中 blockUniform=true（P59 共享描述符）
-        @JvmField
-        var gProfSingleBundles = 0L    // 其中单分区内联录制数
-        @JvmField
-        var gProfSlotsTotal = 0L       // 累计描述符槽位需求
+        @JvmField var gProfSharedBatchDraws = 0L // 参与统计的 core 总数
+        @JvmField var gProfSameVbBuf = 0L        // vbBuf[d]==vbBuf[0] 的 core 数
+        @JvmField var gProfSameVbOff = 0L        // 且 vbOff[d]==vbOff[0]
+        @JvmField var gProfSameIbBuf = 0L        // idxBuf[d]==idxBuf[0]
+        @JvmField var gProfSameIdxType = 0L      // 且 idxType 一致
+        @JvmField var gProfBatches = 0L          // 走批量路径的批次数
+        @JvmField var gProfSharedDescBatches = 0L // 其中 blockUniform=true（P59 共享描述符）
+        @JvmField var gProfSingleBundles = 0L    // 其中单分区内联录制数
+        @JvmField var gProfSlotsTotal = 0L       // 累计描述符槽位需求
         // P62b：逐 binding 变异性 —— 决定描述符写入能否从 n*bc 降到 n*变动数。
-        @JvmField
-        var gProfBcTotal = 0L          // Σ bc
-        @JvmField
-        var gProfCbvVary = 0L          // 逐 core 变化的 CBV 数
-        @JvmField
-        var gProfCbvSame = 0L          // 逐 core 不变的 CBV 数
-        @JvmField
-        var gProfSrvVary = 0L          // 逐 core 变化的 SRV 数
-        @JvmField
-        var gProfSrvSame = 0L          // 逐 core 不变的 SRV 数
-        @JvmField
-        var gProfVbSlotSame = 0L       // vbSlot 全批一致的 core 数
+        @JvmField var gProfBcTotal = 0L          // Σ bc
+        @JvmField var gProfCbvVary = 0L          // 逐 core 变化的 CBV 数
+        @JvmField var gProfCbvSame = 0L          // 逐 core 不变的 CBV 数
+        @JvmField var gProfSrvVary = 0L          // 逐 core 变化的 SRV 数
+        @JvmField var gProfSrvSame = 0L          // 逐 core 不变的 SRV 数
+        @JvmField var gProfVbSlotSame = 0L       // vbSlot 全批一致的 core 数
         // B（拆根签名）：SRV 汇入单个 descriptor table 后整段只写一份，要求整批 SRV
         // 绑定完全一致；不一致的批回退串行。此计数器统计回退批次数。
-        @JvmField
-        var gProfSrvVaryFallbacks = 0L
+        @JvmField var gProfSrvVaryFallbacks = 0L
 
         /** 低于此批量时并行调度开销高于收益，直接走串行路径。 */
         private const val PARALLEL_MIN_DRAWS = 24
@@ -539,42 +400,17 @@ class D3D12RenderPassBackend(
          */
         private const val SERIAL_BUNDLE_MAX_DRAWS = 512
 
-        /** DX12_BUNDLE_MODE=serial/parallel 可强制单分区或并行分区；缺省按批量自适应。 */
-        private val BUNDLE_MODE = parseBundleMode()
-
-        private fun parseBundleMode(): Int {
-            var raw = System.getenv("DX12_BUNDLE_MODE")
-            if (raw == null || raw.isBlank()) {
-                raw = System.getProperty("backend.bundleMode")
-            }
-            if (raw == null) {
-                return 0
-            }
-            raw = raw.trim().lowercase(Locale.ROOT)
-            if (raw == "serial" || raw == "1") {
-                return 1
-            }
-            if (raw == "parallel" || raw == "0") {
-                return -1
-            }
-            return 0
+        /** 由配置 `[renderer] commandBundles` 决定：serial 强制单分区、parallel 强制并行、auto 按批量自适应。 */
+        private val BUNDLE_MODE: Int = when (D3D12Settings.commandBundles) {
+            CommandBundleMode.SERIAL -> 1
+            CommandBundleMode.PARALLEL -> -1
+            CommandBundleMode.AUTO -> 0
         }
     }
 
     override fun drawIndexed(indexCount: Int, instanceCount: Int, firstIndex: Int,
         vertexOffset: Int, firstInstance: Int) {
         val profT0 = if (MCDR_ABI.PROF) System.nanoTime() else 0L
-        // P17 诊断：记录每次 drawIndexed 调用（P29：仅 verbose）
-        if (IllusionLogger.debugEnabled() && System.err is PrintStream) {
-            // 尝试获取当前绑定的顶点缓冲信息
-            val neededVerts = indexCount // 最坏情况：每个 index 引用一个独立顶点
-            IllusionLogger.debugMessage("[backend-java] drawIndexed pipeline=${pipeline!!.info().location}"
-                + " count=${indexCount} inst=${instanceCount}"
-                + " first=${firstIndex} base=${vertexOffset}"
-                + " neededVerts~=${neededVerts}"
-                + (if (indexCount == 0) " [ZERO-COUNT!]" else ""))
-            System.err.flush()
-        }
         this.pushDescriptors()
         if (!MCDR_ABI.D3D12DrawIndexed(this.ctx, indexCount, instanceCount,
             firstIndex, vertexOffset, firstInstance)) {
@@ -594,9 +430,7 @@ class D3D12RenderPassBackend(
      */
     fun dispatchMesh(x: Int, y: Int, z: Int) {
         this.pushDescriptors()
-        if (!MCDR_ABI.D3D12DispatchMesh(this.ctx, x, y, z)) {
-            throw IllegalStateException("dx12DispatchMesh(${x}, ${y}, ${z}) failed")
-        }
+        if (!MCDR_ABI.D3D12DispatchMesh(this.ctx, x, y, z)) throw IllegalStateException("dx12DispatchMesh(${x}, ${y}, ${z}) failed")
     }
 
     override fun multiDrawIndexed(drawParameters: IntBuffer, instanceCount: Int,
@@ -624,9 +458,8 @@ class D3D12RenderPassBackend(
     }
     @Suppress("UNCHECKED_CAST")
     private fun <T : Any> materialize(draws: Collection<RenderPass.Draw<T>>): List<RenderPass.Draw<T>> {
-        if (draws is List<*>) {
-            return draws as List<RenderPass.Draw<T>>
-        }
+        if (draws is List<*>) return draws as List<RenderPass.Draw<T>>
+
         return ArrayList(draws)
     }
 
@@ -634,7 +467,7 @@ class D3D12RenderPassBackend(
     private fun vertexStrideFor(slot: Int): Int {
         val p = this.pipeline ?: return 0
         val bindings = p.info().vertexFormatBindings
-        if (bindings != null && slot < bindings.size) {
+        if (slot < bindings.size) {
             val binding = bindings[slot]
             if (binding != null) {
                 return binding.vertexSize
@@ -721,9 +554,7 @@ class D3D12RenderPassBackend(
         for (d in 0 until n) {
             val draw = draws.get(d)
             val uploader = draw.uniformUploaderConsumer()
-            if (uploader != null) {
-                uploader.accept(uniformArgument, uniformSetter)
-            }
+            uploader?.accept(uniformArgument, uniformSetter)
             val indexBuffer = if (draw.indexBuffer() != null) draw.indexBuffer() else defaultIndexBuffer
             val indexType = if (draw.indexType() != null) draw.indexType() else defaultIndexType
             if (indexBuffer == null || indexType == null || indexBuffer.isClosed()
@@ -740,7 +571,7 @@ class D3D12RenderPassBackend(
             val vb = draw.vertexBuffer().slice()
             val vbBuffer = vb.buffer()
             val stride = this.vertexStrideFor(draw.slot())
-            if (vbBuffer.isClosed() || (vbBuffer.usage() and USAGE_VERTEX) == 0 || stride == 0) {
+            if (vbBuffer.isClosed || (vbBuffer.usage() and USAGE_VERTEX) == 0 || stride == 0) {
                 return false
             }
             vbSlot[d] = draw.slot()
@@ -989,13 +820,9 @@ class D3D12RenderPassBackend(
         val bundles = LongArray(workerCount)
         val failed = AtomicBoolean()
         val done = CountDownLatch(workerCount)
-        val poolExec = async.workers()
-        if (poolExec == null) {
-            return false
-        }
+        val poolExec = async.workers() ?: return false
         for (w in 0 until workerCount) {
-            val worker = w
-            val start = worker * perWorker
+            val start = w * perWorker
             val end = (start + perWorker).coerceAtMost(n)
             poolExec.execute {
                 try {
@@ -1008,45 +835,38 @@ class D3D12RenderPassBackend(
                     }
                     // 一次性为本段分配 SRV 表槽位（CBV 走 root descriptor，不占槽）。
                     val base = MCDR_ABI.ID3D12AsyncDescriptorAllocate(alloc, frameSlot,
-                        worker, slotsNeeded)
+                        w, slotsNeeded)
                     // P57：整段合并为单次 JNI（此前每 core ~8 次穿越：bc 次写描述符 +
                     // 取 GPU 句柄 + 根描述符表 + 索引/顶点缓冲 + DrawIndexed）。
                     if (base < 0
-                        || !MCDR_ABI.D3D12AsyncBundleBegin(pool, worker, frameSlot,
+                        || !MCDR_ABI.D3D12AsyncBundleBegin(pool, w, frameSlot,
                             frameValue)
-                        || !MCDR_ABI.D3D12AsyncBundleSetPipelineState(pool, worker,
+                        || !MCDR_ABI.D3D12AsyncBundleSetPipelineState(pool, w,
                             pipelineHandle, useDepth)
                         || !(if (sharedDesc)
                             MCDR_ABI.AsyncBundleRecordPartitionShared(
-                                alloc, pool, worker, base, bc, start, count,
+                                alloc, pool, w, base, bc, start, count,
                                 bType, bBuf, bOff, bLen, bView,
                                 idxBuf, idxType, idxCount, firstIdx, baseVert,
                                 vbSlot, vbBuf, vbOff, vbStride)
                         else
                             MCDR_ABI.AsyncBundleRecordPartition(
-                                alloc, pool, worker, base, bc, start, count,
+                                alloc, pool, w, base, bc, start, count,
                                 bType, bBuf, bOff, bLen, bView,
                                 idxBuf, idxType, idxCount, firstIdx, baseVert,
                                 vbSlot, vbBuf, vbOff, vbStride))) {
                         failed.set(true)
                         return@execute
                     }
-                    bundles[worker] = MCDR_ABI.D3D12AsyncBundleEnd(pool, worker)
-                    if (bundles[worker] == 0L) {
-                        failed.set(true)
-                    }
+                    bundles[w] = MCDR_ABI.D3D12AsyncBundleEnd(pool, w)
+                    if (bundles[w] == 0L) failed.set(true)
                 } catch (t: Throwable) {
                     failed.set(true)
-                    if (IllusionLogger.debugEnabled()) {
-                        LOGGER.warn("parallel bundle worker {} failed", worker, t)
-                    }
-                } finally {
-                    done.countDown()
-                }
+                    if (IllusionLogger.debugEnabled()) LOGGER.warn("parallel bundle worker {} failed", w, t)
+                } finally { done.countDown() }
             }
         }
-        try {
-            done.await()
+        try { done.await()
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
             failed.set(true)
@@ -1072,7 +892,7 @@ class D3D12RenderPassBackend(
         for (w in 0 until workerCount) {
             if (bundles[w] != 0L && !MCDR_ABI.D3D12ExecuteBundle(this.ctx, bundles[w])) {
                 // 已经回放了一部分 bundle，不能再回退串行（会重复绘制），直接抛错。
-                throw IllegalStateException("dx12ExecuteBundle failed for worker ${w}")
+                throw IllegalStateException("dx12ExecuteBundle failed for worker $w")
             }
         }
         if (MCDR_ABI.PROF) gProfExecuteNs += System.nanoTime() - profP3
@@ -1093,11 +913,21 @@ class D3D12RenderPassBackend(
     override fun <T : Any> drawMultipleIndexed(draws: Collection<RenderPass.Draw<T>>,
         defaultIndexBuffer: GpuBuffer?, defaultIndexType: IndexType?,
         dynamicUniforms: Collection<String>, uniformArgument: T) {
-        if (this.pipeline == null || !this.pipeline!!.isValid()) {
+        if (this.pipeline == null || !this.pipeline!!.isValid) {
             throw IllegalStateException("drawMultipleIndexed called without a valid pipeline")
         }
         val profT0 = if (MCDR_ABI.PROF) System.nanoTime() else 0L
         val batch = materialize(draws)
+        // P126（mesh Step 3 预检）：地形批次摊平 + 分流结论；此处只记录，不改变绘制路径。
+        val probePipeline = this.pipeline
+        if (probePipeline is D3D12CompiledRenderPipeline) {
+            val probeInfo = probePipeline.info()
+            val probeLocation = probeInfo.location.toString()
+            if (D3D12TerrainBatchClassifier.isTerrain(probeLocation)) {
+                val flat = D3D12TerrainBatchClassifier.flatten(probeInfo, batch, defaultIndexBuffer, defaultIndexType)
+                D3D12TerrainBatchClassifier.note(flat, D3D12TerrainBatchClassifier.classify(flat))
+            }
+        }
         // P33：批量足够大时走并行 bundle 录制（worker pool）；任何条件不满足或录制失败
         // 都回退到下面的串行路径，保证功能等价。
         val parallel = this.tryParallelDrawMultipleIndexed(batch, defaultIndexBuffer,
@@ -1105,10 +935,8 @@ class D3D12RenderPassBackend(
         if (!parallel) {
             for (draw in batch) {
                 val uploader = draw.uniformUploaderConsumer()
-                if (uploader != null) {
-                    uploader.accept(uniformArgument,
-                        RenderPass.UniformUploader { name, value -> this.setUniform(name, value) })
-                }
+                uploader?.accept(uniformArgument,
+                    RenderPass.UniformUploader { name, value -> this.setUniform(name, value) })
                 val indexBuffer = if (draw.indexBuffer() != null) draw.indexBuffer() else defaultIndexBuffer
                 val indexType = if (draw.indexType() != null) draw.indexType() else defaultIndexType
                 if (indexBuffer == null || indexType == null) {
@@ -1116,15 +944,6 @@ class D3D12RenderPassBackend(
                 }
                 this.setIndexBuffer(indexBuffer, indexType)
                 this.setVertexBuffer(draw.slot(), draw.vertexBuffer().slice())
-                // P22 诊断：打印每个 Draw 的顶点缓冲信息（P29：仅 verbose）
-                if (IllusionLogger.debugEnabled()) {
-                    val vbSlice = draw.vertexBuffer().slice()
-                    val vbBufSize = vbSlice.buffer().size()
-                    IllusionLogger.debugFormat("[backend-java] drawMulti slot=%d idxCount=%d vbBufSize=%d vbOff=%d vbLen=%d pipeline=%s%n",
-                        draw.slot(), draw.indexCount(), vbBufSize.toInt(), vbSlice.offset().toInt(), vbSlice.length().toInt(),
-                        this.pipeline!!.info().location)
-                    System.err.flush()
-                }
                 this.pushDescriptors()
                 this.drawIndexed(draw.indexCount(), 1, draw.firstIndex(), draw.baseVertex(), 0)
             }
@@ -1137,13 +956,6 @@ class D3D12RenderPassBackend(
     }
 
     override fun draw(vertexCount: Int, instanceCount: Int, firstVertex: Int, firstInstance: Int) {
-        // P22 诊断：记录非索引 core（DrawInstanced 路径，P29：仅 verbose）
-        if (IllusionLogger.debugEnabled() && System.err is PrintStream) {
-            IllusionLogger.debugMessage("[backend-java] core (non-indexed) pipeline=${pipeline!!.info().location}"
-                + " vertCount=${vertexCount} inst=${instanceCount}"
-                + " first=${firstVertex}")
-            System.err.flush()
-        }
         this.pushDescriptors()
         if (!MCDR_ABI.D3D12Draw(this.ctx, vertexCount, instanceCount, firstVertex, firstInstance)) {
             throw IllegalStateException("dx12Draw failed")
@@ -1160,8 +972,7 @@ class D3D12RenderPassBackend(
     }
 
     override fun multiDraw(firstVertices: IntBuffer, vertexCounts: IntBuffer, drawCount: Int) {
-        throw UnsupportedOperationException(
-            "multiDrawDirectSeparate is not supported by the D3D12 backend")
+        throw UnsupportedOperationException("multiDrawDirectSeparate is not supported by the D3D12 backend")
     }
 
     override fun drawIndirect(commands: GpuBufferSlice, drawCount: Int) {

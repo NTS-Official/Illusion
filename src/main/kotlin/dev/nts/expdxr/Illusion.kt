@@ -2,6 +2,7 @@ package dev.nts.expdxr
 
 import com.mojang.logging.LogUtils
 import dev.nts.expdxr.Illusion.Companion.OPTIONS_KEY_PREFERRED_GRAPHICS
+import dev.nts.expdxr.d3d12.D3D12Settings
 import dev.nts.expdxr.d3d12.backend.D3D12GraphicsApi
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.adapter.D3D12AdapterInfo
@@ -34,10 +35,14 @@ class Illusion(modEventBus: IEventBus, modContainer: ModContainer) {
         IllusionLogger.applyDefaults()
         modEventBus.addListener<ModConfigEvent.Loading> {
             IllusionLogger.applyFromConfig()
+            D3D12Settings.reload()
+            D3D12Settings.pushToNative()
             applyGpuCaptureConfig()
         }
         modEventBus.addListener<ModConfigEvent.Reloading> {
             IllusionLogger.applyFromConfig()
+            D3D12Settings.reload()
+            D3D12Settings.pushToNative()
             applyGpuCaptureConfig()
         }
         LOGGER.info("[$MODID] $MOD_NAME is constructing...")

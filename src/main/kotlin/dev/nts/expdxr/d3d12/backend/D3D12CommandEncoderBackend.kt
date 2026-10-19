@@ -54,20 +54,14 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
      * 主线程基本不再阻塞。
      */
     private var pendingSubmit = false
-    /**
-     * P101 普查：已经打印过的 (尺寸|深度|color[0] usage|flipY) 组合（每类一行）。
-     * createRenderPass 只在渲染线程被调用，无需同步。
-     */
-    private val passCensus: MutableSet<String> = HashSet()
 
     constructor() : this(null)
 
     constructor(device: D3D12Device?) {
         this.device = device
         this.ctx = MCDR_ABI.D3D12CreateCommandEncoder()
-        if (this.ctx == 0L) {
-            throw IllegalStateException("dx12CreateCommandEncoder returned a null handle")
-        }
+        if (this.ctx == 0L) throw IllegalStateException("dx12CreateCommandEncoder returned a null handle")
+
         this.transientMemory = D3D12TransientMemory(this.ctx, Runnable { this.ensureListOpen() })
         // P33 fix：在构造函数中打开命令列表。beginCommandList 现在是幂等的
         // （C++ 侧若 listOpen=1 则跳过 Reset），因此 submit() 可安全再次调用而
@@ -77,9 +71,7 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
     }
 
     /** Native CommandContext* handle (used by surface blit + render pass). */
-    fun nativeHandle(): Long {
-        return this.ctx
-    }
+    fun nativeHandle(): Long = this.ctx
 
     /**
      * P33：懒加载打开命令列表。dx12BeginCommandList 是幂等的（C++ 侧若 listOpen=1
@@ -92,11 +84,9 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
         // 可能读到它尚未 Close 的中间态而跳过 begin，主线程随即写进一条正在被
         // 渲染线程关闭/提交的列表（数据竞争）。
         settlePendingSubmit()
-        if (!MCDR_ABI.D3D12IsListOpen(this.ctx)) {
-            // P33 fix：ASYNC 路径下 begin/Reset 由主线程负责（渲染线程不再触碰
-            // allocator/list），因此这里直接打开即可，不存在与渲染线程竞争的问题。
-            MCDR_ABI.D3D12BeginCommandList(this.ctx)
-        }
+        // P33 fix：ASYNC 路径下 begin/Reset 由主线程负责（渲染线程不再触碰
+        // allocator/list），因此这里直接打开即可，不存在与渲染线程竞争的问题。
+        if (!MCDR_ABI.D3D12IsListOpen(this.ctx)) MCDR_ABI.D3D12BeginCommandList(this.ctx)
     }
 
     /**
@@ -108,28 +98,21 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
      * 修改，未结算就 Reset 会产生数据竞争。
      */
     private fun settlePendingSubmit() {
-        if (!this.pendingSubmit) {
-            return
-        }
+        if (!this.pendingSubmit) return
         this.pendingSubmit = false
         val prof = MCDR_ABI.PROF
         val t0 = if (prof) System.nanoTime() else 0L
         val completed = MCDR_ABI.D3D12AsyncRenderWaitComplete(this.ctx, 10_000L)
         if (prof) gProfWaitSubmitNs += System.nanoTime() - t0
         if (!completed) {
-            IllusionLogger.warnMessage("[backend] [P33] asyncRenderWaitComplete timeout! ctx=0x"
-                + this.ctx.toULong().toString(16))
+            IllusionLogger.warnMessage("[backend] [P33] asyncRenderWaitComplete timeout! ctx=0x${this.ctx.toULong().toString(16)}")
             System.err.flush()
         }
     }
 
-    private fun textureHandle(texture: GpuTexture): Long {
-        return (texture as D3D12GpuTexture).handle()
-    }
+    private fun textureHandle(texture: GpuTexture): Long = (texture as D3D12GpuTexture).handle()
 
-    private fun bufferHandle(buffer: GpuBuffer): Long {
-        return (buffer as D3D12GpuBuffer).handle()
-    }
+    private fun bufferHandle(buffer: GpuBuffer): Long = (buffer as D3D12GpuBuffer).handle()
 
     /** P3 插桩：纳秒 -> 毫秒，保留两位小数。 */
     private fun profMs(ns: Double): Double {
@@ -236,82 +219,15 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
         // MainTarget / TextureAtlas 的通用特征）。此前误用 15 导致每帧主窗口 pass 被判定为
         // 「离屏图集 pass」，对 item_cutout/entity_cutout 注入 Y 翻转并翻转 scissor，使 GUI 图标
         // 镜像/错位、按钮底图裁剪区错乱（实测日志中 854x480 主 pass 命中 4920 次）。
-        // P101 普查用：color[0] 的 usage 无条件取出。原实现只在 hasDepth 分支里取，
-        // 于是「无深度的离屏图集 pass」在日志里完全不可见（P28/P31 的判定只看带深度的）。
-        var colorUsage = -1
-        if (colorCount > 0) {
-            val firstViewAny = colorAttachments.get(0)?.textureView()
-            if (firstViewAny != null) {
-                colorUsage = (firstViewAny.texture() as D3D12GpuTexture).usage()
-            }
-        }
         var flipY = false
         if (hasDepth && colorCount > 0) {
-            val first = colorAttachments.get(0)
+            val first = colorAttachments[0]
             if (first != null) {
                 val firstView = first.textureView()
-                if (firstView != null) {
-                    val usage = (firstView.texture() as D3D12GpuTexture).usage()
-                    colorUsage = usage
-                    if (usage == 13) {
-                        flipY = true
-                        IllusionLogger.debugMessage("[backend-java] [P28] flipY=true for offscreen GUI atlas/PIP pass ("
-                            + "${w}x${h})")
-                        System.err.flush()
-                    }
+                if ((firstView.texture() as D3D12GpuTexture).usage() == 13) {
+                    flipY = true
                 }
             }
-        }
-        // P6 诊断：打印 pass 尺寸 + Java 调用来源（P29：getStackTrace() 开销大，
-        // 仅 DX12_LOG_VERBOSE=1 时输出，避免图集上传时每帧数百次堆栈遍历）。
-        if (IllusionLogger.debugEnabled()) {
-            val st = Thread.currentThread().stackTrace
-            val text = buildString {
-                append("createRenderPass: ").append(w).append('x').append(h)
-                    .append(" area=").append(x).append(',').append(y)
-                    .append(if (hasDepth) " depth=yes" else " depth=no").append(" from:")
-                var shown = 0
-                var i = 3
-                while (i < st.size && shown < 6) {
-                    val cn = st[i].className
-                    val dot = cn.lastIndexOf('.')
-                    append(' ').append(if (dot >= 0) cn.substring(dot + 1) else cn)
-                        .append('.').append(st[i].methodName)
-                    shown++
-                    i++
-                }
-            }
-            IllusionLogger.debugMessage("[backend-java] ${text}")
-            System.err.flush()
-        }
-        // P101 一次性普查：每种 (尺寸 | 深度 | color[0] usage | flipY) 组合只打一行到 stderr。
-        // 动机（用户 m07667）：物品栏里玩家模型整体上下颠倒、多数物品空白、少数从中间水平截断。
-        // 这类症状指向「离屏图集 / PIP pass 的 flipY 判定（上面 usage==13 && hasDepth）没命中」——
-        // 几何不做 Y 翻转，而 enableScissor 仍无条件翻转 ⇒ 物品被自己的 scissor 裁掉、模型翻转。
-        // 该判定此前只在 debug 级别留痕，普通运行看不到命中与否，因此加这条无门槛普查。
-        val censusKey = "${w.toString()}x${h}|depth=${if (hasDepth) 1 else 0}" +
-            "|usage=${colorUsage}|flipY=${flipY}"
-        if (passCensus.size < 64 && passCensus.add(censusKey)) {
-            val st = Throwable().stackTrace
-            val text = buildString {
-                append("[backend-java] [P101] pass census: ").append(censusKey)
-                    .append(" area=").append(x).append(',').append(y)
-                    .append(" color0=0x").append((if (colorCount > 0) colorTextures[0] else 0L).toULong().toString(16))
-                    .append(" depth=0x").append(depthTexture.toULong().toString(16))
-                    .append(" from:")
-                var shown = 0
-                var i = 3
-                while (i < st.size && shown < 5) {
-                    val cn = st[i].className
-                    val dot = cn.lastIndexOf('.')
-                    append(' ').append(if (dot >= 0) cn.substring(dot + 1) else cn)
-                        .append('.').append(st[i].methodName)
-                    shown++
-                    i++
-                }
-            }
-            System.err.println(text)
-            System.err.flush()
         }
         val pass = D3D12RenderPassBackend(
             this.device, this.ctx,
@@ -388,7 +304,7 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
      */
     fun recordDlssEvaluate(input: MemorySegment): Int {
         this.ensureListOpen()
-        return MCDR_ABI.dx12EvaluateDlss(this.ctx, input)
+        return MCDR_ABI.D3D12EvaluateDlss(this.ctx, input)
     }
 
     /**
@@ -404,7 +320,7 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
      */
     fun recordDlssDepthSnapshot(depth: D3D12GpuTexture): Int {
         this.ensureListOpen()
-        return MCDR_ABI.dx12SnapshotDlssDepth(this.ctx, depth.handle())
+        return MCDR_ABI.D3D12SnapshotDlssDepth(this.ctx, depth.handle())
     }
 
     /**
@@ -419,35 +335,8 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
         return MCDR_ABI.dx12BlitTextureToTexture(this.ctx, src.handle(), dst.handle())
     }
     override fun submitRenderPass() {
-        val pass = this.currentRenderPass
         MCDR_ABI.D3D12EndRenderPass(this.ctx)
         this.currentRenderPass = null
-        // P27 诊断：animate_sprite_blit / interpolate 图集合成 pass 结束 → 记录待 dump 的 pass。
-        // 注意：dx12EndRenderPass 只在命令列表上记录 core，GPU 要等 submit() 的
-        // dx12Submit 才真正执行。因此 dump 必须推迟到 submit() 之后执行，否则
-        // dbgReadbackTexturePixels 的 deviceWaitIdle 等待不到未提交的命令，读回全 0。
-        // P101c：dump 改由 MCDR_DUMP_TEX=1 显式驱动（不再跟随 DX12_LOG_VERBOSE）。
-        // 复核：图集 dump 只在编译/首次上传时发生（每条 pass 一次，上限 MAX_ATLAS_DUMPS），
-        // 每次含一个 deviceWaitIdle ⇒ 数量少、可接受；而 verbose 会让整轮多喷 60 MB 日志。
-        if (gDumpTextures && pass != null && gDumpedAtlas.size < MAX_ATLAS_DUMPS) {
-            val loc = pass.pipelineLocation()
-            // P101c：除了图集烘制 pass（animate_sprite*），也 dump GUI 离屏图集 pass
-            // （flipY：usage==13 + 深度 = GuiItemAtlas / PictureInPicture 物品与玩家皮肤图集）。
-            // 这些图集此前从未被 dump 过，物品栏「多数物品空白 / 少数半截 / 玩家模型颠倒」
-            // 的取证全靠它：只有看到图集里的真实内容才能区分「pass 里就没画出来」与「画出来了但被采样错」。
-            if (pass.isFlipY()
-                || (loc != null && (loc.contains("animate") || loc.contains("sprite")))) {
-                gPendingAtlasByCtx.computeIfAbsent(this.ctx) { ArrayList() }.add(pass)
-                // 无条件 stderr：每次运行最多 MAX_ATLAS_DUMPS 行，用来确认 dump 是否真的注册上。
-                System.err.println("[backend-java] P27 pending atlas dump ctx=0x"
-                    + this.ctx.toULong().toString(16)
-                    + " pass=${loc} flipY=${pass.isFlipY()}"
-                    + " colorTex=0x${pass.colorTargetHandle().toULong().toString(16)}"
-                    + " area=${pass.areaX()},${pass.areaY()}"
-                    + " ${pass.areaWidth()}x${pass.areaHeight()}")
-                System.err.flush()
-            }
-        }
     }
 
     // -----------------------------------------------------------------------
@@ -524,35 +413,25 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
         // 与官方 VulkanCommandEncoder.writeToBuffer 对齐：直接上传，不做 NaN 检测/替换。
         // 若数据含 NaN（例如投影矩阵 near/far 异常），应在源头修复，而非在上传时暴力覆盖。
         // 暴力替换会把整块顶点数据也错误地覆写，导致黑屏（P7 根因定位）。
-        val staging = this.transientMemory.uploadStaging(payload, 1L,
-            GpuBuffer.USAGE_COPY_SRC)
+        val staging = this.transientMemory.uploadStaging(payload, 1L, GpuBuffer.USAGE_COPY_SRC)
         MCDR_ABI.D3D12CopyBuffer(this.ctx, bufferHandle(staging.buffer()), staging.offset(),
-            bufferHandle(destination.buffer()), destination.offset(), payload.remaining().toLong())
+            bufferHandle(destination.buffer()), destination.offset(),
+            payload.remaining().toLong())
     }
 
     override fun copyToBuffer(source: GpuBufferSlice, target: GpuBufferSlice) {
         // P33：确保命令列表已打开
         this.ensureListOpen()
-        // P22 诊断：记录 copyToBuffer 参数，排查缓冲区大小不足（P29：仅 verbose）。
-        // 注意：copyToBuffer 由图集/区块/实体的 StagingBuffer 上传路径每帧调用数十次，
-        // 且 System.err.printf 会绕过 log4j 直写控制台，无条件打印会造成每帧同步 I/O
-        // （P53 采样中表现为 writeBytes 热点）——必须门控。
-        if (IllusionLogger.debugEnabled()) {
-            IllusionLogger.debugFormat("[backend-java] copyToBuf srcBuf=%x srcOff=%d srcLen=%d dstBuf=%x dstOff=%d%n",
-                bufferHandle(source.buffer()), source.offset().toInt(), source.length().toInt(),
-                bufferHandle(target.buffer()), target.offset().toInt())
-            System.err.flush()
-        }
         MCDR_ABI.D3D12CopyBuffer(this.ctx, bufferHandle(source.buffer()), source.offset(),
-            bufferHandle(target.buffer()), target.offset(), source.length())
+            bufferHandle(target.buffer()), target.offset(),
+            source.length())
     }
 
     override fun writeToTexture(destination: GpuTexture, source: ByteBuffer, mipLevel: Int,
         depthOrLayer: Int, destX: Int, destY: Int, width: Int, height: Int) {
         // P33：确保命令列表已打开
         this.ensureListOpen()
-        val staging = this.transientMemory.uploadStaging(source, 1L,
-            GpuBuffer.USAGE_COPY_SRC)
+        val staging = this.transientMemory.uploadStaging(source, 1L, GpuBuffer.USAGE_COPY_SRC)
         MCDR_ABI.D3D12WriteToTexture(this.ctx, bufferHandle(staging.buffer()), staging.offset(),
             width, height, textureHandle(destination), mipLevel, depthOrLayer, destX, destY)
     }
@@ -617,18 +496,13 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
 
             override fun awaitCompletion(timeoutMs: Long): Boolean {
                 if (!this.completed) {
-                    val timeoutNs = if (timeoutMs > Long.MAX_VALUE / 1_000_000L)
-                        Long.MAX_VALUE
-                        else timeoutMs * 1_000_000L
-                    this.completed = MCDR_ABI.D3D12WaitForFence(
-                        this@D3D12CommandEncoderBackend.ctx, target, timeoutNs)
+                    val timeoutNs = if (timeoutMs > Long.MAX_VALUE / 1_000_000L) Long.MAX_VALUE else timeoutMs * 1_000_000L
+                    this.completed = MCDR_ABI.D3D12WaitForFence(this@D3D12CommandEncoderBackend.ctx, target, timeoutNs)
                 }
                 return this.completed
             }
 
-            override fun close() {
-                this.completed = true
-            }
+            override fun close() { this.completed = true }
         }
     }
 
@@ -671,16 +545,11 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
         // 步骤 2：请求渲染线程开始新帧
         val asyncStarted = MCDR_ABI.D3D12AsyncRenderBeginFrame(this.ctx)
         if (!asyncStarted) {
-            if (IllusionLogger.debugEnabled()) {
-                IllusionLogger.debugMessage("[backend-java] submit: SYNC fallback (no active surface or previous frame pending) fence=${fenceBefore}")
-                System.err.flush()
-            }
             // 无 active surface（初始化阶段或窗口未创建），回退到同步路径
             // 同步路径：确保命令列表已打开（幂等：已打开则跳过 Reset），录制命令、提交
             MCDR_ABI.D3D12BeginCommandList(this.ctx)
             MCDR_ABI.D3D12Submit(this.ctx)
             this.transientMemory.rotate()
-            D3D12Device.dumpDebugLightmap()
             val run = this.pendingCallbacks
             this.pendingCallbacks.clear()
             for (callback in run) {
@@ -693,10 +562,6 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
         // 渲染线程只负责 Close + Execute + Present。
         // 注意：不在此调用 dx12BeginCommandList（列表已由录制阶段打开）。
         this.inAsyncSubmit = true
-        if (IllusionLogger.debugEnabled()) {
-            IllusionLogger.debugMessage("[backend-java] submit: ASYNC path fence=${fenceBefore}")
-            System.err.flush()
-        }
 
         // P3 插桩：记录本帧起点与相对上一帧的间隔（仅 DX12_PROF=1 生效）。
         val prof = MCDR_ABI.PROF
@@ -745,60 +610,11 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
 
         // 步骤 7：post-submit 清理（与旧同步 submit 保持一致）
         this.transientMemory.rotate()
-        // P27: dx12Submit 已提交 GPU → 现在读回图集才是真实内容。
-        // P101c：改为 gDumpTextures 驱动（见 submitRenderPass 的说明）；清空队列的动作
-        // 也必须留在这里——否则不开 dump 时 gPendingAtlasByCtx 会无界增长。
-        run {
-            val atlasPasses = gPendingAtlasByCtx.remove(this.ctx)
-            if (gDumpTextures && atlasPasses != null && atlasPasses.isNotEmpty()) {
-                for (dumpPass in atlasPasses) {
-                    val h = dumpPass.colorTargetHandle()
-                    if (!gDumpedAtlas.contains(h) && gDumpedAtlas.size < MAX_ATLAS_DUMPS) {
-                        gDumpedAtlas.add(h)
-                        System.err.println("[backend-java] P27 dump atlas (after submit) ctx=0x"
-                            + this.ctx.toULong().toString(16)
-                            + " pass=${dumpPass.pipelineLocation()}"
-                            + " size=${dumpPass.outputWidth()}x${dumpPass.outputHeight()}"
-                            + " lastArea=${dumpPass.areaX()},${dumpPass.areaY()}"
-                            + " ${dumpPass.areaWidth()}x${dumpPass.areaHeight()}"
-                            + " colorTex=0x${h.toULong().toString(16)}")
-                        System.err.flush()
-                        MCDR_ABI.D3D12DumpTextureToFile(h,
-                            "atlas_${dumpPass.outputWidth()}x${dumpPass.outputHeight()}"
-                            + "_${(h and 0xFFFFL).toULong().toString(16)}")
-                    }
-                }
-            }
-        }
-        // P38 诊断：共享 encoder（device != null）的 submit 对应整帧提交；此时 lightmap 的
-        // "Update light" pass 已执行，读回 16×16 光照纹理是真实内容。最多 dump MAX_LIGHTMAP_DUMPS 次、
-        // 间隔 LIGHTMAP_DUMP_INTERVAL 帧，降低 waitIdle 同步气泡与日志量。
-        if (this.device != null && gDumpTextures
-            && dx12DebugLightmapDumps < MAX_LIGHTMAP_DUMPS) {
-            val lmh = D3D12Device.debugLightmapHandle
-            if (lmh != 0L) {
-                ++dx12DebugLightmapTick
-                // 整帧 submit 满 LIGHTMAP_DUMP_INTERVAL 次触发一次（近似每 ~120 帧）
-                if (dx12DebugLightmapTick % LIGHTMAP_DUMP_INTERVAL == 0) {
-                    ++dx12DebugLightmapDumps
-                    IllusionLogger.debugMessage("[backend-java] P38 dump lightmap #${dx12DebugLightmapDumps}"
-                        + " tex=0x${lmh.toULong().toString(16)} after submit")
-                    System.err.flush()
-                    MCDR_ABI.D3D12DumpTextureToFile(lmh, "lightmap_${dx12DebugLightmapDumps}")
-                }
-            }
-        }
         // Run callbacks queued by the previous frame's copyTextureToBuffer.
         val run = this.pendingCallbacks
         this.pendingCallbacks.clear()
         for (callback in run) {
             callback.run()
-        }
-        // P15: 每 30 帧打印一次 submit 摘要
-        if (IllusionLogger.debugEnabled() && (fenceBefore % 30L) == 0L) {
-            IllusionLogger.debugMessage("[backend-java] submit(async): frame=${fenceBefore}"
-                + " ctx=${this.ctx.toULong().toString(16)}")
-            System.err.flush()
         }
         // P3 插桩：每 PROF_INTERVAL 帧输出一次各阶段耗时均值（ms）。
         if (prof) {
@@ -873,10 +689,6 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
         this.inAsyncSubmit = false
     }
     fun close() {
-        if (IllusionLogger.debugEnabled()) {
-            IllusionLogger.debugMessage("[backend-java] close: begin")
-            System.err.flush()
-        }
         // P61：close 前必须结算挂起的异步提交。两条路径都危险：
         //   1. 临时 encoder（device == null）：close() 末尾立即 dx12DestroyCommandEncoder，
         //      若渲染线程仍在 Close+Execute+Signal 该 ctx，销毁会与其竞争 → 悬空/崩溃。
@@ -897,48 +709,11 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
         // dx12DestroyCommandEncoder，保证资源在 fence 等待后安全释放。
         if (this.device == null) {
             MCDR_ABI.D3D12DestroyCommandEncoder(this.ctx)
-            if (IllusionLogger.debugEnabled()) {
-                IllusionLogger.debugMessage("[backend-java] close: after destroyCommandEncoder")
-                System.err.flush()
-            }
         }
         this.transientMemory.close()
-        if (IllusionLogger.debugEnabled()) {
-            IllusionLogger.debugMessage("[backend-java] close: after transientMemory.close")
-            System.err.flush()
-        }
     }
 
     companion object {
-        /** P27：图集合成 pass 结束后 dump 图集纹理（定位按钮纹理错乱）。 */
-        private const val MAX_ATLAS_DUMPS = 14
-        private val gDumpedAtlas: MutableSet<Long> = HashSet()
-        /**
-         * 纹理 dump（P27 图集 / P38 lightmap）默认**关闭**：即使 DX12_LOG_VERBOSE=1 打开了
-         * DEBUG 日志，也只有显式设 `MCDR_DUMP_TEX=1` 才真的读回纹理。理由：
-         * (1) 每次 dump 含 deviceWaitIdle 同步气泡 + 写 BMP 文件；
-         * (2) 历史上正是它在世界加载途中抛 WrongMethodTypeException，把 quick-play 的
-         *     `WorldOpenFlows.openWorld` 打断，游戏卡在标题界面。
-         * 普通诊断（P28/P101 等纯日志）不受此开关影响。
-         */
-        private val gDumpTextures = System.getenv("MCDR_DUMP_TEX") == "1"
-        /**
-         * P27: 按 ctx 记录待 submit 后 dump 的图集 pass。
-         * 必须按 ctx 分组 + 只消费自己 ctx 的列表：atlas 上传（uploadInitialContents）在
-         * 一次性 encoder 上连续创建多个 blit/interpolate pass，若用单一 pending 会被后续
-         * pass 覆盖；若用全局 static 列表会被其它 encoder 的 submit() 抢消费（此时本 ctx
-         * 命令尚未提交 GPU，读回全 0）。submit() 里 dx12Submit 提交 GPU 后执行 dump，
-         * deviceWaitIdle 才能读到真实内容。
-         */
-        private val gPendingAtlasByCtx: MutableMap<Long, MutableList<D3D12RenderPassBackend>> =
-            HashMap()
-
-        /** P38 诊断：submit()（共享 encoder = 每帧）后读回 16×16 lightmap，验证内容与朝向。 */
-        private const val MAX_LIGHTMAP_DUMPS = 5
-        private const val LIGHTMAP_DUMP_INTERVAL = 120
-        private var dx12DebugLightmapTick = 0
-        private var dx12DebugLightmapDumps = 0
-
         // -----------------------------------------------------------------------
         // P3 帧时间插桩（仅 DX12_PROF=1 时启用，正常游玩零开销）
         // 目的：量化 submit() 内部各同步阶段（RECORDING_READY 握手 / 等提交完成）
