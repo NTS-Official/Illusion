@@ -4,6 +4,7 @@ import dev.nts.expdxr.d3d12.render.advanced.D3D12AntiAliasing;
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale;
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12VariableShadingRate;
 import dev.nts.expdxr.dxrmc.dlss.DeepLearningSuperSampling;
+import dev.nts.expdxr.dxrmc.reflex.NvidiaReflex;
 import java.util.Arrays;
 
 import net.minecraft.client.OptionInstance;
@@ -88,6 +89,8 @@ public abstract class VideoSettingsScreenMixin {
         list.addBig(D3D12RenderScale.option());
         list.addSmall(D3D12VariableShadingRate.option(), DeepLearningSuperSampling.option());
         list.addSmall(DeepLearningSuperSampling.presetOption(), DeepLearningSuperSampling.qualityOption());
+        // P122：NVIDIA Reflex（跟随 Streamline 运行库；不可用时置灰）。
+        list.addSmall(NvidiaReflex.option(), null);
     }
 
     @Inject(method = "tick", at = @At("TAIL"))
@@ -121,6 +124,8 @@ public abstract class VideoSettingsScreenMixin {
                 DeepLearningSuperSampling.isAvailable() && !dlaaOwnsDlss);
         dxr_mc$setButtonActive(list, DeepLearningSuperSampling.presetOption(),
                 DeepLearningSuperSampling.isAvailable() && !dlaaOwnsDlss);
+        // P122：Reflex 依赖 Streamline 的 sl.reflex 插件，运行库不在就灰掉。
+        dxr_mc$setButtonActive(list, NvidiaReflex.option(), NvidiaReflex.isAvailable());
     }
 
     @Unique

@@ -54,5 +54,10 @@
   "options.illusion.render.shadingRate.RATE_2X2": "2x2 - coarse both",
   "options.illusion.render.shadingRate.RATE_2X4": "2x4",
   "options.illusion.render.shadingRate.RATE_4X2": "4x2",
-  "options.illusion.render.shadingRate.RATE_4X4": "4x4 - coarsest"
+  "options.illusion.render.shadingRate.RATE_4X4": "4x4 - coarsest",
+  "options.reflex": "NVIDIA Reflex",
+  "options.reflex.tooltip": "NVIDIA Reflex low-latency mode through Streamline. Off disables it; On keeps the CPU from running ahead of the GPU; On + Boost additionally keeps the GPU clocks high. Requires the Streamline runtime (sl.reflex); greyed out when it is unavailable.\n\nReflex never changes image quality - it only trades a little CPU headroom for lower input latency.",
+  "options.reflex.off": "Off",
+  "options.reflex.on": "On",
+  "options.reflex.boost": "On + Boost"
 }

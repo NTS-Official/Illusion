@@ -3,6 +3,7 @@ package dev.nts.expdxr.mixin.options;
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale;
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12VariableShadingRate;
 import dev.nts.expdxr.dxrmc.dlss.DeepLearningSuperSampling;
+import dev.nts.expdxr.dxrmc.reflex.NvidiaReflex;
 import net.minecraft.client.Options;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -39,6 +40,7 @@ public abstract class OptionsRenderOptionsMixin {
         D3D12RenderScale.load(options.getFile());
         D3D12VariableShadingRate.load(options.getFile());
         DeepLearningSuperSampling.load(options.getFile());
+        NvidiaReflex.load(options.getFile());
     }
 
     @Inject(method = "save", at = @At("TAIL"))
@@ -47,5 +49,6 @@ public abstract class OptionsRenderOptionsMixin {
         D3D12RenderScale.save(options.getFile());
         D3D12VariableShadingRate.save(options.getFile());
         DeepLearningSuperSampling.save(options.getFile());
+        NvidiaReflex.save(options.getFile());
     }
 }

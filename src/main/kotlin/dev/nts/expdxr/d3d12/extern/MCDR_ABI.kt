@@ -117,6 +117,9 @@ object MCDR_ABI {
     /** P117：PCL stats —— 帧开始与通用标记。 */
     private var MH_reflexframebegin: MethodHandle? = null
     private var MH_reflexmarker: MethodHandle? = null
+    /** P122：Reflex 模式与可用性。 */
+    private var MH_setreflexmode: MethodHandle? = null
+    private var MH_reflexavailable: MethodHandle? = null
 
     private var MH_createdevice: MethodHandle? = null
     private var MH_createtexture: MethodHandle? = null
@@ -841,6 +844,29 @@ object MCDR_ABI {
             handle.invokeExact()
         } catch (t: Throwable) {
             System.err.println("[backend-java] dx12ReflexFrameBegin failed: ${t}")
+        }
+    }
+
+    /** P122：Reflex 模式（0=off 1=on 2=on+boost）。 */
+    fun dx12SetReflexMode(mode: Int) {
+        if (LOAD_FAILURE != null) return
+        val handle = MH_setreflexmode ?: return
+        try {
+            handle.invokeExact(mode)
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12SetReflexMode(${mode}) failed: ${t}")
+        }
+    }
+
+    /** P122：Reflex 是否可用（1=可用；旧 DLL 没有导出时返回 0）。 */
+    fun dx12ReflexAvailable(): Int {
+        if (LOAD_FAILURE != null) return 0
+        val handle = MH_reflexavailable ?: return 0
+        return try {
+            handle.invokeExact() as Int
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12ReflexAvailable failed: ${t}")
+            0
         }
     }
 
@@ -2750,6 +2776,8 @@ object MCDR_ABI {
             fd(MCDRLayout.I32, MCDRLayout.PTR))
         MH_reflexframebegin = skipOptional("mcdr_dx12ReflexFrameBegin", fdv())
         MH_reflexmarker = skipOptional("mcdr_dx12ReflexMarker", fdv(MCDRLayout.I32))
+        MH_setreflexmode = skipOptional("mcdr_dx12SetReflexMode", fdv(MCDRLayout.I32))
+        MH_reflexavailable = skipOptional("mcdr_dx12ReflexAvailable", fd(MCDRLayout.I32))
         MH_setdlssoutput = skipOptional("mcdr_dx12SetDlssOutput",
             fd(MCDRLayout.I32, MCDRLayout.PTR))
 
