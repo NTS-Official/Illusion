@@ -1,11 +1,13 @@
 package dev.nts.expdxr.mixin.render;
 
+import com.llamalad7.mixinextras.injector.ModifyExpressionValue;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale;
 import net.minecraft.client.renderer.LevelRenderer;
+import org.objectweb.asm.Opcodes;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Redirect;
 
 /**
  * P105b：让世界层的辅助渲染目标也按渲染尺寸分配 —— 把 P105 的「渲染尺寸与窗口解耦」补完整。
@@ -30,8 +32,8 @@ import org.spongepowered.asm.mixin.injection.Redirect;
  * 于是这两个数停留在窗口尺寸，而主目标的**纹理**已经被缩到渲染尺寸 —— 辅助目标比源大 640x334，
  * 一进世界渲染色半透明阶段就抛越界。
  *
- * <p>这里只把 `render` 方法里那两处字段读取的**返回值**换成渲染尺寸（不动 `this.width/height`
- * 本身），于是：
+ * <p>这里只把 `render` 方法里那两处字段读取的**结果值**换成渲染尺寸（`@ModifyExpressionValue`，
+ * 不动 `this.width/height` 本身），于是：
  * <ul>
  *   <li>辅助目标与主目标附件同尺寸 ⇒ 拷贝矩形合法、`transparency.json` 那条链的逐像素深度比较
  *       仍在同一坐标系（这正是**不**采用「夹取拷贝矩形」的原因：目标比源大时夹取只会拷左上角一块，
@@ -49,26 +51,16 @@ import org.spongepowered.asm.mixin.injection.Redirect;
 public class LevelRendererWorldTargetsScaleMixin {
 
     /** `mainRenderTarget().width`（`LevelRenderer.java:180`）。 */
-    @Redirect(
-        method = "render",
-        at = @At(value = "FIELD", target = "Lcom/mojang/blaze3d/pipeline/RenderTarget;width:I"),
-        remap = false
-    )
-    private int dxr_mc$worldTargetWidth(RenderTarget target) {
-        return dxr_mc$worldTargetDimension(target.width);
-    }
+    @ModifyExpressionValue(method = "render", at = @At(value = "FIELD",
+            target = "Lcom/mojang/blaze3d/pipeline/RenderTarget;width:I",
+            opcode = Opcodes.GETFIELD), remap = false)
+    private int dxr_mc$worldTargetWidth(int original) { return dxr_mc$worldTargetDimension(original); }
 
     /** `mainRenderTarget().height`（`LevelRenderer.java:181`）。 */
-    @Redirect(
-        method = "render",
-        at = @At(value = "FIELD", target = "Lcom/mojang/blaze3d/pipeline/RenderTarget;height:I"),
-        remap = false
-    )
-    private int dxr_mc$worldTargetHeight(RenderTarget target) {
-        return dxr_mc$worldTargetDimension(target.height);
-    }
+    @ModifyExpressionValue(method = "render", at = @At(value = "FIELD",
+            target = "Lcom/mojang/blaze3d/pipeline/RenderTarget;height:I",
+            opcode = Opcodes.GETFIELD), remap = false)
+    private int dxr_mc$worldTargetHeight(int original) { return dxr_mc$worldTargetDimension(original); }
 
-    private static int dxr_mc$worldTargetDimension(int value) {
-        return D3D12RenderScale.worldLayerSize(value);
-    }
+    @Unique private static int dxr_mc$worldTargetDimension(int value) { return D3D12RenderScale.worldLayerSize(value); }
 }

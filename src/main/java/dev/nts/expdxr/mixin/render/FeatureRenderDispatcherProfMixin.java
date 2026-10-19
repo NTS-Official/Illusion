@@ -14,7 +14,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  */
 @Mixin(FeatureRenderDispatcher.class)
 public class FeatureRenderDispatcherProfMixin {
-
     @Inject(method = "prepareFrame", at = @At("HEAD"), remap = false)
     private void D3D12ProfPrepareFeaturesHead(SubmitNodeStorage submitNodeStorage,
                                               CallbackInfoReturnable<FeatureRenderDispatcher.PreparedFrame> cir) {

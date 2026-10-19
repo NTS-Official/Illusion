@@ -19,30 +19,23 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  */
 @Mixin(LevelRenderer.class)
 public class LevelRendererProfMixin {
-
     @Inject(method = "submitFeatures", at = @At("HEAD"), remap = false)
-    private void D3D12ProfSubmitFeaturesHead(LevelRenderState levelRenderState,
-                                             SubmitNodeCollector submitNodeCollector,
-                                             boolean renderOutline, CallbackInfo ci) {
+    private void D3D12ProfSubmitFeaturesHead(LevelRenderState levelRenderState, SubmitNodeCollector submitNodeCollector, boolean renderOutline, CallbackInfo ci) {
         D3D12RenderProf.begin(D3D12RenderProf.SUBMIT_FEATURES);
     }
 
     @Inject(method = "submitFeatures", at = @At("RETURN"), remap = false)
-    private void D3D12ProfSubmitFeaturesReturn(LevelRenderState levelRenderState,
-                                               SubmitNodeCollector submitNodeCollector,
-                                               boolean renderOutline, CallbackInfo ci) {
+    private void D3D12ProfSubmitFeaturesReturn(LevelRenderState levelRenderState, SubmitNodeCollector submitNodeCollector, boolean renderOutline, CallbackInfo ci) {
         D3D12RenderProf.end(D3D12RenderProf.SUBMIT_FEATURES);
     }
 
     @Inject(method = "prepareChunkRenders", at = @At("HEAD"), remap = false)
-    private void D3D12ProfPrepareChunksHead(Matrix4fc modelViewMatrix,
-                                            CallbackInfoReturnable<ChunkSectionsToRender> cir) {
+    private void D3D12ProfPrepareChunksHead(Matrix4fc modelViewMatrix, CallbackInfoReturnable<ChunkSectionsToRender> cir) {
         D3D12RenderProf.begin(D3D12RenderProf.PREPARE_CHUNKS);
     }
 
     @Inject(method = "prepareChunkRenders", at = @At("RETURN"), remap = false)
-    private void D3D12ProfPrepareChunksReturn(Matrix4fc modelViewMatrix,
-                                              CallbackInfoReturnable<ChunkSectionsToRender> cir) {
+    private void D3D12ProfPrepareChunksReturn(Matrix4fc modelViewMatrix, CallbackInfoReturnable<ChunkSectionsToRender> cir) {
         D3D12RenderProf.end(D3D12RenderProf.PREPARE_CHUNKS);
     }
 

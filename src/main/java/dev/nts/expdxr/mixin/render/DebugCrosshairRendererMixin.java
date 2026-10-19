@@ -27,7 +27,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(DebugCrosshairRenderer.class)
 public class DebugCrosshairRendererMixin {
-
     @Inject(method = "render", at = @At("HEAD"), cancellable = true, remap = false)
     private void dxr_mc$deferForDlss(CameraRenderState cameraState, int guiScale, CallbackInfo ci) {
         if (DeepLearningSuperSampling.isEnabled()) {

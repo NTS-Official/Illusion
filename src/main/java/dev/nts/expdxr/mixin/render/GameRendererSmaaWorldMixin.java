@@ -24,10 +24,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(GameRenderer.class)
 public class GameRendererSmaaWorldMixin {
 
-    @Inject(method = "render",
-            at = @At(value = "INVOKE",
-                     target = "Lnet/minecraft/client/gui/render/GuiRenderer;render()V"),
-            remap = false)
+    @Inject(method = "render", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/gui/render/GuiRenderer;render()V"), remap = false)
     private void dx12_smaaWorldOnly(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
         // P77：TAA 与 SMAA 是同一个选项的两个取值，互斥；排在 SMAA 旁边，谁被选中谁动手。
         D3D12TAA.applyIfEnabled();
@@ -61,19 +58,13 @@ public class GameRendererSmaaWorldMixin {
      */
     @Inject(method = "render",
             at = @At(value = "INVOKE",
-                     target = "Lcom/mojang/blaze3d/systems/CommandEncoder;clearDepthTexture(Lcom/mojang/blaze3d/textures/GpuTexture;D)V",
+                     target = "Lcom/mojang/blaze3d/systems/CommandEncoder;" +
+                             "clearDepthTexture(Lcom/mojang/blaze3d/textures/GpuTexture;D)V",
                      shift = At.Shift.BEFORE),
             remap = false)
     private void dxr_mc$dlssBeforeDepthClear(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
-        // 用户 m05600：DLSS 开启期间抗锯齿锁为 OFF 且界面不可调。每帧兜底重算一次，挡住两个
-        // 旁路 —— `Options.load` 上那两条 TAIL 注入（`OptionsAntiAliasingMixin` 与
-        // `OptionsRenderOptionsMixin`）先后顺序不由我们决定；`D3D12AntiAliasing.applyFromPreset()`
-        // 也会在切画质预设时写这个选项。稳态下只是一次 volatile 读。
-        //
-        // 必须挂在**这里**（无论 DLSS 开还是关都会跑到），不能挂 `applyIfEnabled()`：
-        // "DLSS 关掉 => 把抗锯齿还回去"恰恰发生在开关为 false 的时候。
         DeepLearningSuperSampling.reconcileAntiAliasingEveryFrame();
-        // P117：PCL stats 的帧开始标记（必须在任何 evaluate 之前）。
+        // Reflex PCL stats
         DeepLearningSuperSampling.pclFrameBegin();
     }
 }

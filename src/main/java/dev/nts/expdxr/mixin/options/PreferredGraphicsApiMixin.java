@@ -1,5 +1,6 @@
 package dev.nts.expdxr.mixin.options;
 
+import com.llamalad7.mixinextras.injector.ModifyReturnValue;
 import com.mojang.blaze3d.systems.GpuBackend;
 import com.mojang.serialization.Codec;
 import dev.nts.expdxr.d3d12.debug.D3D12Fatal;
@@ -14,7 +15,6 @@ import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
  * Turns vanilla's three-state graphics API cycle (Default / OpenGL / Vulkan) into a
@@ -36,11 +36,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  */
 @Mixin(PreferredGraphicsApi.class)
 public abstract class PreferredGraphicsApiMixin {
-    /** Rebuilt from {@code values()} so the appended constant can be written to options.txt. */
-    @Shadow
-    @Final
-    @Mutable
-    private static Codec<PreferredGraphicsApi> CODEC;
+    @Shadow @Final @Mutable public static Codec<PreferredGraphicsApi> CODEC;
 
     /**
      * Runs after vanilla has assigned {@code $VALUES} and {@code CODEC}. The constant is
@@ -49,9 +45,8 @@ public abstract class PreferredGraphicsApiMixin {
      */
     @Inject(method = "<clinit>", at = @At("TAIL"))
     private static void dxr_mc$createDx12Constant(CallbackInfo ci) {
-        if (D3D12GraphicsApi.constant() != null) {
-            return;
-        }
+        if (D3D12GraphicsApi.constant() != null) return;
+
         PreferredGraphicsApi dx12 = PreferredGraphicsApiAccessor.dxr_mc$create(
                 D3D12GraphicsApi.enumName(),
                 D3D12GraphicsApi.ORDINAL,
@@ -68,19 +63,18 @@ public abstract class PreferredGraphicsApiMixin {
      * {@code Class.getEnumConstants()} reflects over. Left alone if the array is not
      * vanilla's three constants, so a future game version cannot be silently mangled.
      */
-    @Inject(method = "values", at = @At("RETURN"), cancellable = true)
-    private static void dxr_mc$appendDx12Constant(CallbackInfoReturnable<PreferredGraphicsApi[]> cir) {
+    @ModifyReturnValue(method = "values", at = @At("RETURN"))
+    private static PreferredGraphicsApi[] dxr_mc$appendDx12Constant(PreferredGraphicsApi[] vanilla) {
         PreferredGraphicsApi d3d12 = D3D12GraphicsApi.constant();
-        PreferredGraphicsApi[] vanilla = cir.getReturnValue();
-        if (d3d12 == null || vanilla == null || vanilla.length != 3) {
-            return;
-        }
+        if (d3d12 == null || vanilla == null || vanilla.length != 3) return vanilla;
+
         for (PreferredGraphicsApi value : vanilla) {
             if (value == d3d12) {
-                return;
+                return vanilla;
             }
         }
-        cir.setReturnValue(new PreferredGraphicsApi[] { vanilla[0], vanilla[1], vanilla[2], d3d12 });
+
+        return new PreferredGraphicsApi[] { vanilla[0], vanilla[1], vanilla[2], d3d12 };
     }
 
     /**
@@ -97,11 +91,10 @@ public abstract class PreferredGraphicsApiMixin {
      * {@code preferredGraphicsBackend} to {@code default} and crashes the game with an
      * explanatory crash report.
      */
-    @Inject(method = "getBackendsToTry", at = @At("RETURN"), cancellable = true)
-    private void dxr_mc$injectDx12Backend(CallbackInfoReturnable<GpuBackend[]> cir) {
-        if (!D3D12GraphicsApi.isDx12((Object) this)) {
-            return;
-        }
-        cir.setReturnValue(new GpuBackend[] { new D3D12Backend() });
+    @ModifyReturnValue(method = "getBackendsToTry", at = @At("RETURN"))
+    private GpuBackend[] dxr_mc$injectDx12Backend(GpuBackend[] vanilla) {
+        if (!D3D12GraphicsApi.isDx12(this)) return vanilla;
+
+        return new GpuBackend[] { new D3D12Backend() };
     }
 }

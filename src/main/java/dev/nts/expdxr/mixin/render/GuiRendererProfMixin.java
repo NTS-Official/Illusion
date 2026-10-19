@@ -12,7 +12,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(GuiRenderer.class)
 public class GuiRendererProfMixin {
-
     @Inject(method = "render", at = @At("HEAD"), remap = false)
     private void D3D12ProfGuiHead(CallbackInfo ci) {
         D3D12RenderProf.begin(D3D12RenderProf.GUI);

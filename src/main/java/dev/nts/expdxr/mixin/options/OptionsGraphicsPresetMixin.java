@@ -21,12 +21,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(Options.class)
 public abstract class OptionsGraphicsPresetMixin {
-
-    @Inject(method = "applyGraphicsPreset",
-            at = @At(value = "INVOKE",
-                     target = "Lnet/minecraft/client/GraphicsPreset;apply(Lnet/minecraft/client/Minecraft;)V",
-                     shift = At.Shift.AFTER),
-            remap = false)
+    @Inject(method = "applyGraphicsPreset", at = @At(value = "INVOKE",
+                     target = "Lnet/minecraft/client/GraphicsPreset;" +
+                             "apply(Lnet/minecraft/client/Minecraft;)V",
+                     shift = At.Shift.AFTER), remap = false)
     private void dxr_mc$applyPresetToAntiAliasing(GraphicsPreset preset, CallbackInfo ci) {
         D3D12AntiAliasing.applyFromPreset(preset.getSerializedName());
     }

@@ -14,7 +14,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(GameRenderer.class)
 public class GameRendererProfMixin {
-
     @Inject(method = "extract", at = @At("HEAD"), remap = false)
     private void D3D12ProfExtractHead(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
         D3D12RenderProf.begin(D3D12RenderProf.EXTRACT);

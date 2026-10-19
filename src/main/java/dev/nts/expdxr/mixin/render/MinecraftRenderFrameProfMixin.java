@@ -15,7 +15,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(Minecraft.class)
 public class MinecraftRenderFrameProfMixin {
-
     @Inject(method = "renderFrame", at = @At("HEAD"), remap = false)
     private void D3D12ProfFrameHead(boolean advanceGameTime, CallbackInfo ci) {
         D3D12RenderProf.frameStart();

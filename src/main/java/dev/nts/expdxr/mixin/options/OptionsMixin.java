@@ -35,21 +35,14 @@ import org.spongepowered.asm.mixin.injection.ModifyArg;
  */
 @Mixin(Options.class)
 public abstract class OptionsMixin {
-    @Final
-    @Shadow
-    private static Component TOOLTIP_NEEDS_RESTART;
+    @Final @Shadow private static Component TOOLTIP_NEEDS_RESTART;
 
-    @Final
-    @Shadow
-    private static Component GRAPHICS_API_TOOLTIP;
+    @Final @Shadow private static Component GRAPHICS_API_TOOLTIP;
 
-    @Shadow
-    private PreferredGraphicsApi preferredGraphicsBackendFromStartup;
+    @Shadow private PreferredGraphicsApi preferredGraphicsBackendFromStartup;
 
     @ModifyArg(
-            method = "<init>",
-            at = @At(
-                    value = "INVOKE",
+            method = "<init>", at = @At(value = "INVOKE",
                     target = "Lnet/minecraft/client/OptionInstance;" +
                             "<init>(Ljava/lang/String;" +
                             "Lnet/minecraft/client/OptionInstance$TooltipSupplier;" +
@@ -62,17 +55,19 @@ public abstract class OptionsMixin {
     @SuppressWarnings({"rawtypes", "unchecked"})
     private OptionInstance.TooltipSupplier dxr_mc$D3D12Tooltip(OptionInstance.TooltipSupplier original) {
         return (Object value) -> {
-            if (!D3D12GraphicsApi.isDx12(value)) {
-                return original.apply(value);
-            }
+            if (!D3D12GraphicsApi.isDx12(value)) return original.apply(value);
+
             ArrayList<Component> lines = new ArrayList<>();
+
             if (value != this.preferredGraphicsBackendFromStartup) {
                 lines.add(TOOLTIP_NEEDS_RESTART);
                 lines.add(CommonComponents.EMPTY);
             }
+
             lines.add(GRAPHICS_API_TOOLTIP);
             lines.add(CommonComponents.EMPTY);
             lines.add(D3D12GraphicsApi.dx12TooltipLine());
+
             return Tooltip.create(CommonComponents.joinLines(lines));
         };
     }

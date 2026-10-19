@@ -19,18 +19,14 @@ public class FrameGraphBuilderProfMixin {
     @Inject(method = "execute(Lcom/mojang/blaze3d/resource/GraphicsResourceAllocator;" +
             "Lcom/mojang/blaze3d/framegraph/FrameGraphBuilder$Inspector;)V",
             at = @At("HEAD"), remap = false)
-    private void D3D12ProfExecFrameGraphHead(GraphicsResourceAllocator resourceAllocator,
-                                             FrameGraphBuilder.Inspector inspector,
-                                             CallbackInfo ci) {
+    private void D3D12ProfExecFrameGraphHead(GraphicsResourceAllocator resourceAllocator, FrameGraphBuilder.Inspector inspector, CallbackInfo ci) {
         D3D12RenderProf.begin(D3D12RenderProf.EXECUTE_FRAMEGRAPH);
     }
 
     @Inject(method = "execute(Lcom/mojang/blaze3d/resource/GraphicsResourceAllocator;" +
             "Lcom/mojang/blaze3d/framegraph/FrameGraphBuilder$Inspector;)V",
             at = @At("RETURN"), remap = false)
-    private void D3D12ProfExecFrameGraphReturn(GraphicsResourceAllocator resourceAllocator,
-                                               FrameGraphBuilder.Inspector inspector,
-                                               CallbackInfo ci) {
+    private void D3D12ProfExecFrameGraphReturn(GraphicsResourceAllocator resourceAllocator, FrameGraphBuilder.Inspector inspector, CallbackInfo ci) {
         D3D12RenderProf.end(D3D12RenderProf.EXECUTE_FRAMEGRAPH);
     }
 }

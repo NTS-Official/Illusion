@@ -1,12 +1,11 @@
 package dev.nts.expdxr.mixin.render;
 
+import com.llamalad7.mixinextras.injector.ModifyExpressionValue;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import dev.nts.expdxr.d3d12.render.advanced.smaa.D3D12GUISplit;
 import net.minecraft.client.renderer.CubeMap;
-import net.minecraft.client.renderer.GameRenderer;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Redirect;
 
 /**
  * P106：标题界面的全景图也要画到 GUI 自己的目标上。
@@ -18,12 +17,12 @@ import org.spongepowered.asm.mixin.injection.Redirect;
 @Mixin(CubeMap.class)
 public class CubeMapTargetMixin {
 
-    @Redirect(method = "render",
-            at = @At(value = "INVOKE",
-                     target = "Lnet/minecraft/client/renderer/GameRenderer;mainRenderTarget()Lcom/mojang/blaze3d/pipeline/RenderTarget;"),
+    @ModifyExpressionValue(method = "render", at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/client/renderer/GameRenderer;" +
+                    "mainRenderTarget()Lcom/mojang/blaze3d/pipeline/RenderTarget;"),
             remap = false)
-    private RenderTarget dx12_guiTargetForPanorama(GameRenderer gameRenderer) {
+    private RenderTarget dxr_mc$guiTargetForPanorama(RenderTarget original) {
         RenderTarget split = D3D12GUISplit.targetForFrame();
-        return split != null ? split : gameRenderer.mainRenderTarget();
+        return split != null ? split : original;
     }
 }

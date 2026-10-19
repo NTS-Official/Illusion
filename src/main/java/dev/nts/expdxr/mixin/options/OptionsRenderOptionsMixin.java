@@ -34,6 +34,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(Options.class)
 public abstract class OptionsRenderOptionsMixin {
+
     @Inject(method = "load", at = @At("TAIL"))
     private void dxr_mc$loadRenderOptions(CallbackInfo ci) {
         Options options = (Options) (Object) this;

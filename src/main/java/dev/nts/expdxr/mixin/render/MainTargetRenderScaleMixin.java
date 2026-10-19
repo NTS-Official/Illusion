@@ -1,10 +1,16 @@
 package dev.nts.expdxr.mixin.render;
 
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
+import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.pipeline.MainTarget;
+import com.mojang.blaze3d.systems.GpuDevice;
+import com.mojang.blaze3d.textures.GpuTexture;
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale;
+import java.util.function.Supplier;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.ModifyArg;
 
 /**
  * P105：让主渲染目标按 {@code [render] renderScale} 分配纹理 —— 分辨率与画面着色解耦的第一步。
@@ -30,37 +36,28 @@ import org.spongepowered.asm.mixin.injection.ModifyArg;
  * {@code createBuffers(w, h)}（直接调 {@code device.createTexture}），少了那一条，一次窗口变化
  * 就会把主目标还原成全窗口尺寸、render scale 静默失效（2026-10-15 实机踩到）。
  *
+ * <p>注入方式：一个 {@code @WrapOperation} 覆盖这两个方法里各自那一次 {@code createTexture(...)}
+ * 调用（原先是 width/height 两个 {@code @ModifyArg(index = 3/4)}），宽高在这里成对改写，
+ * 不再依赖实参下标。
+ *
  * <p>100%（默认）时 {@link D3D12RenderScale#scaled(int)} 原样返回入参，
  * 因此这条 mixin 在默认配置下是完全无副作用的恒等变换。
  */
 @Mixin(MainTarget.class)
 public class MainTargetRenderScaleMixin {
-
-    @ModifyArg(
-        method = {"allocateColorAttachment", "allocateDepthAttachment"},
-        at = @At(
-            value = "INVOKE",
-            target = "Lcom/mojang/blaze3d/systems/GpuDevice;createTexture(Ljava/util/function/Supplier;ILcom/mojang/blaze3d/GpuFormat;IIII)Lcom/mojang/blaze3d/textures/GpuTexture;"
-        ),
-        index = 3
-    )
-    private int dxr_mc$scaleAttachmentWidth(int width) {
-        return dxr_mc$scaleAttachmentDimension(width);
+    @WrapOperation(method = {"allocateColorAttachment", "allocateDepthAttachment"},
+            at = @At(value = "INVOKE",
+                    target = "Lcom/mojang/blaze3d/systems/GpuDevice;" +
+                            "createTexture(Ljava/util/function/Supplier;" +
+                            "ILcom/mojang/blaze3d/GpuFormat;" +
+                            "IIII)Lcom/mojang/blaze3d/textures/GpuTexture;"))
+    private static GpuTexture dxr_mc$scaleAttachmentTexture(
+            GpuDevice device, Supplier<String> label, int usage, GpuFormat format,
+            int width, int height, int depthOrLayers, int mipLevels, Operation<GpuTexture> original) {
+        return original.call(device, label, usage, format,
+                dxr_mc$scaleAttachmentDimension(width), dxr_mc$scaleAttachmentDimension(height),
+                depthOrLayers, mipLevels);
     }
 
-    @ModifyArg(
-        method = {"allocateColorAttachment", "allocateDepthAttachment"},
-        at = @At(
-            value = "INVOKE",
-            target = "Lcom/mojang/blaze3d/systems/GpuDevice;createTexture(Ljava/util/function/Supplier;ILcom/mojang/blaze3d/GpuFormat;IIII)Lcom/mojang/blaze3d/textures/GpuTexture;"
-        ),
-        index = 4
-    )
-    private int dxr_mc$scaleAttachmentHeight(int height) {
-        return dxr_mc$scaleAttachmentDimension(height);
-    }
-
-    private static int dxr_mc$scaleAttachmentDimension(int value) {
-        return D3D12RenderScale.scaledForAttachment(value);
-    }
+    @Unique private static int dxr_mc$scaleAttachmentDimension(int value) { return D3D12RenderScale.scaledForAttachment(value);}
 }

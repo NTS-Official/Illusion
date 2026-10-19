@@ -63,7 +63,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(LevelRenderer.class)
 public class LevelRendererMainPassDepthMixin {
-
     /**
      * {@code addMainPass} 的 pass 体（javac 合成方法 {@code lambda$addMainPass$0}）的 RETURN。
      *

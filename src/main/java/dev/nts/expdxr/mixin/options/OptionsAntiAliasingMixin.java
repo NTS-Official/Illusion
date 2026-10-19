@@ -26,11 +26,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public abstract class OptionsAntiAliasingMixin {
     @Inject(method = "load", at = @At("TAIL"))
     private void dxr_mc$loadAntiAliasing(CallbackInfo ci) {
-        D3D12AntiAliasing.load(((Options) (Object) this).getFile());
+        D3D12AntiAliasing.load(
+                ((Options) (Object) this).getFile());
     }
 
     @Inject(method = "save", at = @At("TAIL"))
     private void dxr_mc$saveAntiAliasing(CallbackInfo ci) {
-        D3D12AntiAliasing.save(((Options) (Object) this).getFile());
+        D3D12AntiAliasing.save(
+                ((Options) (Object) this).getFile());
     }
 }

@@ -12,16 +12,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 /** P51：可见性与遮挡图每帧更新耗时。 */
 @Mixin(SectionOcclusionGraph.class)
 public class SectionOcclusionGraphProfMixin {
-
     @Inject(method = "update", at = @At("HEAD"), remap = false)
-    private void D3D12ProfOcclusionHead(CameraRenderState camera, int fov,
-                                        ChunkLoadingRenderState chunkLoadingRenderState, CallbackInfo ci) {
+    private void D3D12ProfOcclusionHead(CameraRenderState camera, int fov, ChunkLoadingRenderState chunkLoadingRenderState, CallbackInfo ci) {
         D3D12RenderProf.begin(D3D12RenderProf.OCCLUSION);
     }
 
     @Inject(method = "update", at = @At("RETURN"), remap = false)
-    private void D3D12ProfOcclusionReturn(CameraRenderState camera, int fov,
-                                          ChunkLoadingRenderState chunkLoadingRenderState, CallbackInfo ci) {
+    private void D3D12ProfOcclusionReturn(CameraRenderState camera, int fov, ChunkLoadingRenderState chunkLoadingRenderState, CallbackInfo ci) {
         D3D12RenderProf.end(D3D12RenderProf.OCCLUSION);
     }
 }
