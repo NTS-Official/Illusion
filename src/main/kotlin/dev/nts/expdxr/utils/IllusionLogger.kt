@@ -15,8 +15,9 @@ import org.slf4j.LoggerFactory
  * - **Java/Kotlin logging** - the log4j2 level of every logger this mod owns (see
  *   [IllusionLogger.OWN_LOGGERS]); the renderer logs under `dxr_mc`, the temporal modules under
  *   `dxrmc-*`.
- * - **Diagnostic prints** - [IllusionLogger.debugMessage] / [IllusionLogger.debugFormat], used by the debug mixins that
- *   used to write straight to `System.err` (which bypassed every configuration).
+ * - **Diagnostic prints** - [IllusionLogger.debugMessage] / [IllusionLogger.debugFormat], routed
+ *   through the configured level instead of writing straight to `System.err` (which bypassed
+ *   every configuration).
  * - **Native** - pushed through `mcdrSetLogLevel` into `d3d12_mc::setLogLevel`, which gates
  *   the DLL's own `dbgLogError` / `dbgLog` / `dbgLogInfo` / `dbgLogDebug` channels. The
  *   native ordinal is the same 0..3 (error/warn/info/debug) as [IllusionLogLevel.nativeLevel].
@@ -109,9 +110,9 @@ object IllusionLogger {
     fun debugEnabled(): Boolean = ENV_VERBOSE || configured.ordinal >= IllusionLogLevel.DEBUG.ordinal
 
     /**
-     * Diagnostic print, kept for the debug mixins. Historically these wrote to `System.err`
-     * unconditionally; the *formatting* is intentionally left to the caller inside a
-     * [debugEnabled] guard so a disabled line costs nothing.
+     * Diagnostic print. Earlier builds wrote these to `System.err` unconditionally; the
+     * *formatting* is intentionally left to the caller inside a [debugEnabled] guard so a
+     * disabled line costs nothing.
      */
     @JvmStatic
     fun debugMessage(message: String) {

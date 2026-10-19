@@ -46,6 +46,11 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(25)
 
 // DXRMC 自检开关：用 providers API 读取（可被配置缓存追踪），`-P` 与 `-D` 两种写法都接受。
 // Loom 的 run config 不会自动继承 Gradle 进程的系统属性，必须显式转发到游戏 JVM。
+//
+// 注意：这些开关现在的正式入口是 NeoForge 配置（`config/dxr_mc-client.toml` 的 `[renderer]` /
+// `[dlss]` / `[debug]`，游戏内「模组 → Illusion → 配置」）。下面的转发只是让老的
+// `gradlew runClient -P...` 命令行继续可用：配置项留在默认值时才会采纳这里传的值，并且会打一行
+// WARN 提示迁移（解析层见 `D3D12Settings.kt`）。
 def dxrmcSelfTestMesh = providers.gradleProperty('dxrmc.selfTestMesh')
         .orElse(providers.systemProperty('dxrmc.selfTestMesh')).getOrElse('false')
 def dxrmcSelfTestSurface = providers.gradleProperty('dxrmc.selfTestSurface')
@@ -101,7 +106,6 @@ neoForge {
             client()
             // Comma-separated list of namespaces to load gametests from. Empty = all namespaces.
             systemProperty 'neoforge.enabledGameTestNamespaces', modId
-            // P72 mesh shader 自检开关：`gradlew runClient -Ddxrmc.selfTestMesh=true`（或 -P 形式）。
             // P121：后置锐化强度（0 = 关闭）。**只有显式传入时才转发** —— 否则会盖掉代码里的
             // 两个默认值（TAA 0.9 / DLAA·DLSS 0.67，见 D3D12Sharpen.TAA_AMOUNT / DEFAULT_AMOUNT）。
             // P138 踩过：这里无条件 `getOrElse('0.67')`，把 TAA 的 0.9 覆盖成了 0.67。
@@ -112,6 +116,7 @@ neoForge {
             }
 
             // Loom 的 run config 不会自动继承 Gradle 进程的系统属性，必须显式转发。
+            // P72 mesh shader 自检开关：`gradlew runClient -Ddxrmc.selfTestMesh=true`（或 -P 形式）。
             systemProperty 'dxrmc.selfTestMesh', dxrmcSelfTestMesh
             // 同理转发 surface 自检开关（真实窗口交换链自检，默认关闭）。
             systemProperty 'dxrmc.selfTestSurface', dxrmcSelfTestSurface
@@ -137,15 +142,6 @@ neoForge {
             //   -Pdxrmc.nativeLog=<path>   -> DX12_NATIVE_LOG_FILE（逐行 fflush 的 native 日志镜像）
             //   -Pdxrmc.nativeVerbose=1    -> DX12_LOG_VERBOSE=1（打印每条 resourceBarrier: res X -> Y）
             //   -Pdxrmc.debugLayer=1       -> DX12_DEBUG_LAYER=1（D3D12 调试层 + InfoQueue，慢）
-            // DXRMC：DLSS 诊断 dump 的门控（**危险开关**，会读 GPU 纹理；迁移到模块读回路径后才是安全的）。
-            //   -Pdxrmc.p108xDump=1     -> DXRMC_P108X_DUMP（7 项 settled 读数）
-            //   -Pdxrmc.p108xTestfill=1 -> DXRMC_P108X_TESTFILL（写侧二分；历史上造成过 #944/#525/#527/TDR）
-            if (gprops.gradleProperty('dxrmc.p108xDump').isPresent()) {
-                environment 'DXRMC_P108X_DUMP', gprops.gradleProperty('dxrmc.p108xDump').get()
-            }
-            if (gprops.gradleProperty('dxrmc.p108xTestfill').isPresent()) {
-                environment 'DXRMC_P108X_TESTFILL', gprops.gradleProperty('dxrmc.p108xTestfill').get()
-            }
             if (gprops.gradleProperty('dxrmc.nativeLog').isPresent()) {
                 environment 'DX12_NATIVE_LOG_FILE', gprops.gradleProperty('dxrmc.nativeLog').get()
             }

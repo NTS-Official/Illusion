@@ -1,6 +1,7 @@
 package dev.nts.expdxr.d3d12.debug
 
 import com.mojang.blaze3d.platform.MessageBox
+import dev.nts.expdxr.d3d12.D3D12Settings
 import dev.nts.expdxr.d3d12.backend.D3D12GraphicsApi
 import net.minecraft.CrashReport
 import net.minecraft.ReportedException
@@ -43,12 +44,6 @@ object D3D12Fatal {
      */
     private const val TITLE =
         "DXRMC: Direct3D 12 backend failed (Direct3D 12 后端初始化失败；首选图形 API 已还原为 default)"
-
-    /**
-     * 关掉致命错误弹窗的系统属性（自动化运行用；见 [showPopup]）。
-     * `Illusion\build.gradle` 已加 `-Pdxrmc.noPopup=true` → JVM 系统属性的转发。
-     */
-    private const val NO_POPUP_PROPERTY = "dxrmc.noPopup"
 
     /** Win32 `MessageBoxW` 的 uType 位：`MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST`。 */
     private const val MB_OK = 0x00000000
@@ -139,16 +134,13 @@ object D3D12Fatal {
      *
      * 它是**阻塞**的（用户点掉才返回），并且和 vanilla 一样在写崩溃报告之前弹出，因此：
      * - 用户不需要去翻日志就能知道发生了什么；
-     * - 自动化运行（自检 / 回归）必须能关掉它，否则会一直挂着 —— 用 `dxrmc.noPopup=true`
-     *   （`Illusion\build.gradle` 会把 gradle 属性转发成 JVM 系统属性；Loom 的 run config 不会
-     *   自动继承 gradle 进程的系统属性）。
+     * - 自动化运行（自检 / 回归）必须能关掉它，否则会一直挂着 —— 用配置 `[debug] noCrashPopup = true`。
      *
      * 任何异常（包括弹窗本身失败）都只记日志：弹窗不能顶掉崩溃报告。
      */
     private fun showPopup(what: String, resetDetail: String) {
-        if (System.getProperty(NO_POPUP_PROPERTY) == "true") {
-            LOGGER.warn("[backend] fatal dialog suppressed (-D{}=true); see the crash report instead",
-                NO_POPUP_PROPERTY)
+        if (D3D12Settings.noCrashPopup) {
+            LOGGER.warn("[backend] fatal dialog suppressed ([debug] noCrashPopup = true); see the crash report instead")
             return
         }
 
@@ -178,9 +170,9 @@ object D3D12Fatal {
         val fallbackMessage = sanitizeForTinyfd(message)
 
         // 对话框是**模态阻塞**的（MessageBoxW 在自己线程上跑消息循环）。放到守护线程里等，
-        // 这样即使没人在电脑前点它，崩溃报告也一定会写出来（自动化运行还会用 -Ddxrmc.noPopup=true
+        // 这样即使没人在电脑前点它，崩溃报告也一定会写出来（自动化运行还会用配置 `[debug] noCrashPopup = true`
         // 直接跳过）。守护线程不会阻止 JVM 退出。
-        LOGGER.info("[backend] showing fatal error dialog (set -D{}=true to suppress)", NO_POPUP_PROPERTY)
+        LOGGER.info("[backend] showing fatal error dialog (set [debug] noCrashPopup = true to suppress)")
         val dialog = Thread({
             try {
                 if (!showNativeMessageBox(message, "Minecraft")) {
