@@ -1,7 +1,7 @@
-package dev.nts.expdxr.utils
+package dev.nts.expdxr.misc
 
 import dev.nts.expdxr.IllusionConfig
-import dev.nts.expdxr.utils.IllusionLogger.i18n_LOG_KEY
+import dev.nts.expdxr.misc.IllusionLogger.i18n_LOG_KEY
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import net.minecraft.network.chat.Component
 import net.neoforged.neoforge.common.TranslatableEnum

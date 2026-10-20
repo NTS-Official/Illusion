@@ -1,4 +1,4 @@
-package dev.nts.expdxr.dxrmc.dlss
+package dev.nts.expdxr.dxrmc.nvidia.dlss
 
 import dev.nts.expdxr.Illusion
 import dev.nts.expdxr.d3d12.backend.D3D12CommandEncoderBackend
@@ -11,7 +11,7 @@ import dev.nts.expdxr.d3d12.extern.MCDRLayout.PTR
 import dev.nts.expdxr.d3d12.render.adapter.D3D12AdapterInfo
 import dev.nts.expdxr.d3d12.render.adapter.D3D12Device
 import dev.nts.expdxr.d3d12.render.advanced.D3D12AntiAliasing
-import dev.nts.expdxr.d3d12.render.advanced.D3D12Sharpen
+import dev.nts.expdxr.d3d12.render.advanced.D3D12PostSharpen
 import dev.nts.expdxr.d3d12.render.advanced.smaa.D3D12GUISplit
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12Temporal
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12Velocity
@@ -1410,10 +1410,10 @@ object DeepLearningSuperSampling {
      */
     private fun sharpenUpscaledFrame(encoder: D3D12CommandEncoderBackend, target: D3D12GpuTexture,
         width: Int, height: Int) {
-        if (!D3D12Sharpen.isEnabled()) {
+        if (!D3D12PostSharpen.isEnabled()) {
             return
         }
-        val scratch = D3D12Sharpen.scratchForFrame(width, height) ?: return
+        val scratch = D3D12PostSharpen.scratchForFrame(width, height) ?: return
         if (!encoder.recordSharpen(target.handle(), scratch.handle())) {
             return
         }

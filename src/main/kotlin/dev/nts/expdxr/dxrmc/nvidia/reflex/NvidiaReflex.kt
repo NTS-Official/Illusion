@@ -1,4 +1,4 @@
-package dev.nts.expdxr.dxrmc.reflex
+package dev.nts.expdxr.dxrmc.nvidia.reflex
 
 import com.mojang.serialization.Codec
 import dev.nts.expdxr.Illusion

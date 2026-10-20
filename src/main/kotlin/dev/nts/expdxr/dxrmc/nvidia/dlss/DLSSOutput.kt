@@ -1,4 +1,4 @@
-package dev.nts.expdxr.dxrmc.dlss
+package dev.nts.expdxr.dxrmc.nvidia.dlss
 
 import com.mojang.blaze3d.GpuFormat
 import com.mojang.blaze3d.textures.GpuTexture

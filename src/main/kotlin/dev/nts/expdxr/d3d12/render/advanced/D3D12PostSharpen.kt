@@ -11,7 +11,7 @@ import dev.nts.expdxr.d3d12.render.core.D3D12GpuTexture
  * P121：TAA / DLAA / DLSS 共用的后置锐化（5-tap unsharp，native 侧一条全屏 pass）。
  *
  * 为什么必须自己做：
- * - TAA 的 resolve 以 `lerp(history, current, 0.0625)` 结束（`D3D12Taa.kt`），本身就是低通，
+ * - TAA 的 resolve 以 `lerp(history, current, 0.0625)` 结束（P152 起在 native 的 `kTaaPS` 里），本身就是低通，
  *   而 `dxrMcRenderScale = 100%` 时没有升采样帮忙补细节，画面偏软；
  * - DLSS/DLAA 不能用 SDK 的自带锐化：`MCDR\external\streamline\include\sl_dlss.h:26` 把
  *   `SR_DEPRECATED_SHARPENING` 定义成 "Sharpness is not supported"，NGX 侧我们也是
@@ -25,7 +25,7 @@ import dev.nts.expdxr.d3d12.render.core.D3D12GpuTexture
  *
  * 强度：配置 `[renderer] sharpenAmount` / `[renderer] taaSharpenAmount`（0..1，0 = 完全关闭，调用方回退到 blit）。
  */
-object D3D12Sharpen {
+object D3D12PostSharpen {
     /** 独立的 logger：`Illusion.LOGGER` 的 INFO 在这套 log4j 配置下不进日志（P121 排查时踩过）。 */
     private val LOGGER = LoggerFactory.getLogger("dxrmc-sharpen")
 

@@ -1,4 +1,4 @@
-package dev.nts.expdxr.options
+package dev.nts.expdxr.misc
 
 import net.minecraft.network.chat.Component
 import net.neoforged.neoforge.common.TranslatableEnum
