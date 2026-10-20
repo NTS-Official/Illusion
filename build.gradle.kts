@@ -53,6 +53,10 @@ java {
     toolchain.languageVersion.set(JavaLanguageVersion.of(25))
 }
 
+kotlin {
+    
+}
+
 // DXRMC 自检开关：用 providers API 读取（可被配置缓存追踪），`-P` 与 `-D` 两种写法都接受。
 // Loom 的 run config 不会自动继承 Gradle 进程的系统属性，必须显式转发到游戏 JVM。
 //
@@ -168,6 +172,10 @@ neoForge {
             // P115：`-Pdxrmc.reflexFrameLimitUs=6944` 让 Reflex 限制到 ~144 fps（0 = 不限）。
             if (providers.gradleProperty("dxrmc.reflexFrameLimitUs").isPresent) {
                 environment("MCDR_REFLEX_FRAME_LIMIT_US", providers.gradleProperty("dxrmc.reflexFrameLimitUs").get())
+            }
+            // P130：`-Pdxrmc.meshTerrain=1` 让地形 solid_terrain 管线额外建 mesh 变体（验证用）。
+            if (providers.gradleProperty("dxrmc.meshTerrain").isPresent) {
+                environment("MCDR_MESH_TERRAIN", providers.gradleProperty("dxrmc.meshTerrain").get())
             }
             // P113：`-Pdxrmc.reflex=0` 关掉 Reflex（A/B 用）。
             if (providers.gradleProperty("dxrmc.reflex").isPresent) {
@@ -394,31 +402,27 @@ sourceSets.named("main") {
 // PATH-only experiment reports "not found" even with the files present on disk
 // (known_bugs.md B14).
 //
-// TWO LISTS, and the split is a licensing decision, not a size one:
+// TWO LISTS, and the split is both a licensing and a release-contents decision:
 //
-//   vendorJarLibs  -- REDISTRIBUTABLE under this project's LGPL-2.1.
-//                     Staged as JAR resources and extracted to `dxrmc/` at
-//                     startup by MCDR_ABI.extractVendorResources(). Both licences
-//                     permit binary redistribution provided the copyright notice
-//                     and terms travel with the distribution, so each SDK's
-//                     licence text is packed alongside its binaries.
+//   vendorJarLibs  -- REDISTRIBUTABLE and SHIPPED: these ride inside the released
+//                     mod JAR as resources and are extracted to `dxrmc/` at startup
+//                     by MCDR_ABI.extractVendorResources(). Intel's Simplified
+//                     Software License permits binary redistribution provided the
+//                     copyright notice and terms travel with the distribution, so
+//                     `LICENSE-xess.txt` is packed alongside the binaries.
+//                     **XeSS only.** The user asked for the FSR (AMD FidelityFX)
+//                     runtimes to be absent from release builds (2026-10-20), and
+//                     NVIDIA's RTX SDKs licence forbids redistribution outright.
 //
-//   vendorDevLibs  -- NOT redistributable through this project.
-//                     NVIDIA's RTX SDKs licence (NRD and DLSS share it) clause
-//                     4(e) forbids using the SDK "in any manner that would cause
-//                     it to become subject to an open source software license",
-//                     listing as examples: disclosure in source form, licensing
-//                     for derivative works, and redistribution at no charge --
-//                     which is what LGPL-2.1 requires. So the NVIDIA runtime DLLs
-//                     are never packed; they are copied into `run/dxrmc/` only to
-//                     make the local dev environment match what the probe looks
-//                     for. End users obtain them from NVIDIA if they want them.
-//
-// License compatibility for the packaged two, verified against the shipped text:
-//   Intel XeSS      -- Intel Simplified Software License (October 2022), binary
-//                      redistribution permitted; requires the notice be reproduced.
-//   AMD FidelityFX  -- AMD binary-only redistribution grant in docs/license.md;
-//                      requires the copyright and permission notice be reproduced.
+//   vendorDevLibs  -- DEVELOPMENT ONLY, never packed. `copyVendorDlls` stages them
+//                     into `run/dxrmc/` so a dev client can exercise every vendor.
+//                     NVIDIA: RTX SDKs licence clause 4(e) forbids using the SDK
+//                     "in any manner that would cause it to become subject to an
+//                     open source software license" -- listing redistribution at no
+//                     charge, which is what LGPL-2.1 requires. AMD FidelityFX: the
+//                     binaries are redistributable, but the release build no longer
+//                     ships them; when they are missing the FSR probe reports
+//                     itself unavailable and the renderer falls back.
 data class VendorJarLib(val dir: File, val files: List<String>, val license: File?)
 
 val vendorJarLibs = listOf(
@@ -428,17 +432,6 @@ val vendorJarLibs = listOf(
         files = listOf("libxess.dll", "libxess_fg.dll", "libxell.dll"),
         license = file("../MCDR/external/xess/LICENSE.txt"),
     ),
-    // FidelityFX 运行时已迁到 MCDR\lib\（git 不记录，见 MCDR\.gitignore 的 /lib/）；
-    // 许可证仍在子模块里：Kits/FidelityFX/docs/license.md。
-    VendorJarLib(
-        dir = file("../MCDR/lib/fidelityfx"),
-        files = listOf(
-            "amd_fidelityfx_loader_dx12.dll", "amd_fidelityfx_upscaler_dx12.dll",
-            "amd_fidelityfx_denoiser_dx12.dll", "amd_fidelityfx_radiancecache_dx12.dll",
-            "amd_fidelityfx_framegeneration_dx12.dll",
-        ),
-        license = file("../MCDR/external/fidelityfx/Kits/FidelityFX/docs/license.md"),
-    ),
 )
 
 // Dev-only. `nvngx_dlssd.dll` is Ray Reconstruction, `nvngx_dlssg.dll` is Frame
@@ -447,8 +440,11 @@ val vendorJarLibs = listOf(
 data class VendorDevLib(val dir: File, val pattern: String)
 
 val vendorDevLibs = listOf(
-    // DLSS 运行时同样在 MCDR\lib\dlss\（上游 NVIDIA/DLSS 仓库不含运行时 DLL，且不可再分发）。
+    // DLSS 运行时在 MCDR\lib\dlss\（上游 NVIDIA/DLSS 仓库不含运行时 DLL，且不可再分发）。
     VendorDevLib(dir = file("../MCDR/lib/dlss"), pattern = "nvngx_*.dll"),
+    // FidelityFX 运行时在 MCDR\lib\fsr\（git 不记录，见 MCDR\.gitignore 的 /lib/）。
+    // 发行 JAR 不再包含它，开发目录仍然要有，否则 dev 侧无法试 FSR。
+    VendorDevLib(dir = file("../MCDR/lib/fsr"), pattern = "amd_fidelityfx_*.dll"),
 )
 
 
@@ -482,7 +478,7 @@ val vendorJarRoot = layout.buildDirectory.dir("generated/vendorJar")
 val vendorJarDir = vendorJarRoot.map { it.dir("vendor") }
 val stageVendorLibs = tasks.register("stageVendorLibs") {
     group = "build"
-    description = "Stages the redistributable (XeSS / FidelityFX) SDK runtimes + licences as mod JAR resources."
+    description = "Stages the redistributable (XeSS) SDK runtime + licence as mod JAR resources."
     // Captured by value below: a `doLast` lambda that reads a script-level `val`
     // captures the script instance, and the configuration cache refuses to
     // serialise that ("cannot serialize Gradle script object references").
@@ -534,6 +530,17 @@ val stageVendorLibs = tasks.register("stageVendorLibs") {
             }
             val mf = File(root, "manifest.txt")
             mf.writeText(manifestEntries.joinToString("\n") + "\n")
+            // 删掉上次阶段化留下、这次不再打包的文件。发行包不再含 FidelityFX 之后，
+            // 旧的 amd_fidelityfx_*.dll 仍躺在 build/generated/vendorJar/vendor/ 里，
+            // processResources 会把它原样打回 JAR —— 清单之外的条目一律清掉。
+            val keep = manifestEntries.mapTo(HashSet()) { it.substringAfterLast('/') }
+            keep += "manifest.txt"
+            (root.listFiles() ?: emptyArray()).forEach { stale ->
+                if (stale.isFile && stale.name !in keep) {
+                    stale.delete()
+                    logger.lifecycle("[stageVendorLibs] pruned stale ${stale.name}")
+                }
+            }
             logger.lifecycle("[stageVendorLibs] ${manifestEntries.size} resource(s) in the mod JAR " +
                 "($staged copied, rest already current)")
             if (missing.isNotEmpty()) {
@@ -567,11 +574,12 @@ tasks.named<ProcessResources>("processResources") {
 // ---------------------------------------------------------------------------
 // copyVendorDlls -- dev-only SDK runtimes that must NOT ship
 // ---------------------------------------------------------------------------
-// Only the NVIDIA ones land here. The packaged SDKs (XeSS / FidelityFX) are
-// extracted from the JAR by the mod itself, so they do not need this task.
+// The dev-side runtimes land here: NVIDIA DLSS (no redistribution right at all) and
+// AMD FidelityFX (redistributable, but the release JAR no longer carries it). XeSS
+// does not need this task — it is extracted from the JAR by the mod itself.
 val copyVendorDlls = tasks.register("copyVendorDlls") {
     group = "build"
-    description = "Dev-only: stages the NVIDIA (non-redistributable) runtime DLLs into run/dxrmc."
+    description = "Dev-only: stages the NVIDIA (DLSS) and AMD (FidelityFX) runtime DLLs into run/dxrmc."
     // Captured by value, same reason as copyNative (configuration cache).
     val dxrmcDir = layout.projectDirectory.dir("run/dxrmc").asFile
     val devLibs: List<VendorDevLib> = vendorDevLibs
@@ -624,10 +632,13 @@ val copyVendorDlls = tasks.register("copyVendorDlls") {
     }
 }
 
-// The packaged SDKs need no run-task hook: the mod extracts them from the JAR at
-// startup. Only the dev-only NVIDIA DLLs do, and those are staged on demand
-// (`gradlew copyVendorDlls`) rather than on every run -- a dev who does not care
-// about DLSS should not pay ~115 MB of copying for it.
+// 开发客户端要能看到全部厂商：XeSS 由 JAR 资源解出，AMD / NVIDIA 由上面的任务落进
+// run/dxrmc/。挂在 runClient 上，是因为缺 DLL 时探针只会安静地报 unavailable——
+// 那种「为什么 FSR/DLSS 不见了」很容易被误当成回归。任务本身按文件大小判重，
+// 第二次运行只是一次文件列表比对。
+tasks.matching { it.name == "runClient" }.configureEach {
+    dependsOn(copyVendorDlls)
+}
 
 // Example configuration to allow publishing using the maven-publish plugin
 publishing {
