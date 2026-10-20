@@ -5,7 +5,7 @@ import dev.nts.expdxr.DlssImplementation
 import dev.nts.expdxr.IllusionConfig
 import dev.nts.expdxr.MeshDiagnostics
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
-import dev.nts.expdxr.utils.IllusionLogger
+import dev.nts.expdxr.misc.IllusionLogger
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
@@ -43,6 +43,11 @@ object D3D12Settings {
         val taaSharpenAmount: Float,
         val dlssImplementation: DlssImplementation,
         val dlssOutputHandover: Boolean,
+        val reflexFrameLimitUs: Int,
+        val meshTerrain: Boolean,
+        val meshTerrainCull: Boolean,
+        val meshTerrainCullBounds: Boolean,
+        val dumpHlsl: Boolean,
         val debugLayer: Boolean,
         val profiling: Boolean,
         val skipGlSwap: Boolean,
@@ -88,6 +93,21 @@ object D3D12Settings {
 
     /** The JVM owns DLSS's output texture. */
     val dlssOutputHandover: Boolean get() = snapshot().dlssOutputHandover
+    /** `[dlss] reflexFrameLimitUs` — Reflex 自己的限帧器（微秒/帧，0 = 关）。 */
+    val reflexFrameLimitUs: Int get() = snapshot().reflexFrameLimitUs
+    /** `[mesh] terrain` — 地形走 mesh 管线。 */
+    val meshTerrain: Boolean get() = snapshot().meshTerrain
+
+    /** P140：`[mesh] terrainCull` —— 用 AS 剔除地形 meshlet（依赖 `[mesh] terrain`）。*/
+    val meshTerrainCull: Boolean get() = snapshot().meshTerrainCull
+
+    /**
+     * P141：`[mesh] terrainCullBounds` —— 让 AS 读 compute pre-pass 生成的包围球表（boundsMode 0）。
+     * 默认关：表内容还没验证过（续四实测开启后大片地形在特定朝向下闪）。
+     */
+    val meshTerrainCullBounds: Boolean get() = snapshot().meshTerrainCullBounds
+    /** `[debug] dumpHlsl` — 把翻译后的 HLSL 落盘（`dxrmc/hlsl/`）。 */
+    val dumpHlsl: Boolean get() = snapshot().dumpHlsl
 
     /** Attach the D3D12 debug layer. */
     val debugLayer: Boolean get() = snapshot().debugLayer
@@ -146,6 +166,7 @@ object D3D12Settings {
             append(s.debugLayer).append('|')
             append(s.profiling).append('|')
             append(s.dlssImplementation).append('|')
+            append(s.reflexFrameLimitUs).append('|')
             append(s.nativeLogFile)
         }
         if (wanted == pushed) return
@@ -161,6 +182,8 @@ object D3D12Settings {
             if (s.dlssImplementation == DlssImplementation.STREAMLINE) "1" else null,
         )
         MCDR_ABI.D3D12SetEnvironment("DX12_NATIVE_LOG_FILE", s.nativeLogFile.ifEmpty { null })
+        // P131：Reflex 的限帧器没有环境变量入口 —— 直接走 ABI，配置是唯一来源。
+        MCDR_ABI.D3D12SetReflexFrameLimit(s.reflexFrameLimitUs)
     }
 
     private fun snapshot(): Snapshot = snapshot ?: build()
@@ -232,6 +255,13 @@ object D3D12Settings {
                         legacy("dlssImplementation") { legacyImpl != null }
                     if (overridden) legacyImpl ?: configured else configured
                 },
+            reflexFrameLimitUs = config(0) { IllusionConfig.DLSS_REFLEX_FRAME_LIMIT_US.get() }
+                .takeUnless { it == 0 && legacy("reflexFrameLimitUs") { System.getenv("MCDR_REFLEX_FRAME_LIMIT_US") != null } }
+                ?: (System.getenv("MCDR_REFLEX_FRAME_LIMIT_US")?.trim()?.toIntOrNull() ?: 0),
+            meshTerrain = config(false) { IllusionConfig.MESH_TERRAIN.get() },
+            meshTerrainCull = config(false) { IllusionConfig.MESH_TERRAIN_CULL.get() },
+            meshTerrainCullBounds = config(false) { IllusionConfig.MESH_TERRAIN_CULL_BOUNDS.get() },
+            dumpHlsl = config(false) { IllusionConfig.DUMP_HLSL.get() },
             dlssOutputHandover = config(true) { IllusionConfig.DLSS_OUTPUT_HANDOVER.get() } &&
                 !legacy("dlssOutputHandover") {
                     System.getProperty("dxrmc.dlssOutput")?.trim()?.equals("off", ignoreCase = true) == true

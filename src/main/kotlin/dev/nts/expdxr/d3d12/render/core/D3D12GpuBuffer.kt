@@ -3,6 +3,7 @@ package dev.nts.expdxr.d3d12.render.core
 import com.mojang.blaze3d.buffers.GpuBuffer
 import com.mojang.blaze3d.buffers.GpuBufferSlice
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
+import dev.nts.expdxr.d3d12.render.advanced.mesh.D3D12MeshSectionSnapshot
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -53,7 +54,16 @@ class D3D12GpuBuffer(usage: @Usage Int, private val bufferSize: Long, private va
         // 顶点被变换到裁剪区外 → colorTex 全黑。这里统一强制 LITTLE_ENDIAN。
         data.order(ByteOrder.LITTLE_ENDIAN)
         return GpuBufferSlice.MappedView(this.slice(offset, length), data
-        ) { MCDR_ABI.D3D12UnmapBuffer(this.handle) }
+        ) {
+            // P137：卸载前留一份映射区快照。mesh 段派发要把整批区块的 96 B `ChunkSection`
+            // 拼成一个 ByteAddressBuffer（t16），而这条 vanilla uniform 环不允许事后做
+            // GPU 读回（P108d：写映射读回会把整帧打成清屏色）。这里在 CPU 侧、数据失效
+            // 之前抄一份，见 D3D12MeshSectionSnapshot。
+            if ((this.usage() and GpuBuffer.USAGE_UNIFORM) != 0) {
+                D3D12MeshSectionSnapshot.capture(this.handle, offset, length, data)
+            }
+            MCDR_ABI.D3D12UnmapBuffer(this.handle)
+        }
     }
 
     companion object {

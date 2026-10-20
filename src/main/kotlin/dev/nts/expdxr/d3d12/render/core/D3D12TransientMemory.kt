@@ -1,6 +1,6 @@
 package dev.nts.expdxr.d3d12.render.core
 
-import dev.nts.expdxr.utils.IllusionLogger
+import dev.nts.expdxr.misc.IllusionLogger
 
 import com.mojang.blaze3d.buffers.GpuBuffer
 import com.mojang.blaze3d.buffers.GpuBufferSlice
@@ -32,6 +32,9 @@ import java.util.Deque
  *（镜像 {@code MappableRingBuffer} 的 3 路轮换）：每帧 rotate() 切换到下一路，
  * 当前路的 offset 在该帧内单调递增。这保证了每帧 DynamicUniforms 等使用
  * allocateGpuMapped 的代码都能拿到新的独立偏移，而非复用同一缓冲起始处。
+ * 这三路是**常驻**缓冲（归 {@link #uboRing} 所有、随 {@link #close()} 释放），
+ * 不参与 {@link #frames} 队列的延迟释放 —— 否则第 3 次 rotate() 就会把它们关掉
+ * （P174）。
  */
 class D3D12TransientMemory(private val ctx: Long, private val ensureListOpen: Runnable) : TransientMemory {
     private val frames: Deque<MutableList<D3D12GpuBuffer>> = ArrayDeque()
@@ -63,12 +66,17 @@ class D3D12TransientMemory(private val ctx: Long, private val ensureListOpen: Ru
     private val retiredPooledStagingBlocks: MutableList<D3D12GpuBuffer> = ArrayList()
 
     init {
-        // 预分配 3 路 UPLOAD 缓冲（同 MappableRingBuffer 构造时的 3 个 buffer）
+        // 预分配 3 路 UPLOAD 缓冲（同 MappableRingBuffer 构造时的 3 个 buffer）。
+        //
+        // P174 fix：这三个是**常驻**缓冲，归 uboRing 所有，绝不能 register 进 frame ——
+        // frame 会在第 3 次 rotate() 时整体 close（FRAMES_IN_FLIGHT=2），那样 ring 里
+        // 留着的就是三个已销毁的缓冲，allocateGpuMapped 一调就 map 到已关闭对象上
+        // （D3D12MapBuffer 返回 null → IllegalStateException）。代价只是三个 4 KiB 缓冲
+        // 常驻，随本对象 close() 一起释放。
         for (i in 0 until UBO_RING_COUNT) {
             uboRing[i] = D3D12GpuBuffer(
                 GpuBuffer.USAGE_MAP_WRITE or GpuBuffer.USAGE_COPY_SRC, UBO_RING_BLOCK_SIZE
             )
-            register(uboRing[i]!!)
         }
     }
 
@@ -99,6 +107,7 @@ class D3D12TransientMemory(private val ctx: Long, private val ensureListOpen: Ru
         // 镜像 VulkanTransientMemory.allocateGpuMapped：在 ring buffer 当前路中分配，
         // 超过BLOCK_SIZE时自动切换到下一路（rotate）。
         // 与 MappableRingBuffer 语义对齐：每帧 rotate() 后切换到新路径，旧路径供 GPU 读取。
+        check(!this.closed) { "allocateGpuMapped called on a closed D3D12TransientMemory" }
         var remaining = UBO_RING_BLOCK_SIZE - uboRingOffset
         if (size > remaining) {
             // 当前路剩余空间不足，切换到下一路
@@ -107,6 +116,12 @@ class D3D12TransientMemory(private val ctx: Long, private val ensureListOpen: Ru
             remaining = UBO_RING_BLOCK_SIZE
         }
         val buf = uboRing[uboRingIdx]!!
+        // P174：ring buffer 是常驻对象，只有 close() 会销毁它们。走到这里还关闭着就说明
+        // 归属又被记错了（修前正是如此：init 把三个 ring buffer 登记进 frame，第 3 次
+        // rotate() 就把它们关了），这里直接大声失败，而不是 map 到已销毁的缓冲上。
+        check(!buf.isClosed()) {
+            "allocateGpuMapped: ring buffer slot ${this.uboRingIdx} is already closed"
+        }
         val offset = uboRingOffset
         uboRingOffset += size
         return buf.map(offset, size, false, true)
@@ -471,6 +486,12 @@ class D3D12TransientMemory(private val ctx: Long, private val ensureListOpen: Ru
         }
         this.retiredPooledStagingBlocks.clear()
         this.stagingBlock = null
+        // P174 fix：ring buffer 不归 frames 队列（见 init 注释），必须在这里显式释放；
+        // 置 null 是为了让 close() 之后的 allocateGpuMapped 立刻 NPE 而不是用野指针。
+        for (i in 0 until UBO_RING_COUNT) {
+            uboRing[i]?.close()
+            uboRing[i] = null
+        }
         if (IllusionLogger.debugEnabled()) {
             IllusionLogger.debugMessage("[backend-java] transientMemory.close: done")
         }

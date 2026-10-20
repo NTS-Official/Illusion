@@ -5,7 +5,8 @@ import com.mojang.blaze3d.pipeline.RenderPipeline
 import com.mojang.blaze3d.preprocessor.GlslPreprocessor
 import com.mojang.blaze3d.shaders.ShaderType
 import com.mojang.blaze3d.vulkan.glsl.ShaderCompileException
-import dev.nts.expdxr.utils.IllusionLogger
+import dev.nts.expdxr.d3d12.D3D12Settings
+import dev.nts.expdxr.misc.IllusionLogger
 import dev.nts.expdxr.d3d12.backend.D3D12BindGroupEntry
 import net.minecraft.client.renderer.ShaderDefines
 import org.lwjgl.system.MemoryUtil
@@ -101,7 +102,7 @@ class D3D12ShaderCompiler : AutoCloseable {
         var fragmentHlsl = fragmentWork.toHlsl(false)
         // P127 临时探针：把生成的 HLSL 落盘，用于评估"把 VS 包进 MS"的可行性。
         // 环境变量 MCDR_DUMP_HLSL=1 开启，最多 60 对文件（避免刷盘）。
-        if (System.getenv("MCDR_DUMP_HLSL") == "1") {
+        if (D3D12Settings.dumpHlsl || System.getenv("MCDR_DUMP_HLSL") == "1") {
             val dir = java.io.File("dxrmc/hlsl")
             dir.mkdirs()
             val existing = dir.listFiles()?.size ?: 0
@@ -169,18 +170,6 @@ class D3D12ShaderCompiler : AutoCloseable {
         val semanticNames = mutableListOf<String>()
         for (i in 0 until vertex.inputs().size) {
             semanticNames.add(if (i == 0) "POSITION" else ("TEXCOORD${i - 1}"))
-        }
-        // P128 临时探针：为地形管线生成 mesh shader 源码并用 DXC 编译，验证"顶点解码 + VS 包装"。
-        // 环境变量 MCDR_MESH_HLSL_PROBE=1 开启；结果写到 dxrmc/hlsl/ms_<pipeline>.hlsl。
-        if (System.getenv("MCDR_MESH_HLSL_PROBE") == "1" && pipelineLocation.contains("solid_terrain")) {
-            val meshHlsl = dev.nts.expdxr.d3d12.render.advanced.mesh.D3D12MeshVertexDecode
-                .buildMeshHlsl(vertexHlsl, pipeline.vertexFormatBindings.firstOrNull())
-            val dir = java.io.File("dxrmc/hlsl")
-            dir.mkdirs()
-            java.io.File(dir, "ms_solid_terrain.hlsl").writeText(meshHlsl)
-            val dxil = dev.nts.expdxr.d3d12.extern.MCDR_ABI.D3D12CompileShaderDxc(meshHlsl, "ms_main", "ms_6_6")
-            IllusionLogger.warnMessage(
-                "[dxrmc] P128 mesh hlsl probe: bytes=${meshHlsl.length} dxc=${if (dxil == null) "FAILED" else "ok(" + dxil.size + ")"}")
         }
         return D3D12CompiledShader(vertexHlsl, fragmentHlsl, entries, vertexInputNames, semanticNames)
     }

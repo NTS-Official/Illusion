@@ -1,7 +1,7 @@
 package dev.nts.expdxr
 
-import dev.nts.expdxr.utils.IllusionLogLevel
-import dev.nts.expdxr.utils.IllusionLogger.i18n_LOG_KEY
+import dev.nts.expdxr.misc.IllusionLogLevel
+import dev.nts.expdxr.misc.IllusionLogger.i18n_LOG_KEY
 import net.neoforged.neoforge.common.ModConfigSpec
 
 /** `[renderer] commandBundles` — how one multi-draw batch is split across command bundles. */
@@ -85,6 +85,9 @@ object IllusionConfig {
     /** `[dlss] outputHandover` — the JVM owns DLSS's output texture. */
     val DLSS_OUTPUT_HANDOVER: ModConfigSpec.BooleanValue
 
+    /** `[dlss] reflexFrameLimitUs` — Reflex's own frame-rate limiter, microseconds per frame. */
+    val DLSS_REFLEX_FRAME_LIMIT_US: ModConfigSpec.IntValue
+
     /**
      * `[debug] pixCapture` — load Microsoft PIX's GPU capture layer at startup.
      *
@@ -125,6 +128,18 @@ object IllusionConfig {
 
     /** `[debug] noCrashPopup` — suppress the fatal-error dialog (automation). */
     val NO_CRASH_POPUP: ModConfigSpec.BooleanValue
+
+    /** `[debug] dumpHlsl` — write each translated HLSL pair into `dxrmc/hlsl/` for inspection. */
+    val DUMP_HLSL: ModConfigSpec.BooleanValue
+
+    /** `[mesh] terrain` — drive terrain through the mesh-shader path instead of indexed draws. */
+    val MESH_TERRAIN: ModConfigSpec.BooleanValue
+
+    /** `[mesh] terrainCull` — cull terrain meshlets with an amplification shader (P140). */
+    val MESH_TERRAIN_CULL: ModConfigSpec.BooleanValue
+
+    /** `[mesh] terrainCullBounds` — feed the cull shader a compute-built bounding-sphere table (P141). */
+    val MESH_TERRAIN_CULL_BOUNDS: ModConfigSpec.BooleanValue
 
     init {
         BUILDER.comment(
@@ -248,6 +263,59 @@ object IllusionConfig {
             .translation("dxr_mc.configuration.dlss.outputHandover")
             .define("outputHandover", true)
 
+        DLSS_REFLEX_FRAME_LIMIT_US = BUILDER
+            .comment(
+                "Hand Reflex its own frame-rate limiter, in microseconds per frame (0 = off).",
+                "144 fps is 6944; the limiter runs inside sl.reflex, so it stays accurate even when",
+                "the CPU is far ahead. Independent of the Reflex mode in the video settings."
+            )
+            .translation("dxr_mc.configuration.dlss.reflexFrameLimitUs")
+            .defineInRange("reflexFrameLimitUs", 0, 0, 100_000)
+
+        BUILDER.pop()
+
+        BUILDER.comment(
+            "Terrain mesh-shader path (the mesh pipeline experiment).",
+            "OFF keeps the indexed-draw path; ON lets the backend build the mesh PSO, fill the",
+            "segment table and dispatch, then compare the frame against the indexed path."
+        ).translation("dxr_mc.configuration.mesh").push("mesh")
+
+        MESH_TERRAIN = BUILDER
+            .comment(
+                "Drive the solid terrain pipeline through DispatchMesh instead of DrawIndexed.",
+                "Requires a device with mesh shaders (12_2 / tier 1); the log says which side of",
+                "the gate the run landed on. The indexed path stays live as the reference frame."
+            )
+            .translation("dxr_mc.configuration.mesh.terrain")
+            .define("terrain", false)
+
+        MESH_TERRAIN_CULL = BUILDER
+            .comment(
+                "Cull terrain meshlets in an amplification shader before the mesh shader runs (P140).",
+                "OFF: every meshlet is dispatched. ON: each amplification-shader thread tests one",
+                "meshlet against four side view-frustum planes and only surviving meshlets reach the",
+                "mesh shader. Needs [mesh] terrain = true; ignored when the device has no mesh tier.",
+                "The first version computes the per-meshlet bounding sphere inside the shader, so it",
+                "costs one extra pass over each meshlet's vertices."
+            )
+            .translation("dxr_mc.configuration.mesh.terrain_cull")
+            .define("terrainCull", false)
+
+        MESH_TERRAIN_CULL_BOUNDS = BUILDER
+            .comment(
+                "Let the amplification shader read per-meshlet bounding spheres from a table",
+                "instead of computing them (P141, experimental).",
+                "OFF: every amplification-shader thread walks its meshlet's vertices and builds",
+                "an AABB (boundsMode 1). ON: a compute dispatch right before the terrain pass",
+                "fills a sphere table and the shader only reads 16 B per meshlet (boundsMode 0).",
+                "Needs [mesh] terrainCull = true.",
+                "Default OFF on purpose: with the table in use (P141 continuation 4) large",
+                "batches flicker when the camera faces some directions - the table content is",
+                "not validated yet, so the shader-computed sphere stays the safe path."
+            )
+            .translation("dxr_mc.configuration.mesh.terrain_cull_bounds")
+            .define("terrainCullBounds", false)
+
         BUILDER.pop()
 
         BUILDER.comment(
@@ -286,6 +354,15 @@ object IllusionConfig {
             )
             .translation("dxr_mc.configuration.debug.profiling")
             .define("profiling", false)
+
+        DUMP_HLSL = BUILDER
+            .comment(
+                "Write every translated HLSL pair into `dxrmc/hlsl/` next to the game.",
+                "The translated shaders are the only view into what the SPIR-V cross-compiler emits,",
+                "so this is the switch to flip when a stage misbehaves. Capped at 60 pairs."
+            )
+            .translation("dxr_mc.configuration.debug.dumpHlsl")
+            .define("dumpHlsl", false)
 
         SKIP_GL_SWAP = BUILDER
             .comment(

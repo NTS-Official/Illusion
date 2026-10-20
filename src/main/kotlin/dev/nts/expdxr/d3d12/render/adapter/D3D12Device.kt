@@ -1,8 +1,9 @@
 package dev.nts.expdxr.d3d12.render.adapter
 
-import dev.nts.expdxr.utils.IllusionLogger
-
 import com.mojang.blaze3d.GpuFormat
+import java.lang.foreign.Arena
+import java.lang.foreign.MemorySegment
+import java.lang.foreign.ValueLayout
 import com.mojang.blaze3d.buffers.GpuBuffer
 import com.mojang.blaze3d.pipeline.ColorTargetState
 import com.mojang.blaze3d.pipeline.CompiledRenderPipeline
@@ -16,7 +17,9 @@ import com.mojang.blaze3d.systems.*
 import com.mojang.blaze3d.textures.*
 import com.mojang.blaze3d.vulkan.glsl.ShaderCompileException
 import dev.nts.expdxr.d3d12.backend.D3D12CommandEncoderBackend
+import dev.nts.expdxr.d3d12.extern.MCDRMeshPipelineDesc
 import dev.nts.expdxr.d3d12.render.advanced.mesh.D3D12MeshPipelineCache
+import dev.nts.expdxr.d3d12.render.advanced.mesh.D3D12MeshVertexDecode
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuQueryPool
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuSurface
 import dev.nts.expdxr.d3d12.render.core.D3D12AsyncContext
@@ -322,13 +325,204 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
                 return D3D12CompiledRenderPipeline(pipeline, 0L, vertexShader, fragmentShader, "", "")
             }
             LOGGER.info("[backend-java] {} COMPILE OK (handle={})", pipeName, handle)
-            return D3D12CompiledRenderPipeline(
+            val result = D3D12CompiledRenderPipeline(
                 pipeline, handle,
                 vertexShader, fragmentShader, compiled.vertexHlsl, compiled.fragmentHlsl
             )
+            // P130/P137（mesh Step 3 后半）：`-Pdxrmc.meshTerrain=1` 时顺便建 mesh 变体，
+            // 并把它挂到编译产物上 —— 段派发点（drawMultipleIndexed）就是从这里取的。
+            // P138/P141：接管 SOLID + CUTOUT + TRANSLUCENT 三类地形。
+            // TRANSLUCENT 以前被排除，理由是"mesh PSO 把 BlendEnable 硬编码成 FALSE" —— 这条
+            // 结论早就过期了：`createMeshPipelineImpl`（`MCDR\src\advanced\d3d12_mesh_base.cpp`
+            // 的 blend 段）逐槽读 `ct.blendEnabled`/`srcColor`/`dstColor`，JVM 侧
+            // `toColorTarget` 也会把 `ColorTargetState.blendFunction()` 抄进 desc，混合态是通的。
+            // back-to-front 也不需要 mesh 侧另做：段表按 draws 的原始顺序生成（每组记 firstIndex），
+            // 派发时 1024 组一批顺序下发，vanilla 排好的顺序原样保留。
+            if ((D3D12Settings.meshTerrain || System.getenv("MCDR_MESH_TERRAIN") == "1") &&
+                  (pipeName.contains("solid_terrain") || pipeName.contains("cutout_terrain") ||
+                      pipeName.contains("translucent_terrain"))) {
+                val variant = createMeshVariant(pipeline, compiled, flipY)
+                if (variant.pso != 0L) {
+                    result.attachMeshVariant(variant.pso, variant.vertexStride, variant.perSectionVisibility,
+                        variant.meshletCull)
+                    result.attachBoundsPipeline(variant.boundsPipeline)
+                    LOGGER.info("[dxrmc] P137 mesh variant for {}: pso={} stride={} perSectionVisibility={} " +
+                        "meshletCull={} boundsPso={}",
+                        pipeName, variant.pso, variant.vertexStride, variant.perSectionVisibility,
+                        variant.meshletCull, variant.boundsPipeline)
+                } else {
+                    LOGGER.warn("[dxrmc] P137 mesh variant for {} failed", pipeName)
+                }
+            }
+            return result
         } catch (e: ShaderCompileException) {
             LOGGER.error("[backend-java] {} COMPILE FAILED (compile): {}", pipeName, e.message)
             return D3D12CompiledRenderPipeline(pipeline, 0L, vertexShader, fragmentShader, "", "")
+        }
+    }
+
+    /** P138：mesh 变体的产物（`pso == 0` 表示建失败）。 */
+    private data class MeshVariantResult(val pso: Long, val vertexStride: Int,
+                                         val perSectionVisibility: Boolean, val meshletCull: Boolean,
+                                         val boundsPipeline: Long)
+
+    /**
+     * P130（mesh Step 3 后半）：为一条地形管线建 **mesh 变体**。
+     *
+     * <p>MS 由 `D3D12MeshVertexDecode` 把地形 VS 包成 `ms_main`（顶点从 ByteAddressBuffer 解码），
+     * PS 复用同一条管线的片段着色器；根签名 = 地形管线自己的绑定点布局 + mesh 尾参
+     * （b8 段表 / t14 顶点 / t15 索引），这样 draw 侧照旧推地形那套绑定，只多推三个尾参。
+     *
+     * <p>只做验证用：调用方（探针）拿到句柄即可，PSO 的所有权仍是设备，最终由
+     * `meshPipelineCache.releaseAll()` 释放 —— 这里先建一张 `TERRAIN_SOLID` 的缓存条目。
+     */
+    private fun createMeshVariant(pipeline: RenderPipeline, compiled: D3D12CompiledShader,
+                                  flipY: Boolean): MeshVariantResult {
+        val format = pipeline.vertexFormatBindings.firstOrNull() ?: return MeshVariantResult(0L, 0, false, false, 0L)
+        // P138：淡入系数（`ChunkVisibility`）改走 VS→PS 插值，PS 不再读逐 draw 的 CBV。
+        // 语义先在 VS 输出里挑一个空闲 TEXCOORD，再插进 PS 输入 —— 两边必须同一个。
+        val semantic = D3D12MeshVertexDecode.pickVisibilitySemantic(compiled.vertexHlsl)
+        // P140：AS 剔除。开关走配置（`[mesh] terrainCull`），环境变量只是逃生口。
+        var meshletCull = D3D12Settings.meshTerrainCull || System.getenv("MCDR_MESH_CULL") == "1"
+        val hlsl = D3D12MeshVertexDecode.buildMeshHlsl(compiled.vertexHlsl, format,
+            visibilitySemantic = semantic, meshletCull = meshletCull)
+        val msHlsl = hlsl
+        if (System.getenv("MCDR_MESH_DUMP_HLSL") == "1") {
+            runCatching {
+                val dir = java.nio.file.Path.of(System.getProperty("user.dir"), "dxrmc", "hlsl")
+                java.nio.file.Files.createDirectories(dir)
+                java.nio.file.Files.writeString(
+                    dir.resolve("cull_${pipeline.location.toString().replace('/', '_')}.hlsl"), msHlsl)
+            }
+        }
+        val msDxil = MCDR_ABI.D3D12CompileShaderDxc(msHlsl, "ms_main", "ms_6_6")
+        if (msDxil == null) {
+            // P135：dxc 失败时把生成的 HLSL 落盘，否则失败现场什么都不剩。
+            runCatching {
+                val dir = java.nio.file.Path.of(System.getProperty("user.dir"), "dxrmc", "hlsl")
+                java.nio.file.Files.createDirectories(dir)
+                java.nio.file.Files.writeString(dir.resolve("ms_failed.hlsl"), msHlsl)
+            }
+            LOGGER.warn("[dxrmc] P135 mesh HLSL 编译失败（{} 字节，已落盘 ms_failed.hlsl）：{}",
+                msHlsl.length, MCDR_ABI.D3D12LastError())
+            return MeshVariantResult(0L, 0, false, false, 0L)
+        }
+        // P140：AS 与 MS 是同一份 HLSL 的两个入口（as_main / ms_main），必须一起编出来。
+        var asDxil: ByteArray? = null
+        if (meshletCull) {
+            asDxil = MCDR_ABI.D3D12CompileShaderDxc(msHlsl, "as_main", "as_6_6")
+            if (asDxil == null) {
+                runCatching {
+                    val dir = java.nio.file.Path.of(System.getProperty("user.dir"), "dxrmc", "hlsl")
+                    java.nio.file.Files.createDirectories(dir)
+                    java.nio.file.Files.writeString(dir.resolve("as_failed.hlsl"), msHlsl)
+                }
+                LOGGER.warn("[dxrmc] P140 AS 编译失败，回退到不剔除的 mesh 路径（已落盘 as_failed.hlsl）：{}",
+                    MCDR_ABI.D3D12LastError())
+                meshletCull = false
+            }
+        }
+        // PS：优先用打过淡入补丁的版本；补丁失败就退回原版 PS，并让派发侧继续把
+        // 正在淡入的段交给 IMR 逐段画（P137b 的旧路径）。
+        var perSectionVisibility = false
+        var psDxil: ByteArray? = null
+        val patchedPs = semantic?.let { D3D12MeshVertexDecode.patchFragmentVisibility(compiled.fragmentHlsl, it) }
+        if (semantic == null) {
+            LOGGER.info("[dxrmc] P138 VS 输出的 TEXCOORD 已用满，淡入系数无法插值，保持 IMR 兜底")
+        } else if (patchedPs == null) {
+            LOGGER.info("[dxrmc] P138 PS 里找不到 ChunkVisibility，保持 IMR 兜底")
+        }
+        if (patchedPs != null) {
+            psDxil = MCDR_ABI.D3D12CompileShaderDxc(patchedPs, "main", "ps_6_0")
+            if (psDxil != null) {
+                perSectionVisibility = true
+            } else {
+                runCatching {
+                    val dir = java.nio.file.Path.of(System.getProperty("user.dir"), "dxrmc", "hlsl")
+                    java.nio.file.Files.createDirectories(dir)
+                    java.nio.file.Files.writeString(dir.resolve("ps_patched_failed.hlsl"), patchedPs)
+                }
+                LOGGER.warn("[dxrmc] P138 patched PS 编译失败，退回原版 PS：{}", MCDR_ABI.D3D12LastError())
+            }
+        }
+        if (psDxil == null) {
+            psDxil = MCDR_ABI.D3D12CompileShaderDxc(compiled.fragmentHlsl, "main", "ps_6_0")
+                ?: return MeshVariantResult(0L, 0, false, false, 0L)
+        }
+        val desc = MCDRMeshPipelineDesc().shaders(msDxil, asDxil, psDxil)
+        val targets = pipeline.colorTargetStates
+        for (index in targets.indices) {
+            val target = targets[index] ?: continue
+            desc.addColorTarget(toColorTarget(target))
+        }
+        val depth = pipeline.depthStencilState
+        if (depth != null) {
+            desc.depth(GpuFormat.D32_FLOAT.ordinal, depth.writeDepth(), depth.depthTest().ordinal)
+        }
+        var cull = pipeline.isCull
+        if (flipY || pipeline.location.toString().contains("animate_sprite")) {
+            cull = false
+        }
+        desc.topology(cull, pipeline.polygonMode.ordinal)
+        val bindings = compiled.entries.mapIndexed { index, entry ->
+            val type = when (entry.type) {
+                D3D12BindGroupEntry.Type.UNIFORM_BUFFER -> 0
+                D3D12BindGroupEntry.Type.SAMPLED_IMAGE -> 1
+                D3D12BindGroupEntry.Type.TEXEL_BUFFER -> 2
+                else -> 0
+            }
+            type to index
+        }
+        val signature = MCDR_ABI.D3D12CreateMeshRootSignature(bindings, 1, if (meshletCull) 1 else 0)
+        if (signature == 0L) {
+            LOGGER.error("[dxrmc] P130 mesh variant for {}: createMeshRootSignature returned 0", pipeline.location)
+            return MeshVariantResult(0L, 0, false, false, 0L)
+        }
+        val handle = try {
+            MCDR_ABI.D3D12CreateMeshPipelineWithRootSignature(desc, signature)
+        } finally {
+            MCDR_ABI.D3D12ReleaseRootSignature(signature)
+        }
+        // P141：meshlet 包围球改由 compute pass 生成（AS 里直接读顶点算 AABB 会成片多剔）。
+        // 建不出来就退回"AS 自算 + 段级包围球"的旧形态，不阻塞 mesh 路径。
+        var boundsPipeline = 0L
+        if (meshletCull && handle != 0L) {
+            boundsPipeline = createBoundsPipeline(format.vertexSize, pipeline.location.toString())
+            if (boundsPipeline == 0L) {
+                LOGGER.warn("[dxrmc] P141 bounds pipeline 建不出来，meshlet 剔除退回段级包围球")
+                meshletCull = false
+            }
+        }
+        return MeshVariantResult(handle, format.vertexSize, perSectionVisibility, meshletCull, boundsPipeline)
+    }
+
+    /**
+     * P141：建 meshlet 包围球的 compute 管线（根签名 + `cs_6_0` PSO）。
+     *
+     * <p>`0` 表示失败 —— 调用方据此退回"不剔除"的段级路径（[MeshVariantResult.meshletCull] 仍为 true
+     * 会缺少包围球表，所以调用点必须一起看这个句柄）。
+     */
+    private fun createBoundsPipeline(vertexStride: Int, label: String): Long {
+        val hlsl = D3D12MeshVertexDecode.buildBoundsHlsl(vertexStride)
+        val cs = MCDR_ABI.D3D12CompileShaderDxc(hlsl, "bounds_main", "cs_6_0")
+        if (cs == null) {
+            LOGGER.warn("[dxrmc] P141 bounds CS 编译失败（{}）：{}", label, MCDR_ABI.D3D12LastError())
+            return 0L
+        }
+        val signature = MCDR_ABI.D3D12CreateMeshBoundsRootSignature()
+        if (signature == 0L) {
+            LOGGER.warn("[dxrmc] P141 bounds 根签名创建失败（{}）：{}", label, MCDR_ABI.D3D12LastError())
+            return 0L
+        }
+        return try {
+            Arena.ofConfined().use { arena ->
+                val bytes = arena.allocate(cs.size.toLong())
+                MemorySegment.copy(cs, 0, bytes, ValueLayout.JAVA_BYTE, 0, cs.size)
+                MCDR_ABI.D3D12CreateMeshBoundsPipeline(bytes, cs.size, signature)
+            }
+        } finally {
+            // PSO 自己持有签名引用（native 侧 Dx12Pipeline::rootSignature 是 ComPtr），可以立刻放。
+            MCDR_ABI.D3D12ReleaseRootSignature(signature)
         }
     }
 

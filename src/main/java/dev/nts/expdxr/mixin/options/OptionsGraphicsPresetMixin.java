@@ -15,6 +15,11 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * is DXRMC's own video setting, so it is mapped here right after the preset has done its work:
  * fast = off, fancy = SMAA, fabulous = TAA, custom = left alone (that is the player's own mix).
  *
+ * <p>The two gates live in {@code D3D12AntiAliasing.applyFromPreset} rather than here, so there is
+ * exactly one place that decides: the option is only touched while the game really renders through
+ * the D3D12 backend ({@code D3D12AdapterInfo.current != null} - under GL/Vulkan the option is a
+ * greyed-out no-op and a preset must not rewrite it), and never while DLSS has it pinned to OFF.
+ *
  * <p>The injection sits after the {@code GraphicsPreset.apply} call and before
  * {@code isApplyingGraphicsPreset} is cleared, so writing the anti-aliasing options is not mistaken
  * for a manual change that would immediately bounce the freshly picked preset back to "custom".

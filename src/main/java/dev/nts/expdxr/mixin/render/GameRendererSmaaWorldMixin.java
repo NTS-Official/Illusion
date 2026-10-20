@@ -3,7 +3,7 @@ package dev.nts.expdxr.mixin.render;
 import dev.nts.expdxr.d3d12.render.advanced.smaa.D3D12GUISplit;
 import dev.nts.expdxr.d3d12.render.advanced.smaa.D3D12SMAAWorld;
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12TAA;
-import dev.nts.expdxr.dxrmc.dlss.DeepLearningSuperSampling;
+import dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.renderer.GameRenderer;
 import org.spongepowered.asm.mixin.Mixin;

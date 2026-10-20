@@ -6,7 +6,7 @@ import dev.nts.expdxr.d3d12.D3D12Settings
 import dev.nts.expdxr.d3d12.backend.D3D12GraphicsApi
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.adapter.D3D12AdapterInfo
-import dev.nts.expdxr.utils.IllusionLogger
+import dev.nts.expdxr.misc.IllusionLogger
 import net.neoforged.bus.api.IEventBus
 import net.neoforged.fml.ModContainer
 import net.neoforged.fml.common.Mod

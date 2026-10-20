@@ -2,7 +2,7 @@ package dev.nts.expdxr.d3d12.render.advanced.vrs
 
 import com.mojang.serialization.Codec
 import dev.nts.expdxr.Illusion
-import dev.nts.expdxr.options.D3D12VRSEnumSettings
+import dev.nts.expdxr.misc.D3D12VRSEnumSettings
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.adapter.D3D12AdapterInfo
 import java.io.File

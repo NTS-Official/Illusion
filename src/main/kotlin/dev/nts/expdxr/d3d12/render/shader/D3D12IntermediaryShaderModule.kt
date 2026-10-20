@@ -1,7 +1,5 @@
 package dev.nts.expdxr.d3d12.render.shader
 
-import dev.nts.expdxr.utils.IllusionLogger
-
 import com.mojang.blaze3d.vulkan.glsl.ShaderCompileException
 import dev.nts.expdxr.d3d12.backend.D3D12BindGroupEntry
 import java.nio.ByteBuffer

@@ -43,6 +43,24 @@ object D3D12TerrainBatchClassifier {
         TERRAIN_MESH_CANDIDATE,
     }
 
+    /**
+     * P133（Step 3 后半第一步：段表取证）：一个 draw 对应的 mesh 段。
+     * `firstIndex/indexCount/baseVertex` 正是 MS 里 `cbuffer SegmentTable` 的三个字段；
+     * `slot` 是顶点缓冲槽位（槽位不同意味着这一批不能只绑一个 VB）。
+     */
+    data class Segment(val firstIndex: Int, val indexCount: Int, val baseVertex: Int, val slot: Int)
+
+    /** 整批的段表候选：一次性 DispatchMesh(groups = [count]) 的输入。 */
+    data class SegmentPlan(
+        val count: Int,
+        val slots: Int,
+        val vertexBuffers: Int,
+        val indexBuffers: Int,
+        val uploaders: Int,
+        val indexCountTotal: Long,
+        val first: List<Segment>,
+    )
+
     private var logged: Int = 0
     private val seenLocations = HashSet<String>(4)
     private var maxDrawsSeen: Int = 0
@@ -51,6 +69,10 @@ object D3D12TerrainBatchClassifier {
     private var candidateBatches: Long = 0
     private var candidateDraws: Long = 0
     private var candidateIndices: Long = 0
+
+    private var plansBuilt: Long = 0
+    private var planSegments: Long = 0
+    private var planLogged: Int = 0
 
     fun isTerrain(location: String): Boolean = location.contains("terrain")
 
@@ -91,6 +113,48 @@ object D3D12TerrainBatchClassifier {
     fun summary(): String =
         "mesh precheck: terrainBatches=$terrainBatches candidates=$candidateBatches maxDraws=$maxDrawsSeen maxIndices=$maxIndicesSeen " +
             "candidateDraws=$candidateDraws candidateIndices=$candidateIndices"
+
+    /**
+     * 从一个批次的 draw 列表摊出段表（只读，不分配 GPU 资源）。
+     * 只在 [Verdict.TERRAIN_MESH_CANDIDATE] 时调用 —— 其它批次没有接管价值。
+     */
+    fun <T : Any> segments(draws: List<RenderPass.Draw<T>>): SegmentPlan {
+        val slots = HashSet<Int>(4)
+        // P133 续：单次 DispatchMesh 要求整批共用一个 VB/IB —— 这里把"整批到底是几个 buffer"
+        // 量出来（identityHashCode 即可，不需要真的持有引用）。
+        val vertexBuffers = HashSet<Int>(4)
+        val indexBuffers = HashSet<Int>(4)
+        val uploaders = HashSet<Int>(4)
+        val list = ArrayList<Segment>(draws.size)
+        var total = 0L
+        for (draw in draws) {
+            slots.add(draw.slot())
+            vertexBuffers.add(System.identityHashCode(draw.vertexBuffer()))
+            indexBuffers.add(System.identityHashCode(draw.indexBuffer()))
+            uploaders.add(System.identityHashCode(draw.uniformUploaderConsumer()))
+            total += draw.indexCount()
+            list.add(Segment(draw.firstIndex(), draw.indexCount(), draw.baseVertex(), draw.slot()))
+        }
+        plansBuilt++
+        planSegments += list.size
+        return SegmentPlan(list.size, slots.size, vertexBuffers.size, indexBuffers.size,
+            uploaders.size, total, list)
+    }
+
+    /** 记录段表规模：前 2 次与每 512 次打一行，附带前 3 段的具体数值。 */
+    fun noteSegments(location: String, plan: SegmentPlan) {
+        if (planLogged < 2 || plansBuilt % 512L == 0L) {
+            planLogged++
+            val head = plan.first.take(3).joinToString(", ") {
+                "(fi=${it.firstIndex},n=${it.indexCount},bv=${it.baseVertex},slot=${it.slot})"
+            }
+            LOGGER.info(
+                "[dxrmc] P133 segment plan: {} segments={} slots={} vb#={} ib#={} uploaders={} indices={} first=[{}] | plans={} segmentsTotal={}",
+                location, plan.count, plan.slots, plan.vertexBuffers, plan.indexBuffers, plan.uploaders,
+                plan.indexCountTotal, head, plansBuilt, planSegments,
+            )
+        }
+    }
 
     /**
      * 从 vanilla 的 draw 列表摊平出 [BatchInfo]。`draws` 已由调用方 materialize，

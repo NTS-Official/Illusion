@@ -1,6 +1,6 @@
 package dev.nts.expdxr.mixin.render;
 
-import dev.nts.expdxr.dxrmc.dlss.DeepLearningSuperSampling;
+import dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling;
 import net.minecraft.client.renderer.DebugCrosshairRenderer;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import org.spongepowered.asm.mixin.Mixin;

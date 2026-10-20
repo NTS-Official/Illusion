@@ -10,6 +10,7 @@ import net.minecraft.client.OptionInstance
 import net.minecraft.client.Minecraft
 import net.minecraft.client.Options
 import net.minecraft.client.gui.components.Tooltip
+import net.minecraft.client.gui.screens.options.OptionsSubScreen
 import net.minecraft.network.chat.Component
 
 /**
@@ -85,7 +86,7 @@ object D3D12AntiAliasing {
     // ------------------------------------------------------------------
 
     /**
-     * DLSS 是否正占着这个选项（由 [dev.nts.expdxr.dxrmc.dlss.DeepLearningSuperSampling] 推过来）。
+     * DLSS 是否正占着这个选项（由 [dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling] 推过来）。
      *
      * 这里**故意不 import** DLSS：依赖只能单向。DLSS 打开时把 AA 锁成 [OFF]，本类据此
      * ①拒掉预设/回推对取值的改写、②让界面把按钮置灰。
@@ -168,10 +169,18 @@ object D3D12AntiAliasing {
      * 画质预设 -> 抗锯齿：流畅(fast)=关、高品质(fancy)=SMAA、极佳(fabulous)=TAA，自定义不动。
      * 由 [dev.nts.expdxr.mixin.options.OptionsGraphicsPresetMixin] 在 GraphicsPreset.apply 之后调用。
      *
-     * DLSS 锁定期内整个跳过：切画质预设不能把被锁住的选项改回去。
+     * 两条判据都写在这里，调用方不需要再猜：
+     * 1. **只有真的在 D3D12 后端下渲染时才动**（[isAvailable]，也就是
+     *    `D3D12AdapterInfo.current != null`）。走 GL/Vulkan 时这一项在原版界面里只是个置灰的
+     *    摆设，此时改它会顺手改掉 `options.txt` 里的取值 —— 下次切回 D3D12 就变成"预设替玩家
+     *    做了决定"。所以后端不对就一个字节都不碰。
+     * 2. DLSS 锁定期内整个跳过：切画质预设不能把被锁住的选项改回去。
      */
     @JvmStatic
     fun applyFromPreset(serializedName: String) {
+        if (!isAvailable()) {
+            return
+        }
         if (dlssLock) {
             return
         }
@@ -181,11 +190,29 @@ object D3D12AntiAliasing {
             "fabulous" -> TAA
             else -> return
         }
-        suppressPresetCustom = true
-        try {
-            OPTION.set(mode)
-        } finally {
-            suppressPresetCustom = false
+        setModeQuietly(mode)
+        // 换值不会自己刷新界面上的按钮，见 [refreshScreenWidget]。
+        refreshScreenWidget()
+    }
+
+    /**
+     * 让视频设置界面上的那个循环按钮重新读一次当前取值。
+     *
+     * [OptionInstance.set] 只改值、只回调 `onValueUpdate`，**不碰** `OptionsList` 里的 widget：
+     * 每个选项按钮是一个 `CycleButton`，自己缓存着 `value` / `index`，只有
+     * `ResettableOptionWidget.resetValue()`（`OptionsList.resetOption` 转调它）才会重新读
+     * `OptionInstance.get()` 并重画标签。vanilla 的 `GraphicsPreset.set` 对它清单里的原版选项
+     * 逐个调了 `screen.resetOption(...)`，抗锯齿不在那份清单里，所以必须自己补 —— 否则切完预设，
+     * 按钮还停在旧档位（看起来就是"预设没应用到抗锯齿"），玩家接着点它还会从旧的缓存档位继续循环。
+     */
+    private fun refreshScreenWidget() {
+        // `gui` 在窗口/界面还没建好时可能是 null（原版 GraphicsPreset.apply 也先判空），
+        // 而预设只会在视频设置界面里被改 —— 用 runCatching 兜住，和 [markPresetCustom] 一致。
+        runCatching {
+            val screen = Minecraft.getInstance().gui.screen()
+            if (screen is OptionsSubScreen) {
+                screen.resetOption(OPTION)
+            }
         }
     }
 
@@ -213,21 +240,22 @@ object D3D12AntiAliasing {
      * P104: hands the selected mode to the native renderer.
      *
      * The native layer keeps the mode in its device context and re-issues the SMAA passes on every
-     * blit, so this needs neither a device nor a restart. A missing export means the loaded
-     * `MCDR.dll` predates this feature; that is reported once per call and otherwise ignored.
+     * blit (TAA keeps its own history there and is resolved by `mcdr_dx12ApplyTaaToTexture`), so
+     * this needs neither a device nor a restart. A missing export means the loaded `MCDR.dll`
+     * predates this feature; that is reported once per call and otherwise ignored.
      */
     private fun push(mode: Int) {
         // DLSS 锁定期内这是**回推 native** 的路径，不是"玩家改了设置"的路径：必须仍然下发，
         // 否则 native 的设备上下文会停在旧模式上（尤其关掉 DLSS、还原玩家选择的这一次）。
         // 玩家能不能改由界面置灰 + [validateLocked] 负责。
         //
-        // P108aa（用户 m11796）：**DLAA 由 DLSS 特性实现，不走 SMAA 通道** —— native 的
-        // `mcdrSetAntiAliasing` 只实现 SMAA，把 3 传下去会被降级成 OFF 并 WARN。所以这里把
-        // DLAA 映射成 OFF 再下发；真正的 DLAA 由 `DeepLearningSuperSampling` 那条链路
+        // P108aa（用户 m11796）：**DLAA 由 DLSS 特性实现，不走抗锯齿通道** —— native 的
+        // `mcdrSetAntiAliasing` 里 3 没有实现（接受但降级成 OFF 并 WARN）。所以这里把 DLAA
+        // 映射成 OFF 再下发；真正的 DLAA 由 `DeepLearningSuperSampling` 那条链路
         //（render == target + 挡位 3 + handover）接管，它每帧从 [current] 读到这个 3。
         val pushed = if (mode == DLAA) OFF else mode
         // 返回值契约（`d3d12_mc::setAntiAliasing`）：成功时**返回生效的模式本身**（0=OFF 也合法），
-        // 2/3（TAA/DLAA）会被降级成 OFF 并返回 0，非法值返回 -1。所以"0"必须按模式区分 ——
+        // 3（DLAA）会被降级成 OFF 并返回 0，非法值返回 -1。所以"0"必须按模式区分 ——
         // 对 OFF 而言 0 就是成功（旧代码会误报 "OFF is not implemented yet"）。
         val status = MCDR_ABI.D3D12SetAntiAliasing(pushed)
         when {

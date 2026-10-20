@@ -5,7 +5,7 @@ import com.mojang.blaze3d.buffers.GpuBufferSlice
 import dev.nts.expdxr.d3d12.D3D12Settings
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuBuffer
-import dev.nts.expdxr.dxrmc.dlss.DeepLearningSuperSampling
+import dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling
 import net.minecraft.client.Minecraft
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
@@ -107,7 +107,7 @@ object D3D12Temporal {
      *
      * TAA 的历史取样用它把本像素换回"上一帧的抖动位置"；速度场输出的是**抖动空间**位移
      * （`D3D12Velocity` 的 `currViewProj` 带 jitter、着色器再加 `PrevJitterPixels`），所以
-     * 取样时不需要再减一次 —— 见 `D3D12Taa` 的 `historyUv`。
+     * 取样时不需要再减一次 —— 见 native TAA 的 `kTaaPS`（`d3d12_device.cpp` 的 `historyUv`）。
      */
     val currentJitterX: Double
         get() = jitterX

@@ -5,12 +5,12 @@ import com.mojang.blaze3d.buffers.GpuBufferSlice
 import com.mojang.blaze3d.buffers.GpuFence
 import com.mojang.blaze3d.systems.*
 import com.mojang.blaze3d.textures.GpuTexture
-import dev.nts.expdxr.utils.IllusionLogger
+import dev.nts.expdxr.misc.IllusionLogger
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.adapter.D3D12Device
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12TAA
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12Temporal
-import dev.nts.expdxr.d3d12.render.advanced.D3D12Sharpen
+import dev.nts.expdxr.d3d12.render.advanced.D3D12PostSharpen
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12Velocity
 import dev.nts.expdxr.d3d12.render.core.*
 import org.joml.Vector4fc
@@ -205,6 +205,11 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
         // 挂在这里 —— vanilla 把物体变换烘进顶点，MRT 路线拿不到逐物体运动。速度改成在帧末
         // （blit 之前）由一条**独立的全屏 pass** 从主深度重投影出来，见
         // [D3D12Velocity.record] 与 [recordVelocityPass]。
+        // P141 续四：mesh 包围球 pre-pass 必须在这里跑 —— compute dispatch 不允许出现在
+        // render pass 内部（D3D12 硬限制）。此前这行在 D3D12BeginRenderPass **之后**，
+        // 于是 Dispatch 落进已开的 pass，设备照样被移除 0x887A0005，白查了一天。
+        // 排队的是上一帧记录的段表；包围球是对象空间的，延迟一帧不影响正确性。
+        D3D12MeshBoundsService.flush(this.ctx)
         MCDR_ABI.D3D12BeginRenderPass(this.ctx, colorTextures, colorMips,
             colorClearFlags, clearColors, depthTexture, depthMip,
             depthClearFlag, depthClearValue, x, y, w, h)
@@ -232,6 +237,7 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
         val pass = D3D12RenderPassBackend(
             this.device, this.ctx,
             area, w, h, hasDepth, if (colorCount > 0) colorTextures[0] else 0L, flipY,
+            this.transientMemory,
         )
         this.currentRenderPass = pass
         return pass
@@ -260,11 +266,11 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
      * 调用方应回退到普通 blit。
      */
     fun recordSharpen(src: Long, dst: Long): Boolean {
-        if (!D3D12Sharpen.isEnabled()) {
+        if (!D3D12PostSharpen.isEnabled()) {
             return false
         }
         this.ensureListOpen()
-        return D3D12Sharpen.record(this.ctx, src, dst)
+        return D3D12PostSharpen.record(this.ctx, src, dst)
     }
 
     /**
@@ -282,7 +288,9 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
     }
 
     /**
-     * P77：把 **TAA 的 resolve + 回填** 录进当前命令列表（世界画完、GUI 还没画的那一刻）。
+     * P77/P152：把本帧的 **TAA resolve** 交给 native（历史乒乓与两趟 pass 都在
+     * `MCDR\src\core\d3d12_device.cpp` 的 `applyTaaToTexture` 里）。调用点是世界画完、GUI 还没画的
+     * 那一刻。
      *
      * 与 [recordSmaaWorldPass] 同一性质、同一挂点，两者互斥（TAA 与 SMAA 是同一个抗锯齿选项
      * 的两个取值）：往本帧已经打开的那条命令列表里追加命令，不新建也不提交。是否真的做由
@@ -484,11 +492,13 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
 
     override fun createFence(): GpuFence {
         // 官方 VulkanCommandEncoder.createFence()：捕获当前 submit index，fence
-        // 在该 encoder 的下一次提交完成后完成。官方 createCommandEncoder() 返回
-        // 共享 encoder，因此一次性 encoder 上创建的 fence token（queueFencedTask /
-        // StagedVertexBuffer endFrame / MappableRingBuffer rotate）也随下一次提交
-        // 完成。D3D12 侧用设备级队列 fence 复现该语义：目标 = 当前 queueFenceValue
-        // + 1，任何 ctx 的下一次 submit 都会推进它（见 dx12WaitForFence）。
+        // 在该 encoder 的下一次提交完成后完成。D3D12 侧用**本 encoder 自己的**
+        // per-command-list fence 复现：token = 当前序号 + 1，只有这个 encoder 的
+        // 下一次 submit（native submitCommandList 里的 ++ctx->fenceValue）推进它。
+        // 不要退回设备级 queueFenceValue：一次性 encoder（createBuffer(data) 的上传）
+        // 提交时也会推进全局序列，而 vanilla 的 StagedVertexBuffer endFrame /
+        // MappableRingBuffer rotate 是在帧中间取 token 的，全局序列会让这些 token
+        // 在帧提交之前就完成、buffer 被提前回收（BUG-03）。
         val fenceValue = MCDR_ABI.D3D12GetFenceValue(this.ctx)
         val target = fenceValue + 1
         return object : GpuFence {
@@ -520,7 +530,7 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
         // P33 async：独立渲染线程流水线
         //
         // 流程：
-        //   1. 记录当前 queue fence 值（= 上一帧的 submitQueueFence）
+        //   1. 记录提交前的 per-ctx fence 值（诊断用，见下方 fenceBefore）
         //   2. 请求渲染线程开始新帧（通知它主线程已录制完毕）
         //   3. 等待渲染线程发 RECORDING_READY
         //   4. 主线程继续录制命令（render pass / clear / copy / core）
@@ -542,8 +552,20 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
         // P15 诊断：记录提交前的 fence 值
         val fenceBefore = MCDR_ABI.D3D12GetFenceValue(this.ctx)
 
-        // 步骤 2：请求渲染线程开始新帧
-        val asyncStarted = MCDR_ABI.D3D12AsyncRenderBeginFrame(this.ctx)
+        // 步骤 2：请求渲染线程开始新帧。
+        //
+        // 只有帧 encoder（device != null，即 D3D12Device.createCommandEncoder() 返回的共享
+        // encoder）允许进入异步帧管线。native 的 asyncRenderBeginFrame 接受任意 ctx，一次性
+        // encoder（device == null：D3D12Device.createBuffer(data) 内部为上传临时新建的那个，
+        // 以及 D3D12Backend 的自测 encoder）一旦走进来就会劫持整帧——渲染线程替它
+        // Close+Execute+Signal、把 gAsyncOwnsPresent 置 true 并调用 presentSurface；若这次
+        // 临时提交落在世界 blit 之后、本帧提交之前，就会提前 Present（闪旧画面/双 Present）。
+        // 它还会把 frame encoder 的 fence token（createFence 捕获的 ++value）连同整帧
+        // 提交一起推走，StagedVertexBuffer / MappableRingBuffer 的回收时机随之错位。
+        // （token 本身已改成 per-ctx，见 createFence；这里仍不放过一次性 encoder，
+        // 因为它连异步帧状态机都不该碰。）
+        // 一次性 encoder 一律走下面的同步路径：提交立即完成、不碰 gAsyncRenderCtx。
+        val asyncStarted = this.device != null && MCDR_ABI.D3D12AsyncRenderBeginFrame(this.ctx)
         if (!asyncStarted) {
             // 无 active surface（初始化阶段或窗口未创建），回退到同步路径
             // 同步路径：确保命令列表已打开（幂等：已打开则跳过 Reset），录制命令、提交

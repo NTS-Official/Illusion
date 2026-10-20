@@ -1,7 +1,7 @@
 package dev.nts.expdxr.mixin.render;
 
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12TAA;
-import dev.nts.expdxr.dxrmc.dlss.DeepLearningSuperSampling;
+import dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling;
 import net.minecraft.client.renderer.LevelRenderer;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;

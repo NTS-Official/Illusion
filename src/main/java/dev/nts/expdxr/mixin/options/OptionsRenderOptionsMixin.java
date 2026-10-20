@@ -2,8 +2,8 @@ package dev.nts.expdxr.mixin.options;
 
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale;
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12VariableShadingRate;
-import dev.nts.expdxr.dxrmc.dlss.DeepLearningSuperSampling;
-import dev.nts.expdxr.dxrmc.reflex.NvidiaReflex;
+import dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling;
+import dev.nts.expdxr.dxrmc.nvidia.reflex.NvidiaReflex;
 import net.minecraft.client.Options;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;

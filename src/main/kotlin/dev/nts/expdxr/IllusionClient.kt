@@ -3,7 +3,7 @@ package dev.nts.expdxr
 import dev.nts.expdxr.Illusion.Companion.MODID
 import dev.nts.expdxr.Illusion.Companion.MOD_NAME
 import dev.nts.expdxr.d3d12.debug.D3D12ExitWatchdog
-import dev.nts.expdxr.utils.IllusionLogger
+import dev.nts.expdxr.misc.IllusionLogger
 import net.neoforged.api.distmarker.Dist
 import net.neoforged.fml.ModContainer
 import net.neoforged.fml.common.Mod

@@ -16,7 +16,7 @@ import com.mojang.blaze3d.textures.GpuSampler
 import com.mojang.blaze3d.textures.GpuTexture
 import dev.nts.expdxr.Illusion.Companion.NATIVE_NAME
 import dev.nts.expdxr.MeshDiagnostics
-import dev.nts.expdxr.utils.IllusionLogger
+import dev.nts.expdxr.misc.IllusionLogger
 import dev.nts.expdxr.d3d12.D3D12Settings
 import dev.nts.expdxr.d3d12.debug.D3D12Fatal
 import dev.nts.expdxr.d3d12.extern.MCDRMeshPipelineDesc
@@ -557,11 +557,19 @@ class D3D12Backend : GpuBackend {
                 .topology(false, 0)                  // 关闭剔除、polygonMode 0 = fill
                 .addColorTarget(colorTarget)         // 无 CBV/SRV 绑定，因此不调 addBinding
 
+            // P129：自检同时覆盖「外部根签名」路径 —— 签名带 mesh 尾参
+            // （b8 段表 + t14/t15 顶点/索引表），PSO 用这份签名建。
+            // 自检 MS 不读任何绑定，所以只要签名与 PSO 结构合法就应当出像素。
+            val meshRootSig = MCDR_ABI.D3D12CreateMeshRootSignature(null, 0, 1)
+            if (meshRootSig == 0L) {
+                throw IllegalStateException("mesh self-test: dx12CreateMeshRootSignature returned 0: "
+                    + MCDR_ABI.D3D12LastError())
+            }
             var pipeline = 0L
             var texture = 0L
             var ctx = 0L
             try {
-                pipeline = MCDR_ABI.D3D12CreateMeshPipeline(desc)
+                pipeline = MCDR_ABI.D3D12CreateMeshPipelineWithRootSignature(desc, meshRootSig)
                 if (pipeline == 0L) {
                     throw IllegalStateException("mesh self-test: dx12CreateMeshPipeline returned 0: "
                         + MCDR_ABI.D3D12LastError())
@@ -675,6 +683,7 @@ class D3D12Backend : GpuBackend {
                 if (ctx != 0L) MCDR_ABI.D3D12DestroyCommandEncoder(ctx)
                 if (texture != 0L) MCDR_ABI.ID3D12DestroyResource(texture)
                 if (pipeline != 0L) MCDR_ABI.D3D12DestroyPipeline(pipeline)
+                MCDR_ABI.D3D12ReleaseRootSignature(meshRootSig)
             }
         }
 

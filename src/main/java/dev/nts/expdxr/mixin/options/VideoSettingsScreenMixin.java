@@ -4,8 +4,8 @@ import com.llamalad7.mixinextras.injector.ModifyReturnValue;
 import dev.nts.expdxr.d3d12.render.advanced.D3D12AntiAliasing;
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale;
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12VariableShadingRate;
-import dev.nts.expdxr.dxrmc.dlss.DeepLearningSuperSampling;
-import dev.nts.expdxr.dxrmc.reflex.NvidiaReflex;
+import dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling;
+import dev.nts.expdxr.dxrmc.nvidia.reflex.NvidiaReflex;
 import java.util.Arrays;
 
 import net.minecraft.client.OptionInstance;
@@ -56,6 +56,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(VideoSettingsScreen.class)
 public abstract class VideoSettingsScreenMixin {
     @Unique private int dxr_mc$renderScaleSynced = Integer.MIN_VALUE;
+    @Unique private int dxr_mc$antiAliasingSynced = Integer.MIN_VALUE;
 
     @ModifyReturnValue(method = "qualityOptions", at = @At("RETURN"))
     private static OptionInstance<?>[] dxr_mc$addAntiAliasing(OptionInstance<?>[] vanilla) {
@@ -97,6 +98,16 @@ public abstract class VideoSettingsScreenMixin {
             dxr_mc$renderScaleSynced = scaleGeneration;
             list.resetOption(D3D12RenderScale.option());
             D3D12RenderScale.logSliderResync();
+        }
+
+        // Same for anti-aliasing: the graphics preset, the DLSS lock and the restore-from-
+        // options.txt path all write the value through OptionInstance.set, which only fires the
+        // value listener - the CycleButton caches its own label until somebody calls resetOption.
+        // Vanilla's GraphicsPreset.set does that for the options it knows; ours is not one of them.
+        int aaMode = D3D12AntiAliasing.current();
+        if (aaMode != dxr_mc$antiAliasingSynced) {
+            dxr_mc$antiAliasingSynced = aaMode;
+            list.resetOption(D3D12AntiAliasing.option());
         }
 
         dxr_mc$setButtonActive(list, D3D12AntiAliasing.option(),

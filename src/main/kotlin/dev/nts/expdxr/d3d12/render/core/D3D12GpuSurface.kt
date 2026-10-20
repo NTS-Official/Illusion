@@ -1,12 +1,13 @@
 package dev.nts.expdxr.d3d12.render.core
 
-import dev.nts.expdxr.utils.IllusionLogger
+import dev.nts.expdxr.misc.IllusionLogger
 
 import com.mojang.blaze3d.systems.CommandEncoderBackend
 import com.mojang.blaze3d.systems.GpuSurface
 import com.mojang.blaze3d.systems.GpuSurfaceBackend
 import com.mojang.blaze3d.systems.SurfaceException
 import com.mojang.blaze3d.textures.GpuTextureView
+import dev.nts.expdxr.d3d12.render.D3D12FrameStats
 import dev.nts.expdxr.d3d12.render.adapter.D3D12RenderProf
 import dev.nts.expdxr.d3d12.render.advanced.smaa.D3D12GUISplit
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12Temporal
@@ -163,6 +164,8 @@ class D3D12GpuSurface(hwnd: Long) : GpuSurfaceBackend {
         D3D12RenderProf.begin(D3D12RenderProf.PRESENT)
         MCDR_ABI.D3D12PresentSurface(handle)
         D3D12RenderProf.end(D3D12RenderProf.PRESENT)
+        // F3 的 output 计数：这里是"真正提交给交换链"的那一行（帧生成接上后生成帧也得经过它）。
+        D3D12FrameStats.onFramePresented()
     }
 
     override fun supportedPresentModes(): Collection<GpuSurface.PresentMode> {

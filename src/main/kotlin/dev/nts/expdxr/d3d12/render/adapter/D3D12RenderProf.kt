@@ -1,6 +1,6 @@
 package dev.nts.expdxr.d3d12.render.adapter
 
-import dev.nts.expdxr.utils.IllusionLogger
+import dev.nts.expdxr.misc.IllusionLogger
 
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.shader.D3D12StackSampler
