@@ -45,6 +45,13 @@
   "dxr_mc.configuration.dlss.implementation.STREAMLINE": "Streamline",
   "dxr_mc.configuration.dlss.outputHandover": "Output Handover",
   "dxr_mc.configuration.dlss.outputHandover.tooltip": "ON (default) hands a JVM-created UAV texture to native as the DLSS output target - the shipped path. OFF makes native use its own private texture instead, which cannot be written on some machines (troubleshooting only).",
+  "dxr_mc.configuration.dlss.reflexFrameLimitUs": "Reflex Frame Limit (microseconds)",
+  "dxr_mc.configuration.dlss.reflexFrameLimitUs.tooltip": "Reflex limits the frame rate itself, in microseconds per frame (0 = off, 144 fps = 6944). It stays accurate even when the CPU is far ahead of the GPU.",
+  "dxr_mc.configuration.mesh": "Mesh Shaders",
+  "dxr_mc.configuration.mesh.button": "Edit",
+  "dxr_mc.configuration.mesh.tooltip": "The terrain mesh-shader path (DispatchMesh instead of DrawIndexed).",
+  "dxr_mc.configuration.mesh.terrain": "Terrain Mesh Path",
+  "dxr_mc.configuration.mesh.terrain.tooltip": "Drive the solid terrain pipeline through DispatchMesh. Needs a 12_2 device with mesh shader tier 1; the log says which side of the gate the run landed on.",
   "dxr_mc.configuration.debug.debugLayer": "Direct3D Debug Layer",
   "dxr_mc.configuration.debug.debugLayer.tooltip": "Create the device with the Direct3D 12 debug layer installed. Much slower; useful when the log reports a broken command.",
   "dxr_mc.configuration.debug.profiling": "Frame Profiling",
@@ -70,6 +77,8 @@
   "dxr_mc.configuration.debug.meshDiagnostics.PASS": "Pass",
   "dxr_mc.configuration.debug.noCrashPopup": "Suppress Crash Dialog",
   "dxr_mc.configuration.debug.noCrashPopup.tooltip": "Do not show the blocking native message box when the backend fails (automated runs would hang on it). Always leave OFF when playing.",
+  "dxr_mc.configuration.debug.dumpHlsl": "Dump HLSL",
+  "dxr_mc.configuration.debug.dumpHlsl.tooltip": "Write every translated HLSL pair into dxrmc/hlsl/. This is how you see what the SPIR-V cross-compiler actually emitted.",
   "dxr_mc.configuration.logging.nativeLogFile": "Native Log File",
   "dxr_mc.configuration.logging.nativeLogFile.tooltip": "Absolute path for a copy of the native log. Empty (default) keeps it in the normal game log only.",
   "options.video.illusion.header": "Illusion Settings",
@@ -111,5 +120,9 @@
   "options.reflex.tooltip": "NVIDIA Reflex low-latency mode through Streamline. Off disables it; On keeps the CPU from running ahead of the GPU; On + Boost additionally keeps the GPU clocks high. Requires the Streamline runtime (sl.reflex); greyed out when it is unavailable.\n\nReflex never changes image quality - it only trades a little CPU headroom for lower input latency.",
   "options.reflex.off": "Off",
   "options.reflex.on": "On",
-  "options.reflex.boost": "On + Boost"
+  "options.reflex.boost": "On + Boost",
+  "dxr_mc.configuration.mesh.terrain_cull": "Cull terrain meshlets with an amplification shader",
+  "dxr_mc.configuration.mesh.terrain_cull_bounds": "Read per-meshlet bounding spheres from a compute table",
+  "options.inactivityFpsLimit.never": "Never",
+  "options.inactivityFpsLimit.never.tooltip": "Never lower the framerate while AFK or minimized."
 }

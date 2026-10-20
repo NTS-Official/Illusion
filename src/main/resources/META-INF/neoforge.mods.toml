@@ -3,7 +3,7 @@ modLoader="kotlinforforge"
 loaderVersion="${kff_version_range}"
 
 license="${mod_license}"
-issueTrackerURL="https://change.me.to.your.issue.tracker.example.invalid/"
+issueTrackerURL="https://github.com/NTS-Official/Illusion/issues"
 
 [[mods]]
 
@@ -11,16 +11,17 @@ modId="${mod_id}"
 version="${mod_version}"
 displayName="${mod_name}"
 
-updateJSONURL="https://change.me.example.invalid/updates.json"
-displayURL="https://change.me.to.your.mods.homepage.example.invalid/" #optional
+updateJSONURL="https://github.com/NTS-Official/Illusion/updates.json"
+displayURL="https://github.com/NTS-Official/Illusion"
 
-iconFile="examplemod.png" #optional
+iconFile="assets/${mod_id}/icon.png"
+logoFile="assets/${mod_id}/logo_flat_dark.png"
 
-credits=""
+credits="DXM Dev Team"
 authors="NoTuring_Steve"
 
 description='''
-Implements a full ray-tracing pipeline based on DirectX12 Ultimate backend.
+Brings lots of advanced graphics features to Minecraft based on a native library that integrates a DirectX12 Ultimate backend.
 '''
 
 [[mixins]]

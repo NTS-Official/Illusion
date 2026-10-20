@@ -11,6 +11,7 @@
     "options.OptionsRenderOptionsMixin",
     "options.OptionsGraphicsPresetMixin",
     "render.DebugEntrySystemSpecsMixin",
+    "render.DebugEntryFpsMixin",
     "options.VideoSettingsScreenMixin",
     "render.GameRendererPreloadUiShaderMixin",
     "render.MainTargetRenderScaleMixin",
@@ -33,7 +34,10 @@
     "render.FeatureRenderDispatcherProfMixin",
     "debug.PreparedFrameProfMixin",
     "render.FrameGraphBuilderProfMixin",
-    "render.GlSurfacePresentMixin"
+    "render.GlSurfacePresentMixin",
+    "OptionsMixin",
+    "InactivityFpsLimitMixin",
+    "FpsLimitTrackerMixin"
   ],
   "injectors": {
     "defaultRequire": 1
