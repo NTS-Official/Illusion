@@ -1,3 +1,12 @@
+<div align="center">
+
+<img src="assets/logo_flat_white.jpg">
+
+<img src="https://img.shields.io/github/actions/workflow/status/NTS-Official/Illusion/build.yml?style=for-the-badge">
+<img src="https://img.shields.io/badge/Powered%20by%20Kotlin-Java%20FFM%20API-orange?style=for-the-badge&logo=kotlin">
+
+</div>
+
 # Illusion
 [English] | [[简体中文](README_ZH.md)]
 > [!CAUTION]
@@ -28,6 +37,7 @@ This project uses [Microsoft's DirectX 12 Ultimate technology](https://devblogs.
 This project uses [NVIDIA's DLSS (Deep Learning Super Sampling) technology](https://www.nvidia.com/en-us/geforce/technologies/dlss/). Please refer to [this page](https://github.com/NVIDIA/DLSS) for more information.<br>
 This project uses [AMD's FSR technology](https://www.amd.com/zh-cn/products/graphics/technologies/fidelityfx/super-resolution.html). Please refer to [this page](https://gpuopen.com/amd-fsr-sdk/) for more information.<br>
 This project uses [Intel's XeSS technology](https://www.intel.cn/content/www/cn/zh/products/docs/discrete-gpus/arc/software/gaming-technologies.html). Please refer to [this page](https://github.com/intel/xess) for more information.<br>
+Only the Intel XeSS runtime ships inside the mod JAR. The NVIDIA DLSS and AMD FidelityFX runtimes are not redistributed: a released build reports those SDKs as unavailable unless you place the vendor DLLs next to `MCDR.dll` yourself, and development builds stage them into `run/dxrmc/` via `gradlew copyVendorDlls`.<br>
 Special thanks to all contributors of open-source libraries used in this project. If any are not credited and should be, please inform the author and credit will be applied where required.
 
 # Disclaimer

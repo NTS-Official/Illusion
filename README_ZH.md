@@ -1,3 +1,12 @@
+<div align="center">
+
+<img src="assets/logo_flat_white.jpg">
+
+<img src="https://img.shields.io/github/actions/workflow/status/NTS-Official/Illusion/build.yml?style=for-the-badge">
+<img src="https://img.shields.io/badge/Powered%20by%20Kotlin-Java%20FFM%20API-orange?style=for-the-badge&logo=kotlin">
+
+</div>
+
 # 幻光影现（Illusion）
 [[English](README.md)] | [简体中文]
 
@@ -8,7 +17,7 @@
 > [!WARNING]
 > 该模组目前还处于早期开发中，属于[作者](https://github.com/NTS-Official)的又一个[挖坑不填的项目]()。
 
-Illusion（幻光影现）是一个基于微软 DirectX 12 后端的 Minecraft NeoForge 模组，目标是把高级图形特性带给 Minecraft：例如光线追踪（未实现）、Mesh Shader（未实现）、时间性抗锯齿、深度学习超采样（DLSS）、帧生成（未实现）、光线重建与光线降噪（未实现）等等。
+Illusion（幻光影现） 是一个基于微软 DirectX 12 后端的 Minecraft NeoForge 模组，目标是把高级图形特性带给 Minecraft：例如光线追踪（未实现）、网格着色器（实现了一半）、时间性抗锯齿、深度学习超采样（DLSS）、帧生成（未实现）、光线重建与光线降噪（未实现）等等。
 它还借助 DirectX 在 Windows 平台上的优势，以及微软的 PIX 诊断工具，打造一个便于开发的实验平台。
 
 ## 细节
@@ -26,13 +35,12 @@ Illusion（幻光影现）是一个基于微软 DirectX 12 后端的 Minecraft N
 [VulkanMod](https://github.com/xCollateral/VulkanMod)、[Radiance](https://github.com/Minecraft-Radiance/Radiance) 与 [MCVR](https://github.com/Minecraft-Radiance/MCVR)、[C2ME](https://github.com/RelativityMC/C2ME-fabric)、[Bye-Pregen](https://github.com/MoePus/Bye-Pregen) 在实现过程中被作为优秀的范例参考。向这些为社区无私奉献的开发者们致敬！
 
 ## 外部库
-本项目使用了[微软 DirectX 12 Ultimate 技术](https://devblogs.microsoft.com/directx/announcing-directx-12-ultimate/)。更多信息请参考[这个页面](https://learn.microsoft.com/zh-cn/windows/win32/direct3d12/what-is-directx-12-)。
+本项目使用了[微软 DirectX 12 Ultimate 技术](https://devblogs.microsoft.com/directx/announcing-directx-12-ultimate/)。更多信息请参考[这个页面](https://learn.microsoft.com/zh-cn/windows/win32/direct3d12/what-is-directx-12-)。<br>
+本项目使用了 [NVIDIA DLSS（深度学习超采样）技术](https://www.nvidia.com/en-us/geforce/technologies/dlss/)。更多信息请参考[这个页面](https://github.com/NVIDIA/DLSS)。<br>
+本项目使用了 [AMD FSR 技术](https://www.amd.com/zh-cn/products/graphics/technologies/fidelityfx/super-resolution.html)。更多信息请参考[这个页面](https://gpuopen.com/amd-fsr-sdk/)。<br>
+本项目使用了 [Intel XeSS 技术](https://www.intel.cn/content/www/cn/zh/products/docs/discrete-gpus/arc/software/gaming-technologies.html)。更多信息请参考[这个页面](https://github.com/intel/xess)。<br>
 
-本项目使用了 [NVIDIA DLSS（深度学习超采样）技术](https://www.nvidia.com/en-us/geforce/technologies/dlss/)。更多信息请参考[这个页面](https://github.com/NVIDIA/DLSS)。
-
-本项目使用了 [AMD FSR 技术](https://www.amd.com/zh-cn/products/graphics/technologies/fidelityfx/super-resolution.html)。更多信息请参考[这个页面](https://gpuopen.com/amd-fsr-sdk/)。
-
-本项目使用了 [Intel XeSS 技术](https://www.intel.cn/content/www/cn/zh/products/docs/discrete-gpus/arc/software/gaming-technologies.html)。更多信息请参考[这个页面](https://github.com/intel/xess)。
+模组 JAR 内只附带 Intel XeSS 运行库。NVIDIA DLSS 与 AMD FidelityFX 的运行库不随发行包分发，请注意自行获取动态运行库。
 
 特别感谢本项目所用开源库的所有贡献者。若有遗漏的署名，请联系作者，我们会按要求补上致谢。
 
