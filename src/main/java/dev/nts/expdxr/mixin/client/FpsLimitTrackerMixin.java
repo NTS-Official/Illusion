@@ -1,4 +1,4 @@
-package dev.nts.expdxr.mixin;
+package dev.nts.expdxr.mixin.client;
 
 import dev.nts.expdxr.compat.FpsLimitCompat;
 import com.mojang.blaze3d.platform.FramerateLimitTracker;

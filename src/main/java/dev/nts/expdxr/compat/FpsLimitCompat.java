@@ -1,6 +1,5 @@
 package dev.nts.expdxr.compat;
 
-import com.mojang.serialization.Codec;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
@@ -53,6 +52,11 @@ public final class FpsLimitCompat {
         try {
             MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(
                 InactivityFpsLimit.class, MethodHandles.lookup());
+            // 枚举构造器在字节码里是 `(String name, int ordinal, String serializedName, String key)`：
+            // 源码上只声明了两个参数，但 javac 会把枚举的 name/ordinal 作为前两个隐式参数加进去
+            // （javap 的源码视图不显示它们，-p 看 descriptor 才是
+            // `(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)V`）。
+            // MethodType 必须用这个完整的 4 参描述符，否则 findConstructor 直接抛 NoSuchMethodException。
             MethodHandle ctor = lookup.findConstructor(InactivityFpsLimit.class, MethodType.methodType(
                 void.class, String.class, int.class, String.class, String.class));
 
@@ -62,10 +66,10 @@ public final class FpsLimitCompat {
 
             InactivityFpsLimit[] extended = Arrays.copyOf(current, current.length + 1);
             extended[current.length] = created;
-            writeStatic(InactivityFpsLimit.class, "$VALUES", extended);
+            writeStatic("$VALUES", extended);
 
             never = created;
-            writeStatic(InactivityFpsLimit.class, "CODEC", StringRepresentable.fromEnum(() -> extended));
+            writeStatic("CODEC", StringRepresentable.fromEnum(() -> extended));
         } catch (Throwable t) {
             throw new IllegalStateException("dxr_mc: failed to install InactivityFpsLimit.NEVER", t);
         }
@@ -78,9 +82,9 @@ public final class FpsLimitCompat {
      * 因此这里用普通反射即可 —— VarHandle 那条路会抛
      * {@code UnsupportedOperationException: set}（final 字段不可写）。
      */
-    private static void writeStatic(Class<?> owner, String name, Object value)
+    private static void writeStatic(String name, Object value)
         throws ReflectiveOperationException {
-        Field field = owner.getDeclaredField(name);
+        Field field = InactivityFpsLimit.class.getDeclaredField(name);
         field.setAccessible(true);
         field.set(null, value);
     }

@@ -35,9 +35,8 @@
     "debug.PreparedFrameProfMixin",
     "render.FrameGraphBuilderProfMixin",
     "render.GlSurfacePresentMixin",
-    "OptionsMixin",
-    "InactivityFpsLimitMixin",
-    "FpsLimitTrackerMixin"
+    "client.InactivityFpsLimitMixin",
+    "client.FpsLimitTrackerMixin"
   ],
   "injectors": {
     "defaultRequire": 1

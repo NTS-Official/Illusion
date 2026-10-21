@@ -1,18 +1,27 @@
 package dev.nts.expdxr.mixin.options;
 
+import dev.nts.expdxr.compat.FpsLimitCompat;
 import dev.nts.expdxr.d3d12.backend.D3D12GraphicsApi;
+
+import java.lang.reflect.Field;
 import java.util.ArrayList;
+
+import net.minecraft.client.InactivityFpsLimit;
 import net.minecraft.client.OptionInstance;
 import net.minecraft.client.Options;
 import net.minecraft.client.PreferredGraphicsApi;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
+import org.jspecify.annotations.NonNull;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.ModifyArg;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
  * Gives the appended Direct3D 12 entry the same "Experimental" treatment vanilla gives
@@ -70,5 +79,50 @@ public abstract class OptionsMixin {
 
             return Tooltip.create(CommonComponents.joinLines(lines));
         };
+    }
+
+
+
+    @Unique
+    private boolean dxrmc$fpsNeverInstalled;
+
+    @Shadow
+    public abstract OptionInstance<InactivityFpsLimit> inactivityFpsLimit();
+
+    @Inject(method = "<init>", at = @At(value = "INVOKE", target = "Ljava/lang/Object;<init>()V", shift = At.Shift.AFTER))
+    private void dxrmc$injectNeverEnum(CallbackInfo ci) {
+        if (this.dxrmc$fpsNeverInstalled) {
+            return;
+        }
+        this.dxrmc$fpsNeverInstalled = true;
+        FpsLimitCompat.installNever();
+    }
+
+    @Inject(method = "<init>", at = @At("RETURN"))
+    private void dxrmc$fixInactivityTooltip(CallbackInfo ci) {
+        InactivityFpsLimit never = FpsLimitCompat.never();
+        if (never == null) {
+            return;
+        }
+        OptionInstance<InactivityFpsLimit> option = this.inactivityFpsLimit();
+        try {
+            java.lang.reflect.Field tooltipField = OptionInstance.class.getDeclaredField("tooltip");
+            tooltipField.setAccessible(true);
+            OptionInstance.TooltipSupplier<InactivityFpsLimit> wrapped = illusion$getWrapped(tooltipField, option);
+            tooltipField.set(option, wrapped);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("dxr_mc: failed to patch inactivity fps tooltip", e);
+        }
+    }
+
+    @Unique
+    private static OptionInstance.@NonNull TooltipSupplier<InactivityFpsLimit> illusion$getWrapped(Field tooltipField, OptionInstance<InactivityFpsLimit> option) throws IllegalAccessException {
+        @SuppressWarnings("unchecked")
+        OptionInstance.TooltipSupplier<InactivityFpsLimit> original =
+                (OptionInstance.TooltipSupplier<InactivityFpsLimit>) tooltipField.get(option);
+        return value ->
+                FpsLimitCompat.isNever(value)
+                        ? Tooltip.create(Component.translatable("options.inactivityFpsLimit.never.tooltip"))
+                        : original.apply(value);
     }
 }

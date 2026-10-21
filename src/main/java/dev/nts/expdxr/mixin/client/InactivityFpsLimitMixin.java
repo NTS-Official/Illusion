@@ -1,4 +1,4 @@
-package dev.nts.expdxr.mixin;
+package dev.nts.expdxr.mixin.client;
 
 import com.mojang.serialization.Codec;
 import net.minecraft.client.InactivityFpsLimit;
