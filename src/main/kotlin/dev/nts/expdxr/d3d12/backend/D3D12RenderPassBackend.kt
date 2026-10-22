@@ -42,6 +42,14 @@ import java.util.function.Supplier
 private const val SEGMENT_BYTES = 32
 
 /**
+ * P141 续八：地形批次里唯一逐 draw 变化的 uniform 名。
+ *
+ * 其余 uniform（材质、图集、投影…）在同一批里是同一个值，所以 [D3D12RenderPassBackend.setUniform]
+ * 拿它当"材质没变"的判据：只有别名的 uniform 被设置时才置脏、重算材质签名。
+ */
+private const val CHUNK_SECTION_UNIFORM = "ChunkSection"
+
+/**
  * P139：一次 `DispatchMesh` / 一条 `ExecuteIndirect` 命令覆盖的组数上限。
  * b8 是 root CBV，基址必须 256 字节对齐；1024 组 × 32 B = 32 KB，正对齐。
  */
@@ -138,7 +146,34 @@ class D3D12RenderPassBackend(
 
     private var pipeline: D3D12CompiledRenderPipeline? = null
     private var anyDescriptorDirty = false
+
+    /**
+     * P141 续八：除 `ChunkSection` 外的 uniform 自上次 [materialSignature] 以来变过。
+     *
+     * <p>地形批次里每个 draw 的 uniform 上传都会走 [setUniform]（`ChunkSection` 逐段换、其余
+     * 材质 uniform 整批相同），所以拿这个标志当"材质可能变了"的粗判据：只有它置位才重算签名，
+     * 1231 draw/帧的 ArrayList + 字符串拼接 + 排序就降到每批一次。宁可多算（漏置位也只是退化
+     * 成原来的每 draw 一次），不能少算（少算会把不同材质混进同一批）。
+     */
+    private var materialDirty = true
     private val uniforms: MutableMap<String, GpuBufferSlice> = HashMap()
+
+    /**
+     * P141 续八：最近一次设置的 `ChunkSection` 切片。
+     *
+     * <p>mesh 批次的 per-draw 循环要拿它两次（查 96 B 快照、给根 CBV 复位），原先走
+     * `uniforms["ChunkSection"]` 两次哈希查找；现在 [setUniform] 顺手记一份，循环直接读字段。
+     */
+    private var chunkSectionSlice: GpuBufferSlice? = null
+
+    /**
+     * P141 续八：逐段 uniform 上传的接收器。
+     *
+     * <p>原先在每 draw 的循环里现造一个 lambda（1231 次/帧），这里提到字段上一次建好 ——
+     * 它只捕获 `this`，与 draw 无关。
+     */
+    private val uniformUploader: RenderPass.UniformUploader =
+        RenderPass.UniformUploader { name, value -> this.setUniform(name, value) }
     private val textures: MutableMap<String, TextureViewAndSampler> = HashMap()
 
     private data class TextureViewAndSampler(val view: D3D12GpuTextureView, val sampler: D3D12GpuSampler)
@@ -253,6 +288,11 @@ class D3D12RenderPassBackend(
         if (this.hasDepth) {
             D3D12Temporal.captureUniform(name, slice)
         }
+        if (name != CHUNK_SECTION_UNIFORM) {
+            this.materialDirty = true
+        } else {
+            this.chunkSectionSlice = slice
+        }
         this.uniforms[name] = slice
         this.anyDescriptorDirty = true
     }
@@ -265,6 +305,11 @@ class D3D12RenderPassBackend(
         // 它们同样会 setUniform("DynamicTransforms")，混进来会让逐物体配对序号失真。
         if (this.hasDepth) {
             D3D12Temporal.captureUniform(name, value)
+        }
+        if (name != CHUNK_SECTION_UNIFORM) {
+            this.materialDirty = true
+        } else {
+            this.chunkSectionSlice = value
         }
         this.uniforms[name] = value
         this.anyDescriptorDirty = true
@@ -338,7 +383,9 @@ class D3D12RenderPassBackend(
             }
         }
         if (!MCDR_ABI.D3D12PushDescriptors(this.ctx, types, buffers, offsets, lengths, texelFormats, views)) {
-            throw IllegalStateException("dx12PushDescriptors failed")
+            // 带上 native 的具体原因：这里最常见的是 CBV 地址没按 256 字节对齐，
+            // 只报 "failed" 会把那条 offset 信息丢掉。
+            throw IllegalStateException("dx12PushDescriptors failed: ${MCDR_ABI.D3D12LastError()}")
         }
     }
 
@@ -1009,7 +1056,8 @@ class D3D12RenderPassBackend(
                 val flat = D3D12TerrainBatchClassifier.flatten(probeInfo, batch, defaultIndexBuffer, defaultIndexType)
                 val verdict = D3D12TerrainBatchClassifier.classify(flat)
                 D3D12TerrainBatchClassifier.note(flat, verdict)
-                if (verdict == D3D12TerrainBatchClassifier.Verdict.TERRAIN_MESH_CANDIDATE) {
+                if (verdict == D3D12TerrainBatchClassifier.Verdict.TERRAIN_MESH_CANDIDATE &&
+                    D3D12TerrainBatchClassifier.shouldPlanSegments()) {
                     D3D12TerrainBatchClassifier.noteSegments(
                         flat.location, D3D12TerrainBatchClassifier.segments(batch))
                 }
@@ -1082,12 +1130,16 @@ class D3D12RenderPassBackend(
     /**
      * P137：段快照里的 `ChunkVisibility`（`chunksection.glsl`：`mat4 ModelViewMat` 占 0..63，
      * 然后 `float ChunkVisibility` 落在 64）。手写小端位运算，避免每段每帧新建 ByteBuffer。
+     *
+     * <p>[offset] 是段在整批段数据里的起始字节偏移（一段 96 B）。
      */
-    private fun sectionVisibility(section: ByteArray): Float =
-        Float.fromBits((section[64].toInt() and 0xFF) or
-            ((section[65].toInt() and 0xFF) shl 8) or
-            ((section[66].toInt() and 0xFF) shl 16) or
-            ((section[67].toInt() and 0xFF) shl 24))
+    private fun sectionVisibilityAt(section: ByteArray, offset: Int): Float {
+        val base = offset + 64
+        return Float.fromBits((section[base].toInt() and 0xFF) or
+            ((section[base + 1].toInt() and 0xFF) shl 8) or
+            ((section[base + 2].toInt() and 0xFF) shl 16) or
+            ((section[base + 3].toInt() and 0xFF) shl 24))
+    }
 
     /**
      * P137：把一整批地形段交给一次 mesh 派发（`DispatchMesh(组数)`）。
@@ -1163,8 +1215,13 @@ class D3D12RenderPassBackend(
         // PS 常量，混进 mesh 批次会把整批地形一起混向 FogColor。
         val sectionBytes = D3D12MeshSectionSnapshot.SECTION_BYTES
         val readyDraws = ArrayList<RenderPass.Draw<T>>(batch.size)
-        val readySections = ArrayList<ByteArray>(batch.size)
-        val readySlices = ArrayList<GpuBufferSlice>(batch.size)
+        // P141 续八：整批 96 B 直接在**一块** ByteArray 里按 draw 顺序落位（不再每段一个 ByteArray），
+        // 淡入中的段不占用槽位，所以块内是紧凑的。
+        val sectionBlock = ByteArray(batch.size * sectionBytes)
+        var readyCount = 0
+        // 派发时只需要第一段的切片（根 CBV 复位用），原先为此维护了一个 ArrayList，
+        // 每帧 2000 次 add 只为取 [0]。
+        var firstReadySlice: GpuBufferSlice? = null
         val deferred = ArrayList<RenderPass.Draw<T>>()
         var material: List<String>? = null
         for (draw in batch) {
@@ -1173,9 +1230,8 @@ class D3D12RenderPassBackend(
                 meshSkip("draw has no uniform uploader")
                 return null
             }
-            consumer.accept(uniformArgument,
-                RenderPass.UniformUploader { name, value -> this.setUniform(name, value) })
-            val sectionSlice = this.uniforms["ChunkSection"]
+            consumer.accept(uniformArgument, this.uniformUploader)
+            val sectionSlice = this.chunkSectionSlice
             if (sectionSlice == null) {
                 meshSkip("ChunkSection uniform not set")
                 return null
@@ -1187,26 +1243,36 @@ class D3D12RenderPassBackend(
             }
             // P141：不传 minStamp。vanilla 的 DynamicUniformStorage 在内容不变时会短路（不重新
             // map 写入），静态帧因此拿不到"新"快照；以前靠 lastGood 跨帧兜底，但那会把别处的
-            // 96 B 当成这一段的（重复层/错位）。现在 lookup 直接返回该 offset 最近一次写入的
-            // 字节：ring 每帧会复用同一 offset，最近一次写入就是当前内容。
-            val snapshot = D3D12MeshSectionSnapshot.lookup(sectionBuffer, sectionSlice.offset())
-            if (snapshot == null) {
+            // 96 B 当成这一段的（重复层/错位）。现在直接取该 offset 最近一次写入的字节：ring
+            // 每帧会复用同一 offset，最近一次写入就是当前内容。
+            val sectionOffset = readyCount * sectionBytes
+            if (!D3D12MeshSectionSnapshot.lookupInto(
+                    sectionBuffer, sectionSlice.offset(), sectionBlock, sectionOffset)) {
                 meshSkip("no fresh 96 B section snapshot at offset ${sectionSlice.offset()}")
                 return null
             }
-            val signature = this.materialSignature()
-            if (material == null) {
-                material = signature
-            } else if (material != signature) {
-                meshSkip("uniforms differ between draws")
-                return null
+            // P141 续八：材质签名只在"除 ChunkSection 外的 uniform 变过"时重算。原先每个 draw
+            // 都新建 ArrayList + 拼 N 个字符串 + 排序，1231 draw/帧就是 1231 次，实测占
+            // batchPath 的大头（p219）。
+            if (material == null || this.materialDirty) {
+                val signature = this.materialSignature()
+                this.materialDirty = false
+                if (material == null) {
+                    material = signature
+                } else if (material != signature) {
+                    meshSkip("uniforms differ between draws")
+                    return null
+                }
             }
-            if (!compiled.meshPerSectionVisibility && sectionVisibility(snapshot) < VISIBILITY_READY) {
+            if (!compiled.meshPerSectionVisibility &&
+                sectionVisibilityAt(sectionBlock, sectionOffset) < VISIBILITY_READY) {
                 deferred.add(draw)
             } else {
                 readyDraws.add(draw)
-                readySections.add(snapshot.copyOf(sectionBytes))
-                readySlices.add(sectionSlice)
+                if (firstReadySlice == null) {
+                    firstReadySlice = sectionSlice
+                }
+                readyCount++
             }
         }
         // 整批都在淡入：这批一条也不用 mesh 派发，交给调用点按 IMR 画。
@@ -1222,7 +1288,18 @@ class D3D12RenderPassBackend(
             meshSkip("no groups")
             return null
         }
-        val segmentTable = ByteBuffer.allocate(groupCount * SEGMENT_BYTES).order(ByteOrder.LITTLE_ENDIAN)
+        // 段表按 1024 组（32 KB）整批补齐：native 每批按批组数校验段表范围，最后一批不足
+        // 1024 组时若缓冲正好截断会在 b8 上越界（实测 "meshDispatch: segments range
+        // overflow (groups=1024 offset=622592 size=653824)"）。补上的组 indexCount=0，
+        // AS 侧 `local < meshletCount` 与 MS 的 SetMeshOutputCounts(0,0) 都不会产出图元。
+        //
+        // P141 续八：一次分配补齐后的大小，ByteBuffer 原地填前 groupCount 组（ByteArray 本身
+        // 清零，补位天然是 0）。原先 allocate → flip → get 到 ByteArray → 再 copyOf 补齐，
+        // 一批 23552 组时每帧要额外搬 ~750 KB。
+        val paddedGroups = (groupCount + MESH_GROUPS_PER_BATCH - 1) / MESH_GROUPS_PER_BATCH *
+            MESH_GROUPS_PER_BATCH
+        val segmentUpload = ByteArray(paddedGroups * SEGMENT_BYTES)
+        val segmentTable = ByteBuffer.wrap(segmentUpload).order(ByteOrder.LITTLE_ENDIAN)
         var sectionIndex = 0
         for (draw in readyDraws) {
             var remaining = draw.indexCount()
@@ -1240,24 +1317,10 @@ class D3D12RenderPassBackend(
             }
             sectionIndex++
         }
-        val segmentBytes = ByteArray(groupCount * SEGMENT_BYTES).also {
-            segmentTable.flip()
-            segmentTable.get(it)
-        }
-        // 段表按 1024 组（32 KB）整批补齐：native 每批按批组数校验段表范围，最后一批不足
-        // 1024 组时若缓冲正好截断会在 b8 上越界（实测 "meshDispatch: segments range
-        // overflow (groups=1024 offset=622592 size=653824)"）。补上的组 indexCount=0，
-        // AS 侧 `local < meshletCount` 与 MS 的 SetMeshOutputCounts(0,0) 都不会产出图元。
-        val paddedGroups = (groupCount + MESH_GROUPS_PER_BATCH - 1) / MESH_GROUPS_PER_BATCH *
-            MESH_GROUPS_PER_BATCH
-        val segmentUpload = if (paddedGroups == groupCount) segmentBytes else
-            segmentBytes.copyOf(paddedGroups * SEGMENT_BYTES)
-        val sections = ByteArray(readySections.size * sectionBytes)
-        for (i in readySections.indices) {
-            readySections[i].copyInto(sections, i * sectionBytes)
-        }
+        val sections = if (readyCount == batch.size) sectionBlock else
+            sectionBlock.copyOf(readyCount * sectionBytes)
         if (System.getenv("MCDR_MESH_DUMP") == "1" && this.meshBatches <= 3) {
-            dumpMeshBatch(readySections, segmentBytes)
+            dumpMeshBatch(sections, readyCount, segmentUpload)
         }
 
         val sectionsSlice = this.transientMemory.uploadStaging(
@@ -1275,7 +1338,11 @@ class D3D12RenderPassBackend(
 
         // 派发期间 PS 读的是绑在根 CBV 上的那一份 ChunkSection，必须是**已淡入完成**的段，
         // 否则整批又被 `mix(FogColor, color, ChunkVisibility)` 拉向雾色。
-        this.setUniform("ChunkSection", readySlices[0])
+        val boundSection = firstReadySlice
+        if (boundSection == null) {
+            return this.meshSkipFor("no ready section slice")
+        }
+        this.setUniform("ChunkSection", boundSection)
         val useDepth = this.hasDepth && compiled.info().depthStencilState != null
         if (!MCDR_ABI.D3D12SetPipeline(this.ctx, compiled.meshPso, useDepth)) {
             return this.meshSkipFor("bind mesh PSO failed: ${MCDR_ABI.D3D12LastError()}")
@@ -1308,7 +1375,7 @@ class D3D12RenderPassBackend(
         if (gMeshLogBatches <= 3L || gMeshLogBatches % 600L == 0L) {
             LOGGER.info("[dxrmc] P137 mesh dispatch: batch={} draws={} groups={} sections={}B " +
                 "segments={}B vbStride={} idxStride={} deferred={} indirect={}",
-                gMeshLogBatches, readyDraws.size, groupCount, sections.size, segmentBytes.size,
+                gMeshLogBatches, readyDraws.size, groupCount, sections.size, segmentUpload.size,
                 compiled.meshVertexStride, indexStride, deferred.size, this.meshIndirectDispatches)
         }
         return deferred
@@ -1430,7 +1497,8 @@ class D3D12RenderPassBackend(
         val tableOffset = if (useBoundsTable) {
             D3D12MeshBoundsService.acquire(
                 this.device, this.transientMemory, compiled.boundsPipeline,
-                vertexBuffer, indexBuffer, segmentBytes, paddedGroups, segmentSignature(segmentBytes))
+                vertexBuffer, indexBuffer, segmentBytes, paddedGroups,
+                segmentSignature(segmentBytes, groupCount * SEGMENT_BYTES))
         } else -1L
         val boundsHandle = if (tableOffset >= 0L) D3D12MeshBoundsCache.current()?.handle() ?: 0L else 0L
         // 视锥平面由 AS 从 Projection cbuffer 现算（P140），CPU 只把 b9 的 28 个 dword 里的
@@ -1450,11 +1518,11 @@ class D3D12RenderPassBackend(
     }
 
     /** P138 诊断：把首批派发的段表与 96 B/段数据落盘（`MCDR_MESH_DUMP=1` 时才写）。 */
-    private fun dumpMeshBatch(sections: List<ByteArray>, segmentBytes: ByteArray) {
+    private fun dumpMeshBatch(sections: ByteArray, sectionCount: Int, segmentBytes: ByteArray) {
         runCatching {
             val dir = java.nio.file.Path.of(System.getProperty("user.dir"), "dxrmc", "dump")
             java.nio.file.Files.createDirectories(dir)
-            java.nio.file.Files.write(dir.resolve("sections.bin"), sections.reduce { a, b -> a + b })
+            java.nio.file.Files.write(dir.resolve("sections.bin"), sections)
             java.nio.file.Files.write(dir.resolve("segments.bin"), segmentBytes)
             val table = java.nio.ByteBuffer.wrap(segmentBytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
             val lines = StringBuilder()
@@ -1464,10 +1532,20 @@ class D3D12RenderPassBackend(
                 val baseVertex = table.getInt()
                 val sectionIndex = table.getInt()
                 table.getInt(); table.getInt(); table.getInt(); table.getInt()
-                val bytes = sections[sectionIndex]
-                val buffer = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                val x = buffer.getInt(80); val y = buffer.getInt(84); val z = buffer.getInt(88)
-                val visibility = buffer.getFloat(64)
+                if (indexCount == 0) {
+                    // 补齐到 1024 组的空组，不是真正的段。
+                    continue
+                }
+                if (sectionIndex >= sectionCount) {
+                    lines.append("sec=$sectionIndex fi=$firstIndex n=$indexCount bv=$baseVertex\n")
+                    continue
+                }
+                // 一段 96 B：pos 在 80/84/88，ChunkVisibility 在 64（小端）。
+                val base = sectionIndex * D3D12MeshSectionSnapshot.SECTION_BYTES
+                val buffer = java.nio.ByteBuffer.wrap(sections).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                val x = buffer.getInt(base + 80); val y = buffer.getInt(base + 84)
+                val z = buffer.getInt(base + 88)
+                val visibility = buffer.getFloat(base + 64)
                 lines.append("sec=$sectionIndex pos=($x,$y,$z) vis=$visibility ")
                     .append("fi=$firstIndex n=$indexCount bv=$baseVertex\n")
             }
@@ -1713,11 +1791,16 @@ internal object D3D12MeshBoundsService {
     }
 }
 
-/** FNV-1a 64：段表字节的内容签名（同签名 ⇒ 同一批组，包围球可以复用）。 */
-private fun segmentSignature(bytes: ByteArray): Long {
+/**
+ * FNV-1a 64：段表字节的内容签名（同签名 ⇒ 同一批组，包围球可以复用）。
+ *
+ * [length] 只覆盖**真实组数**那么多字节：段表按 1024 组补齐，补位全 0，把它们也算进去
+ * 只是白扫（一批 23000 多组时是 750 KB/帧）。
+ */
+private fun segmentSignature(bytes: ByteArray, length: Int = bytes.size): Long {
     var h = -0x340d631b7bdddcdbL
-    for (b in bytes) {
-        h = h xor (b.toLong() and 0xFFL)
+    for (i in 0 until length) {
+        h = h xor (bytes[i].toLong() and 0xFFL)
         h *= 0x100000001b3L
     }
     return h

@@ -81,10 +81,15 @@ object D3D12MeshVertexDecode {
      * `visibilitySemantic` 非空时，`SPIRV_Cross_Output` 会多一个
      * `float chunkVisibility : <semantic>` 字段，并在 `ms_main` 里按本段 96 字节的 offset 64 写入
      * （配合 [addVisibilityInterpolant] 打过补丁的 PS，逐段淡入就不再依赖逐 draw 的 CBV）。
+     *
+     * `coneCull` 打开 P141 B 阶段的背面法线锥剔除：AS 在自算包围球的同时逐三角形算法线，
+     * 整个锥都背向相机时把这个 meshlet 一起剔掉（连顶点解码都省了）。只对**光栅化也剔背面**
+     * 的管线有意义，所以调用方要把它和 `CullMode BACK` 绑在一起；锥要用逐顶点数据，因此只
+     * 在 AS 自算包围球的分支里生效（包围球表那条路没有顶点数据）。
      */
     fun buildMeshHlsl(vsHlsl: String, format: VertexFormat?, threads: Int = MAX_INDICES_PER_GROUP,
         visibilitySemantic: String? = null, meshletCull: Boolean = false,
-        cullPlanes: Int = CULL_PLANES_SIDES): String {
+        cullPlanes: Int = CULL_PLANES_SIDES, coneCull: Boolean = false): String {
         val fields = parseInputFields(vsHlsl)
         val stride = format?.vertexSize ?: 0
         val decode = StringBuilder()
@@ -162,6 +167,57 @@ groupshared MeshPayload gMeshPayload;
 // `InterlockedAdd`，压缩出来的组数会不对（画面出现成片空洞）；挪出来就正常。
 groupshared uint gPayloadCount;
 """
+        // P141 B 阶段：背面法线锥剔除。锥要靠逐顶点数据才建得起来，所以只在 AS 自算包围球的
+        // 分支里生成（包围球表那条路没有顶点数据）；`coneCull` 由调用方和 CullMode BACK 绑在一起。
+        val coneActive = cullActive && coneCull
+        val coneDecl = if (!coneActive) "" else """
+        // P141 B 阶段：背面法线锥。逐三角形算视空间法线，锥轴取第一个非退化三角形的法线，
+        // coneMin 是其余三角形法线与锥轴点积的最小值 —— 整个 meshlet 的法线都落在半角为
+        // acos(coneMin) 的锥里。
+        float3 coneAxis = float3(0.0, 0.0, 0.0);
+        float coneMin = 1.0;
+        bool coneValid = false;
+        float3 conePrev1 = float3(0.0, 0.0, 0.0);
+        float3 conePrev2 = float3(0.0, 0.0, 0.0);
+"""
+        val coneSample = if (!coneActive) "" else """
+                // 索引流是三角形列表，只有 k % 3 == 2 才凑齐一个三角形；拿相邻三角形的两个
+                // 顶点去算叉积得到的是退化面，会污染锥。
+                if ((k % 3u) == 2u) {
+                    float3 fn = cross(conePrev1 - conePrev2, vp - conePrev2);
+                    float flen = length(fn);
+                    if (flen > 1e-6) {
+                        float3 nrm = fn / flen;
+                        if (!coneValid) {
+                            coneAxis = nrm;
+                            coneValid = true;
+                        } else {
+                            coneMin = min(coneMin, dot(nrm, coneAxis));
+                        }
+                    }
+                }
+                conePrev2 = conePrev1;
+                conePrev1 = vp;
+"""
+        val coneTest = if (!coneActive) "" else """
+        // P141 B 阶段：整锥背向相机就把这个 meshlet 剔掉。视空间里相机在原点，球心方向就是
+        // 视线方向；判据是保守的 —— 只有锥的最外侧（coneMin 侧多转一个半角）仍背向相机才算，
+        // 这样被剔掉的三角形在光栅化时本来也会被 CullMode BACK 剔掉，画面不变。
+        // kConeSign 是绕序符号：视空间叉积法线对应"正面"还是"背面"取决于投影的手性。符号错了
+        // 的现象是近景地形成片破洞/消失。+1.0 已在实机上验过（p223：8 分钟正常游玩，用户确认
+        // 地形正常、无破洞），不要再随手改。
+        if (visible && coneValid && coneMin > 0.0) {
+            const float kConeSign = 1.0;
+            float eyeLen = length(center);
+            if (eyeLen > 1.0) {
+                float facing = dot(coneAxis, center / eyeLen);
+                float sinTheta = sqrt(max(0.0, 1.0 - coneMin * coneMin));
+                if (kConeSign * coneMin * facing - sinTheta > 0.0) {
+                    visible = false;
+                }
+            }
+        }
+"""
         val asDecl = if (!cullActive) "" else """
 // P140：amplification shader —— 每个线程看一个 meshlet，剔除后把存活组的序号压缩进 groupshared
 // payload，最后整组一起 DispatchMesh(count)。被剔除的组连 mesh shader 都不会启动。
@@ -190,7 +246,7 @@ void as_main(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID)
         float4 c3 = asfloat(meshSections.Load4(asBase + 48u));
         float3 center;
         float radius;
-        if (meshCullPad.x == 0u) {
+${coneDecl}        if (meshCullPad.x == 0u) {
             // 有 CPU 侧包围球表（t17）：球心是模型空间坐标，用 ModelViewMat 的列向量变换到视空间。
             float4 bound = meshletBounds.Load4((local + meshletBase) * 16u);
             center = (c0 * bound.x + c1 * bound.y + c2 * bound.z + c3).xyz;
@@ -220,7 +276,7 @@ void as_main(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID)
                 float3 vp = (c0 * mp.x + c1 * mp.y + c2 * mp.z + c3).xyz;
                 mn = min(mn, vp);
                 mx = max(mx, vp);
-            }
+${coneSample}            }
             center = (mn + mx) * 0.5f;
             radius = length(mx - center);
         }
@@ -252,7 +308,7 @@ void as_main(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID)
         visible = (clip.x + W >= -rA - slack) && (W - clip.x >= -rB - slack)
                   && (clip.y + W >= -rC - slack) && (W - clip.y >= -rD - slack)
                   && (W >= -rN - slack);
-    }
+${coneTest}    }
     if (visible) {
         uint at;
         InterlockedAdd(gPayloadCount, 1u, at);

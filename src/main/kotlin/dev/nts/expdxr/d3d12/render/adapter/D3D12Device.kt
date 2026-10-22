@@ -384,8 +384,13 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         val semantic = D3D12MeshVertexDecode.pickVisibilitySemantic(compiled.vertexHlsl)
         // P140：AS 剔除。开关走配置（`[mesh] terrainCull`），环境变量只是逃生口。
         var meshletCull = D3D12Settings.meshTerrainCull || System.getenv("MCDR_MESH_CULL") == "1"
+        // P141 B 阶段：背面锥剔除只在光栅化也剔背面时才成立 —— `cull` 就是 native 的
+        // `desc.cullEnabled`（→ `CullMode = BACK`），所以先算出来，别再让 flipY 那套把它算两遍。
+        val cull = pipeline.isCull && !flipY &&
+            !pipeline.location.toString().contains("animate_sprite")
         val hlsl = D3D12MeshVertexDecode.buildMeshHlsl(compiled.vertexHlsl, format,
-            visibilitySemantic = semantic, meshletCull = meshletCull)
+            visibilitySemantic = semantic, meshletCull = meshletCull,
+            coneCull = cull && D3D12Settings.meshTerrainCone)
         val msHlsl = hlsl
         if (System.getenv("MCDR_MESH_DUMP_HLSL") == "1") {
             runCatching {
@@ -458,10 +463,6 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         val depth = pipeline.depthStencilState
         if (depth != null) {
             desc.depth(GpuFormat.D32_FLOAT.ordinal, depth.writeDepth(), depth.depthTest().ordinal)
-        }
-        var cull = pipeline.isCull
-        if (flipY || pipeline.location.toString().contains("animate_sprite")) {
-            cull = false
         }
         desc.topology(cull, pipeline.polygonMode.ordinal)
         val bindings = compiled.entries.mapIndexed { index, entry ->

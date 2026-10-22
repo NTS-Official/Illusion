@@ -2,6 +2,7 @@ package dev.nts.expdxr
 
 import dev.nts.expdxr.Illusion.Companion.MODID
 import dev.nts.expdxr.Illusion.Companion.MOD_NAME
+import dev.nts.expdxr.d3d12.backend.D3D12PixCaptureController
 import dev.nts.expdxr.d3d12.debug.D3D12ExitWatchdog
 import dev.nts.expdxr.misc.IllusionLogger
 import net.neoforged.api.distmarker.Dist
@@ -29,5 +30,10 @@ class IllusionClient(container: ModContainer) {
 
         Illusion.LOGGER.info("[$MODID] $MOD_NAME Client setup: D3D12 backend is registered via PreferredGraphicsApiMixin; creation is driven by the vanilla backend-selection loop")
         D3D12ExitWatchdog.start()
+        // PIX timing capture on a key press: the binding has to be registered during mod loading,
+        // and the handler only runs on the client bus (this class never loads on a server).
+        // `eventBus` is null only for a mod that has no mod-bus events at all, which cannot happen
+        // here (the binding is one), but there is nothing to gain from crashing if it is.
+        container.eventBus?.let { D3D12PixCaptureController.register(it) }
     }
 }

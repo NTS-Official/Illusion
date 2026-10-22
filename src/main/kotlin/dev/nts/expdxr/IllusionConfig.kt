@@ -96,6 +96,28 @@ object IllusionConfig {
      */
     val PIX_CAPTURE: ModConfigSpec.BooleanValue
 
+    /**
+     * `[debug] pixTimingCapture` — arm the key binding that drives a PIX timing capture.
+     *
+     * Press it in game and the process itself calls PIXBeginCapture, so the file lands under
+     * `run/pix/` with a name and a length we choose; PIX's own continuous recording never reaches
+     * the disk, and the capture PIX starts itself writes to `%TEMP%`. No restart is involved: the
+     * native side loads the timing runtime lazily on the first press, and the frame budget is read
+     * at the moment of the press.
+     */
+    val PIX_TIMING_CAPTURE: ModConfigSpec.BooleanValue
+
+    /** `[debug] pixCaptureFrames` — frames recorded by one key-press capture. */
+    val PIX_CAPTURE_FRAMES: ModConfigSpec.IntValue
+
+    /**
+     * `[debug] pixDirectory` — where PIX is installed (its directory, or one of its DLLs).
+     *
+     * Empty means "look where PIX normally installs itself". There is deliberately no environment
+     * variable for this: a switch that only exists as an env var is a switch nobody finds.
+     */
+    val PIX_DIRECTORY: ModConfigSpec.ConfigValue<String>
+
     /** `[debug] debugLayer` — create the device with the D3D12 debug layer. */
     val DEBUG_LAYER: ModConfigSpec.BooleanValue
 
@@ -140,6 +162,9 @@ object IllusionConfig {
 
     /** `[mesh] terrainCullBounds` — feed the cull shader a compute-built bounding-sphere table (P141). */
     val MESH_TERRAIN_CULL_BOUNDS: ModConfigSpec.BooleanValue
+
+    /** `[mesh] terrainCone` — drop whole back-facing meshlets with a normal-cone test in the AS (P141 B). */
+    val MESH_TERRAIN_CONE: ModConfigSpec.BooleanValue
 
     init {
         BUILDER.comment(
@@ -316,6 +341,22 @@ object IllusionConfig {
             .translation("dxr_mc.configuration.mesh.terrain_cull_bounds")
             .define("terrainCullBounds", false)
 
+        MESH_TERRAIN_CONE = BUILDER
+            .comment(
+                "Cull whole back-facing meshlets with a normal cone built in the amplification",
+                "shader (P141 stage B, experimental).",
+                "Each thread derives the meshlet's normal cone from its triangles; when the whole",
+                "cone points away from the camera the meshlet is dropped, so its vertices are never",
+                "decoded by the mesh shader (up to 126 vertex fetches saved per culled meshlet).",
+                "Only applied to pipelines whose rasterizer state also culls back faces, and only on",
+                "the shader-computed bounding-sphere path (the table path has no vertex data).",
+                "Needs [mesh] terrainCull = true.",
+                "Default ON since P141 continuation 9: the winding sign was verified on hardware",
+                "(a wrong sign culls front faces and terrain shows gaps)."
+            )
+            .translation("dxr_mc.configuration.mesh.terrain_cone")
+            .define("terrainCone", true)
+
         BUILDER.pop()
 
         BUILDER.comment(
@@ -328,13 +369,49 @@ object IllusionConfig {
                 "Load Microsoft PIX's GPU capture layer (WinPixGpuCapturer.dll) at startup, so",
                 "PIX can take GPU captures of this process.",
                 "The layer has to be loaded before the first Direct3D 12 device is created, hence",
-                "the game restart. PIX must be running to actually save a capture; point the",
-                "environment variable MCDR_PIX_CAPTURER at the DLL (or its directory) when PIX is",
-                "installed somewhere unusual."
+                "the game restart. PIX must be running to actually save a capture."
             )
             .translation("dxr_mc.configuration.debug.pixCapture")
             .gameRestart()
             .define("pixCapture", false)
+
+        PIX_DIRECTORY = BUILDER
+            .comment(
+                "Where PIX lives: the install directory (holding WinPixGpuCapturer.dll,",
+                "WinPixTimingCapturer.dll and WinPixEventRuntime_OneCore.dll) or one of those",
+                "DLLs. Leave it empty to use the default install locations (Program Files), which",
+                "is right for a normal install; fill it in when PIX sits somewhere else."
+            )
+            .translation("dxr_mc.configuration.debug.pixDirectory")
+            .gameRestart()
+            .define("pixDirectory", "")
+
+        PIX_TIMING_CAPTURE = BUILDER
+            .comment(
+                "Arm the PIX *timing* capture key (Options - Controls - DXRMC, default F9).",
+                "Press it in game and PIX starts recording a capture into",
+                "run/pix/dxrmc-capture-N.wpix; press it again to stop early, or let it end after",
+                "[debug] pixCaptureFrames frames. Every press writes a new file, and the frame",
+                "budget is read at the moment of the press - no restart needed either way.",
+                "This key exists because PIX's own recording is not usable for that: its",
+                "continuous counters recording stays inside the PIX session until saved, and the",
+                "timing capture PIX starts itself writes to %TEMP% under a name PIX picks. Only",
+                "PIXBeginCapture, called from inside the process, writes where we ask.",
+                "A timing capture records through ETW sessions, so the signed-in user has to be",
+                "allowed to create them; PIX documents putting the user in the built-in",
+                "`Performance Log Users` group for that, and elevation is not needed."
+            )
+            .translation("dxr_mc.configuration.debug.pixTimingCapture")
+            .define("pixTimingCapture", false)
+
+        PIX_CAPTURE_FRAMES = BUILDER
+            .comment(
+                "How many frames one key-press capture records (read when the key is pressed).",
+                "600 frames is about ten seconds at 60 fps, which is already a large file: a",
+                "capture with the memory events on runs to hundreds of megabytes."
+            )
+            .translation("dxr_mc.configuration.debug.pixCaptureFrames")
+            .defineInRange("pixCaptureFrames", 600, 60, 20000)
 
         DEBUG_LAYER = BUILDER
             .comment(

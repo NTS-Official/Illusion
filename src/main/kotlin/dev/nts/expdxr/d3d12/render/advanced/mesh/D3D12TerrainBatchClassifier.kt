@@ -74,6 +74,9 @@ object D3D12TerrainBatchClassifier {
     private var planSegments: Long = 0
     private var planLogged: Int = 0
 
+    /** 段表演练的尝试次数（由 [shouldPlanSegments] 自增，与 [plansBuilt] 区分：那个只数真建了的）。 */
+    private var planAttempts: Long = 0
+
     fun isTerrain(location: String): Boolean = location.contains("terrain")
 
     fun classify(info: BatchInfo): Verdict {
@@ -115,8 +118,20 @@ object D3D12TerrainBatchClassifier {
             "candidateDraws=$candidateDraws candidateIndices=$candidateIndices"
 
     /**
+     * 段表有没有必要真的建出来（P141 续八）。
+     *
+     * <p>[segments] 每次要为整批 draw 新建 4 个 `HashSet` 加一个 `Segment` 对象，而
+     * [noteSegments] 只在前 2 次和每 512 次打一行日志 —— 原先每帧白建 2000 多个对象。
+     * 走到这里就记一次"尝试"，与 [noteSegments] 的打印条件保持一致。
+     */
+    fun shouldPlanSegments(): Boolean {
+        planAttempts++
+        return planLogged < 2L || planAttempts % 512L == 0L
+    }
+
+    /**
      * 从一个批次的 draw 列表摊出段表（只读，不分配 GPU 资源）。
-     * 只在 [Verdict.TERRAIN_MESH_CANDIDATE] 时调用 —— 其它批次没有接管价值。
+     * 只在 [Verdict.TERRAIN_MESH_CANDIDATE] 且 [shouldPlanSegments] 命中时调用。
      */
     fun <T : Any> segments(draws: List<RenderPass.Draw<T>>): SegmentPlan {
         val slots = HashSet<Int>(4)

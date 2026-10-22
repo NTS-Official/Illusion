@@ -101,6 +101,9 @@ object MCDR_ABI {
     private var MH_setloglevel: MethodHandle? = null
     private var MH_setenvironment: MethodHandle? = null
     private var MH_setpixcapture: MethodHandle? = null
+    private var MH_setpixdirectory: MethodHandle? = null
+    private var MH_startpixtiming: MethodHandle? = null
+    private var MH_stoppixtiming: MethodHandle? = null
     private var MH_setshadingrate: MethodHandle? = null
     private var MH_setantialiasing: MethodHandle? = null
     private var MH_createdlssfeature: MethodHandle? = null
@@ -670,6 +673,94 @@ object MCDR_ABI {
             status
         } catch (t: Throwable) {
             System.err.println("[backend-java] dx12SetPixCapture failed: $t")
+            Int.MIN_VALUE
+        }
+    }
+
+    /**
+     * Tell native where PIX's DLLs are (`[debug] pixDirectory`): the DLL itself, or the directory
+     * holding them. Call it before [D3D12SetPIXCapture] — the capture layer has to be loaded
+     * before the first D3D12 device exists, so the path has to be known that early.
+     *
+     * <p>An empty path clears the setting and restores automatic detection (next to MCDR.dll,
+     * then the newest `%ProgramFiles%\\Microsoft PIX\\<version>`).
+     *
+     * @return 1 when the path was accepted, 0 when it was cleared, -1 when it is not valid UTF-8
+     *     or does not exist (native logs the details), and [Int.MIN_VALUE] when the loaded native
+     *     DLL predates this export.
+     */
+    fun D3D12SetPIXDirectory(path: String): Int {
+        if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_setpixdirectory ?: return Int.MIN_VALUE
+        return try {
+            Arena.ofConfined().use { arena ->
+                val status = handle.invokeExact(cstringUtf8(arena, path)) as Int
+                status
+            }
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12SetPixDirectory failed: $t")
+            Int.MIN_VALUE
+        }
+    }
+
+    /**
+     * Start a PIX *timing* capture and have PIX write it to [path] (`.wpix`).
+     *
+     * <p>This is the one capture PIX's own UI cannot produce for us: its continuous ("counters")
+     * recording keeps everything inside the PIX session, and a GPU capture taken by attaching
+     * lands in `%TEMP%`. Only PIXBeginCapture, called by the process itself, writes a file where
+     * the caller asks. `path` is a UTF-8 full path; the caller creates the directory.
+     *
+     * <p>The native side calls PIX on a thread of its own (the render thread's COM apartment is
+     * already fixed, and PIXBeginCapture answers `RPC_E_CHANGED_MODE` from it) and waits up to
+     * ten seconds for the answer.
+     *
+     * @return 1 when the capture started, 0 when one was already running, and on failure the
+     *     HRESULT that explains it (always negative), meant to be shown to the player as-is:
+     *     `E_ACCESSDENIED` (0x80070005) means the process is not elevated — measured here, the
+     *     `Performance Log Users` group is *not* enough on this machine, whatever PIX's docs say
+     *     — and `ERROR_ALREADY_EXISTS` (0x800700B7) means a capture session from an earlier run
+     *     is still alive. `Int.MIN_VALUE` means the loaded DLL predates this export.
+     */
+    fun D3D12StartPIXTimingCapture(path: String): Int {
+        if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_startpixtiming ?: return Int.MIN_VALUE
+        return try {
+            Arena.ofConfined().use { arena ->
+                val status = handle.invokeExact(cstringUtf8(arena, path)) as Int
+                status
+            }
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] mcdrStartPixTimingCapture failed: $t")
+            Int.MIN_VALUE
+        }
+    }
+
+    /**
+     * Stop the capture [D3D12StartPIXTimingCapture] started and let PIX write the file out.
+     *
+     * <p>Returns without waiting: PIX spools the file on its own thread, and a capture with the
+     * memory events on is hundreds of megabytes — blocking the frame that stops it would stall
+     * the game.
+     *
+     * @return 1 when a stop was requested, 0 when nothing was recording, and a negative
+     *     HRESULT when PIX's stop entry point could not be reached or the writer thread could
+     *     not be started, `Int.MIN_VALUE` when the loaded DLL predates this export.
+     */
+    fun D3D12StopPIXTimingCapture(): Int {
+        if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_stoppixtiming ?: return Int.MIN_VALUE
+        return try {
+            val status = handle.invokeExact() as Int
+            status
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] mcdrStopPixTimingCapture failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -2991,12 +3082,27 @@ object MCDR_ABI {
         MH_setlogverbose = skip("mcdrSetLogVerbose", fdv(MCDRLayout.I32))
         // P77:分级日志（0=error 1=warning 2=info 3=debug）。旧 DLL 没有这个导出，此时
         // dx12SetLogLevel 退回布尔版本的 mcdrSetLogVerbose。
-        // 配置 → native 环境变量（可选导出）：native 侧仍有少量开关用 getenv() 读取。
+        // 配置 → native 环境变量（可选导出）：**只**为 native 侧既有的 getenv() 读点兜底，
+        // 不得用于新功能 —— 新开关一律配置项 + 专用 ABI（见 AGENTS.md）。
         MH_setenvironment = skipOptional("mcdr_dx12SetEnvironment", fdv(MCDRLayout.PTR, MCDRLayout.PTR))
         MH_setloglevel = skipOptional("mcdrSetLogLevel", fdv(MCDRLayout.I32))
         // PIX GPU 捕获层（可选导出）：必须在首个 D3D12 设备创建之前调用 —— 捕获层靠挂钩 D3D12
         // 工作，晚一步就抓不到已经建好的对象。旧 DLL 没有这个导出，此时调用返回 MIN_VALUE。
         MH_setpixcapture = skipOptional("mcdrSetPixCapture", fd(MCDRLayout.I32, MCDRLayout.I32))
+        // PIX 的 dll 位置（可选导出）：配置项 [debug] pixDirectory，dll 本身或所在目录。
+        // 必须早于 mcdrSetPixCapture —— 捕获层在首个 D3D12 设备之前载入，路径那时就得定。
+        MH_setpixdirectory = skipOptional(
+            "mcdrSetPixDirectory",
+            fd(MCDRLayout.I32, MCDRLayout.PTR),
+        )
+        // PIX timing 捕获（可选导出）：由进程自己发起 PIXBeginCapture，所以文件落在调用方指定的
+        // 路径上（PIX 界面的持续捕获只留在会话里、不 Save 就没有文件）。字符串按 UTF-8 传，
+        // native 侧再转宽字符；两个函数都在内部自己的线程上等 PIX，不占用渲染线程。
+        MH_startpixtiming = skipOptional(
+            "mcdrStartPixTimingCapture",
+            fd(MCDRLayout.I32, MCDRLayout.PTR),
+        )
+        MH_stoppixtiming = skipOptional("mcdrStopPixTimingCapture", fd(MCDRLayout.I32))
         // P97：VRS 着色粒度（可选导出）。取值是原始 D3D12_SHADING_RATE，-1 = 关闭。能力判据
         // 在 native 侧（tier 0 拒绝、2x4/4x2/4x4 需要 AdditionalShadingRatesSupported）。旧 DLL
         // 没有这个导出，此时调用返回 MIN_VALUE。

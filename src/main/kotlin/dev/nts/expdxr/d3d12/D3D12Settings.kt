@@ -47,6 +47,7 @@ object D3D12Settings {
         val meshTerrain: Boolean,
         val meshTerrainCull: Boolean,
         val meshTerrainCullBounds: Boolean,
+        val meshTerrainCone: Boolean,
         val dumpHlsl: Boolean,
         val debugLayer: Boolean,
         val profiling: Boolean,
@@ -60,6 +61,9 @@ object D3D12Settings {
         val meshDiagnostics: MeshDiagnostics,
         val noCrashPopup: Boolean,
         val nativeLogFile: String,
+        val pixTimingCapture: Boolean,
+        val pixCaptureFrames: Int,
+        val pixDirectory: String,
     )
 
     @Volatile
@@ -106,6 +110,12 @@ object D3D12Settings {
      * 默认关：表内容还没验证过（续四实测开启后大片地形在特定朝向下闪）。
      */
     val meshTerrainCullBounds: Boolean get() = snapshot().meshTerrainCullBounds
+
+    /**
+     * P141 B 阶段：`[mesh] terrainCone` —— AS 里用背面法线锥把整背向相机的 meshlet 剔掉。
+     * 默认开：绕序符号已在实机上验过（p223，用户确认地形正常）。
+     */
+    val meshTerrainCone: Boolean get() = snapshot().meshTerrainCone
     /** `[debug] dumpHlsl` — 把翻译后的 HLSL 落盘（`dxrmc/hlsl/`）。 */
     val dumpHlsl: Boolean get() = snapshot().dumpHlsl
 
@@ -145,6 +155,23 @@ object D3D12Settings {
     /** Mirror the native log into this file (empty = console only). */
     val nativeLogFile: String get() = snapshot().nativeLogFile
 
+    /**
+     * Have the game drive a PIX timing capture itself (`[debug] pixTimingCapture`).
+     *
+     * PIX's own continuous recording never reaches the disk, so a capture only appears under
+     * `run/pix` when the process calls PIXBeginCapture/PIXEndCapture on its own.
+     */
+    val pixTimingCapture: Boolean get() = snapshot().pixTimingCapture
+
+    /** Frames the self-driven PIX timing capture records (`[debug] pixCaptureFrames`). */
+    val pixCaptureFrames: Int get() = snapshot().pixCaptureFrames
+
+    /**
+     * Where PIX is installed, or one of its capture DLLs; empty means "look in the default
+     * install locations" (`[debug] pixDirectory`).
+     */
+    val pixDirectory: String get() = snapshot().pixDirectory
+
     /** Drop the cached snapshot; the next read re-resolves every option. */
     fun reload() {
         snapshot = null
@@ -167,7 +194,8 @@ object D3D12Settings {
             append(s.profiling).append('|')
             append(s.dlssImplementation).append('|')
             append(s.reflexFrameLimitUs).append('|')
-            append(s.nativeLogFile)
+            append(s.nativeLogFile).append('|')
+            append(s.pixDirectory)
         }
         if (wanted == pushed) return
         pushed = wanted
@@ -182,6 +210,9 @@ object D3D12Settings {
             if (s.dlssImplementation == DlssImplementation.STREAMLINE) "1" else null,
         )
         MCDR_ABI.D3D12SetEnvironment("DX12_NATIVE_LOG_FILE", s.nativeLogFile.ifEmpty { null })
+        // PIX 的 dll 位置走专用 ABI（P131 起同类需求都没有环境变量入口了）：配置是唯一来源，
+        // 空值 = 让 native 回到自动检测。
+        MCDR_ABI.D3D12SetPIXDirectory(s.pixDirectory)
         // P131：Reflex 的限帧器没有环境变量入口 —— 直接走 ABI，配置是唯一来源。
         MCDR_ABI.D3D12SetReflexFrameLimit(s.reflexFrameLimitUs)
     }
@@ -261,6 +292,7 @@ object D3D12Settings {
             meshTerrain = config(false) { IllusionConfig.MESH_TERRAIN.get() },
             meshTerrainCull = config(false) { IllusionConfig.MESH_TERRAIN_CULL.get() },
             meshTerrainCullBounds = config(false) { IllusionConfig.MESH_TERRAIN_CULL_BOUNDS.get() },
+            meshTerrainCone = config(false) { IllusionConfig.MESH_TERRAIN_CONE.get() },
             dumpHlsl = config(false) { IllusionConfig.DUMP_HLSL.get() },
             dlssOutputHandover = config(true) { IllusionConfig.DLSS_OUTPUT_HANDOVER.get() } &&
                 !legacy("dlssOutputHandover") {
@@ -297,6 +329,9 @@ object D3D12Settings {
                 legacy("noCrashPopup") { System.getProperty("dxrmc.noPopup") == "true" },
             nativeLogFile = config("") { IllusionConfig.NATIVE_LOG_FILE.get() }
                 .ifEmpty { System.getenv("DX12_NATIVE_LOG_FILE") ?: "" },
+            pixTimingCapture = config(false) { IllusionConfig.PIX_TIMING_CAPTURE.get() },
+            pixCaptureFrames = config(600) { IllusionConfig.PIX_CAPTURE_FRAMES.get() },
+            pixDirectory = config("") { IllusionConfig.PIX_DIRECTORY.get() },
         )
 
         if (configAvailable) {

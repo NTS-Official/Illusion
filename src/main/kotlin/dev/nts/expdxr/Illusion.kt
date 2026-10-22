@@ -116,18 +116,19 @@ class Illusion(modEventBus: IEventBus, modContainer: ModContainer) {
     }
 
     /**
-     * Push `[debug] pixCapture` to the native side.
+     * Push `[debug] pixCapture` / `[debug] pixTimingCapture` to the native side.
      *
      * This is the one setting that cannot be applied late: PIX's capture layer hooks Direct3D 12
      * from inside its own DLL, so it has to be loaded before the first device exists. The config
      * is read during mod construction (well before the renderer starts), and the options carries
      * `gameRestart()` so changing it asks for a restart instead of silently doing nothing.
      *
-     * Loading the library also happens here on the JVM side (see [MCDR_ABI.D3D12SetPIXCapture]),
-     * which is exactly the early moment that makes the capture layer effective.
+     * A self-driven timing capture needs the same layer (it is the ETW half of PIX), so either
+     * switch loads it; telling the native side `true` whenever one of them is on keeps the two
+     * from having to be enabled together by hand.
      */
     private fun applyGpuCaptureConfig() {
-        val enabled = IllusionConfig.PIX_CAPTURE.get()
+        val enabled = IllusionConfig.PIX_CAPTURE.get() || IllusionConfig.PIX_TIMING_CAPTURE.get()
         val status = MCDR_ABI.D3D12SetPIXCapture(enabled)
         when (status) {
             1 -> LOGGER.info("[$MODID] PIX GPU capture layer loaded (PIX must be running to save a capture).")
