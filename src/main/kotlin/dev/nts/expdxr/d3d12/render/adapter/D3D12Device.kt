@@ -184,7 +184,18 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
 
     override fun createBuffer(label: Supplier<String>?, usage: @GpuBuffer.Usage Int, size: Long): GpuBuffer {
         // P75：保留 label（识别 UBO 身份用，见 D3D12GpuBuffer.label）。
-        return D3D12GpuBuffer(usage, size, label?.get() ?: "")
+        val name = label?.get() ?: ""
+        // P199g：定位“每秒创建一个 READBACK 缓冲且从不销毁”的调用方（临时诊断）。
+        if (usage and GpuBuffer.USAGE_MAP_READ != 0) {
+            val n = G_P199G_COUNT.getAndIncrement()
+            if (n < 24) {
+                val stack = Thread.currentThread().stackTrace
+                    .drop(1).take(9).joinToString(" <- ") { "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}" }
+                IllusionLogger.warnMessage(
+                    "[P199g] MAP_READ buffer label='${name}' usage=0x${usage.toUInt().toString(16)} size=${size} @ $stack")
+            }
+        }
+        return D3D12GpuBuffer(usage, size, name)
     }
 
     override fun createBuffer(label: Supplier<String>?, usage: @GpuBuffer.Usage Int,
@@ -886,6 +897,7 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
     // -----------------------------------------------------------------------
 
     companion object {
+        private val G_P199G_COUNT = java.util.concurrent.atomic.AtomicInteger()
         private val LOGGER: Logger = LoggerFactory.getLogger("dxrmc")
 
         /** P15 诊断：标记 DX12 后端是否已成功初始化。 */

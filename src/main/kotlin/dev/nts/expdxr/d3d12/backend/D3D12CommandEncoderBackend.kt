@@ -39,7 +39,12 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
     private val ctx: Long
     private val device: D3D12Device?
     private val transientMemory: D3D12TransientMemory
-    private val pendingCallbacks: MutableList<Runnable> = ArrayList()
+    // P200（内存泄露根因）：拷贝完成回调原先是**每个 encoder 一份**，而 vanilla 的
+    // Screenshot 只在 `createCommandEncoder().copyTextureToBuffer(..., Runnable, 0)` 上
+    // 登记回调、从不提交那个 encoder；更糟的是抽干处写成 `val run = pendingCallbacks`
+    // 后紧接 `clear()`，aliasing 让循环体永远是空的 —— 回调一次都没跑过，截图缓冲因此
+    // 永不 close（每秒 1.6MB READBACK 泄漏）。改为**设备级全局队列 + 取出副本再清空**。
+    private val pendingCallbacks: MutableList<Runnable> get() = GLOBAL_CALLBACKS
     private var currentRenderPass: D3D12RenderPassBackend? = null
     /**
      * P42：标记当前 submit() 走的是 ASYNC 路径。
@@ -480,8 +485,21 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
         this.ensureListOpen()
         MCDR_ABI.D3D12CopyTextureToBuffer(this.ctx, textureHandle(source), mipLevel, 0,
             x, y, width, height, bufferHandle(destination), offset)
+        // P200 取证：这条拷贝的回调挂在哪个 encoder 实例上、什么时候被抽干。
+        if (destination.size() > 1000000L) {
+        }
         // Run the callback after the next submit (mirror of the destroyQueue rotate).
-        this.pendingCallbacks.add(callback)
+        synchronized(this.pendingCallbacks) { this.pendingCallbacks.add(callback) }
+        // P200（内存泄露根因，vanilla 契约）：`Screenshot.takeScreenshot` 只调用
+        // `createCommandEncoder().copyTextureToBuffer(..., Runnable, 0)` 就返回，**从不
+        // submit 这个一次性 encoder**，它期望回调在该帧提交时触发。我们原来的实现把回调
+        // 存在这个 encoder 自己的 pendingCallbacks 里，而它永远不会被提交 → 回调永不执行
+        // → vanilla 的回调里 `buffer.close()` 永不发生，于是每秒一次的自动截图都留下一个
+        // 1.6MB 的 READBACK 缓冲（实测 ~1.6MB/s，与进程 nonLocal 增速 1:1）。
+        // 一次性 encoder（device == null）在这里立刻提交并同步跑回调。
+        if (this.device == null) {
+            this.submit()
+        }
     }
 
     override fun copyTextureToTexture(source: GpuTexture, destination: GpuTexture, mipLevel: Int,
@@ -577,10 +595,19 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
             MCDR_ABI.D3D12BeginCommandList(this.ctx)
             MCDR_ABI.D3D12Submit(this.ctx)
             this.transientMemory.rotate()
-            val run = this.pendingCallbacks
-            this.pendingCallbacks.clear()
+            val run: List<Runnable> = synchronized(this.pendingCallbacks) {
+                ArrayList(this.pendingCallbacks).also { this.pendingCallbacks.clear() }
+            }
+            if (run.isNotEmpty()) {
+            }
             for (callback in run) {
-                callback.run()
+                // 回调里抛异常会被吞掉，外层的截图缓冲就不会 close —— 必须打出来。
+                try {
+                    callback.run()
+                } catch (t: Throwable) {
+                    System.err.println("[P199i] post-submit callback failed: " + t)
+                    t.printStackTrace()
+                }
             }
             return
         }
@@ -615,10 +642,19 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
             MCDR_ABI.D3D12BeginCommandList(this.ctx)
             MCDR_ABI.D3D12Submit(this.ctx)
             this.transientMemory.rotate()
-            val run = this.pendingCallbacks
-            this.pendingCallbacks.clear()
+            val run: List<Runnable> = synchronized(this.pendingCallbacks) {
+                ArrayList(this.pendingCallbacks).also { this.pendingCallbacks.clear() }
+            }
+            if (run.isNotEmpty()) {
+            }
             for (callback in run) {
-                callback.run()
+                // 回调里抛异常会被吞掉，外层的截图缓冲就不会 close —— 必须打出来。
+                try {
+                    callback.run()
+                } catch (t: Throwable) {
+                    System.err.println("[P199i] post-submit callback failed: " + t)
+                    t.printStackTrace()
+                }
             }
             return
         }
@@ -638,10 +674,17 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
         // 步骤 7：post-submit 清理（与旧同步 submit 保持一致）
         this.transientMemory.rotate()
         // Run callbacks queued by the previous frame's copyTextureToBuffer.
-        val run = this.pendingCallbacks
-        this.pendingCallbacks.clear()
+        val run: List<Runnable> = synchronized(this.pendingCallbacks) {
+            ArrayList(this.pendingCallbacks).also { this.pendingCallbacks.clear() }
+        }
         for (callback in run) {
-            callback.run()
+            // 回调里抛异常会被吞掉，外层的截图缓冲就不会 close —— 必须打出来。
+            try {
+                callback.run()
+            } catch (t: Throwable) {
+                System.err.println("[P199i] post-submit callback failed: " + t)
+                t.printStackTrace()
+            }
         }
         // P3 插桩：每 PROF_INTERVAL 帧输出一次各阶段耗时均值（ms）。
         if (prof) {
@@ -741,6 +784,8 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
     }
 
     companion object {
+        private val GLOBAL_CALLBACKS: MutableList<Runnable> = ArrayList()
+
         // -----------------------------------------------------------------------
         // P3 帧时间插桩（仅 DX12_PROF=1 时启用，正常游玩零开销）
         // 目的：量化 submit() 内部各同步阶段（RECORDING_READY 握手 / 等提交完成）

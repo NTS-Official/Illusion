@@ -86,7 +86,10 @@ class D3D12TransientMemory(private val ctx: Long, private val ensureListOpen: Ru
 
     override fun allocateCpu(size: Long, alignment: Long, minimumAllocation: Long, elementSize: Long): ByteBuffer {
         require(size <= Int.MAX_VALUE) { "allocateCpu larger than 2GB is not supported" }
-        return ByteBuffer.allocateDirect(size.toInt())
+        // P199f：原实现用 allocateDirect，每帧成百上千次 → 原生内存只靠 Cleaner 回收，
+        // 实测在世界内 900MB+/min 线性上涨（主菜单平坦）。CPU 暂存最终会被拷进映射缓冲，
+        // 用堆缓冲即可，GC 及时回收，语义不变（默认 BIG_ENDIAN 与原行为一致）。
+        return ByteBuffer.allocate(size.toInt())
     }
 
     override fun allocateStaging(size: Long, alignment: Long,

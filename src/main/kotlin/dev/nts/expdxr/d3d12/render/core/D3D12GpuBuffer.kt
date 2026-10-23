@@ -7,7 +7,7 @@ import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.advanced.mesh.D3D12MeshSectionSnapshot
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-
+import java.util.concurrent.atomic.AtomicLong
 /**
  * D3D12-backed {@link GpuBuffer}.
  *
@@ -27,6 +27,7 @@ class D3D12GpuBuffer(private val usageFlags: Int, private val bufferSize: Long, 
             throw IllegalStateException("dx12CreateBuffer returned a null handle")
         }
     }
+
 
     // 26.3 起 `GpuBuffer` 的实现必须继承 `com.mojang.renderpearl.backend.common.BaseGpuBuffer`：
     // `FrontendRenderPass.validateDraw` 会直接把 draw 的 vertex/index buffer 强转成它
@@ -73,6 +74,7 @@ class D3D12GpuBuffer(private val usageFlags: Int, private val bufferSize: Long, 
     }
 
     companion object {
+        private val G_CLOSE_LOG = java.util.concurrent.atomic.AtomicInteger()
         /**
          * P108z（2026-10-17 崩溃 `crash-2026-10-17_11.18.45-client.txt`）：`ID3D12Resource::Map` 失败
          * 时最常见、也最容易被误读的原因是**设备已被移除**（`DXGI_ERROR_DEVICE_REMOVED` =
@@ -160,6 +162,10 @@ class D3D12GpuBuffer(private val usageFlags: Int, private val bufferSize: Long, 
             return
         }
         this.closed = true
+        // P199h（临时取证）：谁在关缓冲、关了几次。
+        if (label.contains("Screenshot") || (usageFlags and 8 != 0 && G_CLOSE_LOG.getAndIncrement() < 4)) {
+            System.err.println("[P199h] GpuBuffer.close label='$label' size=$bufferSize")
+        }
         MCDR_ABI.ID3D12DestroyResource(this.handle)
     }
 

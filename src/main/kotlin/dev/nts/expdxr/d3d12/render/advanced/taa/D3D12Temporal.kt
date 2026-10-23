@@ -417,7 +417,7 @@ object D3D12Temporal {
             data
         } catch (t: Throwable) {
             // 只读缓冲等：退回"新缓冲"—— 新缓冲从 0 起自带整份 64B 负载，remaining 与调用方一致。
-            val out = ByteBuffer.allocateDirect(data.remaining()).order(ByteOrder.LITTLE_ENDIAN)
+            val out = ByteBuffer.allocate(data.remaining()).order(ByteOrder.LITTLE_ENDIAN)
             out.asFloatBuffer().put(jittered, 0, 16)
             out
         }

@@ -8,6 +8,7 @@ import dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling;
 import dev.nts.expdxr.dxrmc.nvidia.reflex.NvidiaReflex;
 import java.util.Arrays;
 
+import net.minecraft.ChatFormatting;
 import net.minecraft.client.OptionInstance;
 import net.minecraft.client.Options;
 import net.minecraft.client.gui.components.AbstractWidget;
@@ -66,7 +67,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 public abstract class VideoSettingsScreenMixin {
     @Unique private int dxr_mc$renderScaleSynced = Integer.MIN_VALUE;
     @Unique private int dxr_mc$antiAliasingSynced = Integer.MIN_VALUE;
-
+    
+    @Unique private final Component ILLUSION_HEADER = Component.translatable("options.video.illusion.header").withStyle(ChatFormatting.UNDERLINE, ChatFormatting.BOLD);
     // HDR (P198) - 追加到原版"显示"页末尾
     @Inject(method = "displayOptions", at = @At("RETURN"), cancellable = true)
     private static void dxr_mc$addHdr(Options options, CallbackInfoReturnable<OptionInstance<?>[]> cir) {
@@ -99,7 +101,7 @@ public abstract class VideoSettingsScreenMixin {
         if (!D3D12HdrPresentation.isAvailable()) return;
 
         // Header
-        list.addHeader(Component.translatable("options.video.illusion.header"));
+        list.addHeader(ILLUSION_HEADER);
 
         // Render scaling
         list.addBig(D3D12RenderScale.option());
