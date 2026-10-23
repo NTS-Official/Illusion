@@ -1,5 +1,6 @@
 package dev.nts.expdxr.mixin.render;
 
+import com.mojang.renderpearl.api.textures.GpuTextureView;
 import dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling;
 import net.minecraft.client.renderer.DebugCrosshairRenderer;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
@@ -27,11 +28,16 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(DebugCrosshairRenderer.class)
 public class DebugCrosshairRendererMixin {
+    // 26.3：render(CameraRenderState, int, GpuTextureView, GpuTextureView) 多出 color/depth
+    // 两个目标视图参数；@Inject 的处理器签名必须**逐个对上**目标参数，否则启动时
+    // Mixin 报 "Invalid descriptor on render"。补画时把同一对视图原样传回去。
     @Inject(method = "render", at = @At("HEAD"), cancellable = true, remap = false)
-    private void dxr_mc$deferForDlss(CameraRenderState cameraState, int guiScale, CallbackInfo ci) {
+    private void dxr_mc$deferForDlss(CameraRenderState cameraState, int guiScale,
+            GpuTextureView colorTexture, GpuTextureView depthTexture, CallbackInfo ci) {
         if (DeepLearningSuperSampling.isEnabled()) {
             DeepLearningSuperSampling.deferCrosshair(
-                    (DebugCrosshairRenderer) (Object) this, cameraState, guiScale);
+                    (DebugCrosshairRenderer) (Object) this, cameraState, guiScale,
+                    colorTexture, depthTexture);
             ci.cancel();
         }
     }

@@ -1,10 +1,15 @@
 package dev.nts.expdxr.d3d12.backend
 
-import com.mojang.blaze3d.buffers.GpuBuffer
-import com.mojang.blaze3d.buffers.GpuBufferSlice
-import com.mojang.blaze3d.buffers.GpuFence
-import com.mojang.blaze3d.systems.*
-import com.mojang.blaze3d.textures.GpuTexture
+import com.mojang.renderpearl.backend.api.CommandEncoderBackend
+import com.mojang.renderpearl.backend.api.RenderPassBackend
+import com.mojang.renderpearl.api.buffers.GpuBuffer
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice
+import com.mojang.renderpearl.api.commands.GpuFence
+import com.mojang.renderpearl.api.buffers.TransientMemory
+import com.mojang.renderpearl.api.commands.GpuQueryPool
+import com.mojang.renderpearl.api.commands.RenderPass
+import com.mojang.renderpearl.api.commands.RenderPassDescriptor
+import com.mojang.renderpearl.api.textures.GpuTexture
 import dev.nts.expdxr.misc.IllusionLogger
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.adapter.D3D12Device
@@ -369,7 +374,7 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
 
     override fun clearColorAndDepthTextures(colorTexture: GpuTexture, clearColor: Vector4fc,
         depthTexture: GpuTexture, clearDepth: Double, regionX: Int, regionY: Int,
-        regionWidth: Int, regionHeight: Int) {
+        regionWidth: Int, regionHeight: Int, mipLevel: Int) {
         // P33：确保命令列表已打开
         this.ensureListOpen()
         // P3b fix：GuiItemAtlas 槽位 STALE 重绘前只清该槽位矩形区域。原实现忽略
@@ -389,7 +394,7 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
     }
 
     /**
-     * 26.2 新增的 CommandEncoderBackend 抽象方法：清空模板纹理。
+     * 清空模板纹理（26.2 曾是该接口的抽象方法，26.3 已从 CommandEncoderBackend 移除）。
      *
      * 写法与 [clearDepthTexture] 完全一致：先 [ensureListOpen]（P33），再用
      * [textureHandle] 取 native 句柄（非 D3D12GpuTexture 会在 cast 处抛

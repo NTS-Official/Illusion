@@ -1,6 +1,6 @@
 package dev.nts.expdxr.d3d12.backend
 
-import com.mojang.blaze3d.GpuFormat
+import com.mojang.renderpearl.api.GpuFormat
 import org.jspecify.annotations.Nullable
 
 /**

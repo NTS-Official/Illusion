@@ -1,9 +1,9 @@
 package dev.nts.expdxr.d3d12.render.advanced.smaa
 
-import com.mojang.blaze3d.GpuFormat
+import com.mojang.renderpearl.api.GpuFormat
 import com.mojang.blaze3d.pipeline.RenderTarget
 import com.mojang.blaze3d.systems.RenderSystem
-import com.mojang.blaze3d.textures.GpuTextureView
+import com.mojang.renderpearl.api.textures.GpuTextureView
 import dev.nts.expdxr.Illusion
 import dev.nts.expdxr.d3d12.render.adapter.D3D12Device
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale
@@ -42,7 +42,9 @@ import net.minecraft.client.Minecraft
  * 兜底对 renderScale < 100% 是不安全的，界面必须始终待在自己的窗口尺寸目标里。
  */
 class D3D12GUIRenderTarget(useStencil: Boolean) :
-    RenderTarget("DXRMC GUI", true, useStencil, GpuFormat.RGBA8_UNORM)
+    // 26.3：RenderTarget 的构造器变成 (label, colorFormat, depthFormat)，不再有 clear/stencil 布尔。
+    RenderTarget("DXRMC GUI", GpuFormat.RGBA8_UNORM,
+        if (useStencil) GpuFormat.D32_FLOAT_S8_UINT else GpuFormat.D32_FLOAT)
 
 object D3D12GUISplit {
 
@@ -176,9 +178,10 @@ object D3D12GUISplit {
         return try {
             val existing = target
             if (existing == null) {
-                // 深度格式必须与主目标一致（useStencil 决定 D32_FLOAT 还是带模板的格式），
+                // 深度格式必须与主目标一致（主目标带模板 -> 这里也用 D32_FLOAT_S8_UINT），
                 // 否则界面管线在两张目标之间来回切换时会不停重建 PSO。
-                val created = D3D12GUIRenderTarget(minecraft.gameRenderer.mainRenderTarget().useStencil)
+                // 26.3：RenderTarget 已无 useStencil，改用 hasDepth() 判定。
+                val created = D3D12GUIRenderTarget(minecraft.gameRenderer.mainRenderTarget().hasDepth())
                 created.resize(width, height)
                 target = created
                 logGeometry(minecraft, created, "active")

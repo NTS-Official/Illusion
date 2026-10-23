@@ -2,9 +2,9 @@ package dev.nts.expdxr.d3d12.render.core
 
 import dev.nts.expdxr.misc.IllusionLogger
 
-import com.mojang.blaze3d.buffers.GpuBuffer
-import com.mojang.blaze3d.buffers.GpuBufferSlice
-import com.mojang.blaze3d.systems.TransientMemory
+import com.mojang.renderpearl.api.buffers.GpuBuffer
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice
+import com.mojang.renderpearl.api.buffers.TransientMemory
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import java.nio.ByteBuffer
 import java.util.ArrayList

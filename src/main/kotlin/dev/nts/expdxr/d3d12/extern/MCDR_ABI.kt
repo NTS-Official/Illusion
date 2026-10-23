@@ -2151,7 +2151,7 @@ object MCDR_ABI {
     /**
      * P141：为段表前 [groupCount] 个组生成对象空间包围球（16 B/组：`center.xyz` + `radius`）。
      *
-     * [bounds] 必须是用 usage 位 **512**（`ALLOW_UNORDERED_ACCESS`）建的 UAV 缓冲，
+     * [bounds] 必须是用 usage 位 **1024**（`ALLOW_UNORDERED_ACCESS`）建的 UAV 缓冲，
      * 长度至少 `groupCount * 16`；函数返回后它处于 `NON_PIXEL_SHADER_RESOURCE`，
      * 可直接作为 [D3D12MeshDrawSegmentsCulled] 的 `meshletBounds`（AS 走 CPU 表分支）。
      */

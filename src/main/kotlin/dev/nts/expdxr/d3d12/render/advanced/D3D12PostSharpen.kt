@@ -1,7 +1,7 @@
 package dev.nts.expdxr.d3d12.render.advanced
 
-import com.mojang.blaze3d.GpuFormat
-import com.mojang.blaze3d.textures.GpuTexture
+import com.mojang.renderpearl.api.GpuFormat
+import com.mojang.renderpearl.api.textures.GpuTexture
 import org.slf4j.LoggerFactory
 import dev.nts.expdxr.d3d12.D3D12Settings
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI

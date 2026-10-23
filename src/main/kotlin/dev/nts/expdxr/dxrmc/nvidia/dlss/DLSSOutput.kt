@@ -1,7 +1,7 @@
 package dev.nts.expdxr.dxrmc.nvidia.dlss
 
-import com.mojang.blaze3d.GpuFormat
-import com.mojang.blaze3d.textures.GpuTexture
+import com.mojang.renderpearl.api.GpuFormat
+import com.mojang.renderpearl.api.textures.GpuTexture
 import dev.nts.expdxr.Illusion
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuTexture

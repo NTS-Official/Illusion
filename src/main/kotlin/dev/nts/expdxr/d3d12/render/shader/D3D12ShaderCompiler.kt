@@ -1,14 +1,15 @@
 package dev.nts.expdxr.d3d12.render.shader
 
-import com.mojang.blaze3d.pipeline.BindGroupLayout
-import com.mojang.blaze3d.pipeline.RenderPipeline
-import com.mojang.blaze3d.preprocessor.GlslPreprocessor
-import com.mojang.blaze3d.shaders.ShaderType
-import com.mojang.blaze3d.vulkan.glsl.ShaderCompileException
+import com.mojang.renderpearl.api.pipeline.BindGroupLayout
+import com.mojang.renderpearl.api.pipeline.RenderPipeline
+import com.mojang.renderpearl.api.pipeline.ShaderType
+import com.mojang.renderpearl.api.pipeline.UniformType
+import com.mojang.renderpearl.util.ShaderCompileException
 import dev.nts.expdxr.d3d12.D3D12Settings
 import dev.nts.expdxr.misc.IllusionLogger
 import dev.nts.expdxr.d3d12.backend.D3D12BindGroupEntry
 import net.minecraft.client.renderer.ShaderDefines
+import net.minecraft.resources.Identifier
 import org.lwjgl.system.MemoryUtil
 import org.lwjgl.util.shaderc.Shaderc
 import java.util.*
@@ -42,9 +43,13 @@ class D3D12ShaderCompiler : AutoCloseable {
      * 对应官方 {@code GlslCompiler.createIntermediary}。
      */
     @Throws(ShaderCompileException::class)
-    fun createIntermediary(filename: String, source: String, type: ShaderType): D3D12IntermediaryShaderModule {
+    fun createIntermediary(filename: String, source: String, type: ShaderType,
+                           includeResolver: ((Identifier) -> String?)? = null): D3D12IntermediaryShaderModule {
         var source = source
-        source = GlslPreprocessor.injectDefines(source, this.globalDefines)
+        source = injectShaderDefines(source, this.globalDefines)
+        if (includeResolver != null) {
+            source = expandShaderIncludes(source, includeResolver)
+        }
         val shaderType = if (type == ShaderType.FRAGMENT) 1 else 0  // SHADERC_FRAGMENT_SHADER=1, VERTEX=0
         val sourceBuffer = MemoryUtil.memUTF8(source, false)
         val filenameBuffer = MemoryUtil.memUTF8(filename)
@@ -54,6 +59,14 @@ class D3D12ShaderCompiler : AutoCloseable {
         try {
             val status = Shaderc.shaderc_result_get_compilation_status(result)
             if (status != 0) {
+                // 失败现场落盘：26.3 的 include 展开 + defines 注入都是文本级的，没有原文件对照
+                // 时只能看 shaderc 给的行号，先把真正送进编译器的源码留下来。
+                runCatching {
+                    val dir = java.nio.file.Path.of(System.getProperty("user.dir"), "dxrmc")
+                    java.nio.file.Files.createDirectories(dir)
+                    val safe = filename.replace('/', '_').replace(':', '_')
+                    java.nio.file.Files.writeString(dir.resolve("glsl_${safe}.failed.glsl"), source)
+                }
                 throw ShaderCompileException(
                     "Couldn't parse GLSL: ${Shaderc.shaderc_result_get_error_message(result)}")
             }
@@ -230,7 +243,13 @@ class D3D12ShaderCompiler : AutoCloseable {
                 val name = sampler.name()
                 uniformDescription = BindGroupLayout.flattenUniforms(pipeline.bindGroupLayouts).stream()
                     .filter { d -> d.name() == name }.findFirst()
-                if (uniformDescription.isPresent) {
+                // 26.3：flattenUniforms 会返回**所有** uniform（含 COMBINED_IMAGE_SAMPLER），
+                // 而 26.2 的语义是「出现在这里 = texel buffer」（采样器走 flattenSamplers）。
+                // 所以判据必须从「名字存在」改成「类型是 TEXEL_BUFFER」，否则 Sampler0 这类
+                // 组合采样器会被当成 UTB，dim=1 直接抛 "must have type of SpvDimBuffer"。
+                val isTexelBuffer = uniformDescription.isPresent &&
+                    uniformDescription.get().type() == UniformType.TEXEL_BUFFER
+                if (isTexelBuffer) {
                     if (sampler.dimensions() != 5) {
                         IllusionLogger.debugFormat("[backend-java] addToBindGroup: UTB '%s' in %s has dim %d (expected 5)%n",
                             name, pipeline.location, sampler.dimensions())
@@ -247,7 +266,12 @@ class D3D12ShaderCompiler : AutoCloseable {
                     )
                     continue
                 }
-                if (BindGroupLayout.flattenSamplers(pipeline.bindGroupLayouts).stream().noneMatch { s -> s == name }) {
+                // 26.3 删掉了 BindGroupLayout.flattenSamplers：采样器统一由 flattenUniforms 给出，
+                // 用 UniformType.COMBINED_IMAGE_SAMPLER 过滤出采样器/纹理对的名字。
+                val samplerNames = BindGroupLayout.flattenUniforms(pipeline.bindGroupLayouts)
+                if (samplerNames.stream().noneMatch { u ->
+                        u.type() == UniformType.COMBINED_IMAGE_SAMPLER && u.name() == name
+                    }) {
                     IllusionLogger.debugFormat("[backend-java] addToBindGroup: sampler '%s' not found in %s%n",
                         name, pipeline.location)
                     throw ShaderCompileException("Unable to find shader defined uniform ($name)")
@@ -267,4 +291,80 @@ class D3D12ShaderCompiler : AutoCloseable {
         }
 
     }
+}
+
+/**
+ * 26.3 删掉了 `com.mojang.blaze3d.preprocessor.GlslPreprocessor`：defines 不再由 blaze3d
+ * 注入，而是由 [ShaderDefines.asSourceDirectives] 生成 `#define` 行、各后端自己决定怎么用
+ * （官方 shaderc 后端走编译宏，我们把它们写进源码 —— 零额外状态，落盘的 GLSL 也自解释）。
+ *
+ * 插入位置必须在 `#version` 之后：GLSL 规定 `#version` 是第一条指令，写在它前面 shaderc
+ * 会直接报 parse error。
+ */
+internal fun injectShaderDefines(source: String, defines: ShaderDefines): String {
+    if (defines.isEmpty) return source
+    var directives = defines.asSourceDirectives()
+    if (directives.isEmpty()) return source
+    if (!directives.endsWith("\n")) directives += "\n"
+    val version = source.indexOf("#version")
+    if (version < 0) return directives + source
+    val lineEnd = source.indexOf('\n', version)
+    if (lineEnd < 0) return source + "\n" + directives
+    return source.substring(0, lineEnd + 1) + directives + source.substring(lineEnd + 1)
+}
+
+/** `#include <minecraft:fog.glsl>`（26.3 的唯一形式；`#moj_import` 已不存在）。 */
+private val GLSL_INCLUDE_PATTERN =
+    Pattern.compile("^[ \\t]*#[ \\t]*include[ \\t]+<([^>\\r\\n]+)>[ \\t]*\\r?$", Pattern.MULTILINE)
+
+/** 展开深度上限：normal 链最长 core 着色器到叶子 include 约 4~6 层，留足余量。 */
+private const val MAX_INCLUDE_DEPTH = 16
+
+/** 展开后源码上限（字符）：防止 include 互相引用导致无限膨胀。 */
+private const val MAX_EXPANDED_CHARS = 8 * 1024 * 1024
+
+/**
+ * 26.3 把 GLSL include 解析从 `GlslPreprocessor` 挪到了官方 `GlslCompiler` 的 shaderc
+ * include 回调（`shaderc_compile_options_set_include_callbacks` + `ShaderSource.getInclude`），
+ * 我们这条自建的 GLSL→SPIR-V 路径没有回调，因此必须在送进 shaderc 之前**文本展开**。
+ *
+ * 逐行匹配 `#include <id>`，用 [includeResolver] 取回被包含源码后递归展开；取不到时
+ * 原样保留指令（shaderc 会报 "unexpected include directive"，错误信息仍指向真实行号）。
+ * 不做条件编译感知 —— vanilla 的 include 文件都自带 `#ifndef` 守卫，重复/越界包含是幂等的。
+ */
+internal fun expandShaderIncludes(source: String, includeResolver: (Identifier) -> String?): String {
+    return expandIncludesRecursive(source, includeResolver, 0)
+}
+
+private fun expandIncludesRecursive(source: String, includeResolver: (Identifier) -> String?,
+                                    depth: Int): String {
+    if (depth >= MAX_INCLUDE_DEPTH) return source
+    val matcher = GLSL_INCLUDE_PATTERN.matcher(source)
+    if (!matcher.find()) return source
+    val out = StringBuilder(source.length + 1024)
+    var last = 0
+    do {
+        out.append(source, last, matcher.start())
+        val idText = matcher.group(1)!!.trim()
+        val included = try {
+            includeResolver(Identifier.parse(idText))
+        } catch (e: Exception) {
+            IllusionLogger.debugFormat("[backend-java] include '%s' unresolved: %s%n", idText, e.message)
+            null
+        }
+        if (included == null) {
+            out.append(matcher.group())
+        } else {
+            out.append("// >>> include ").append(idText).append('\n')
+            out.append(expandIncludesRecursive(included, includeResolver, depth + 1))
+            out.append("// <<< include ").append(idText).append('\n')
+        }
+        last = matcher.end()
+        if (out.length > MAX_EXPANDED_CHARS) {
+            IllusionLogger.warnFormat("[backend-java] shader include expansion exceeded %d chars, truncated%n", MAX_EXPANDED_CHARS)
+            break
+        }
+    } while (matcher.find())
+    out.append(source, last, source.length)
+    return out.toString()
 }

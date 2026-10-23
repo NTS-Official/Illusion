@@ -25,7 +25,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public class GameRendererSmaaWorldMixin {
 
     @Inject(method = "render", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/gui/render/GuiRenderer;render()V"), remap = false)
-    private void dx12_smaaWorldOnly(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
+    private void dx12_smaaWorldOnly(CallbackInfo ci) {
         // P77：TAA 与 SMAA 是同一个选项的两个取值，互斥；排在 SMAA 旁边，谁被选中谁动手。
         D3D12TAA.applyIfEnabled();
         D3D12SMAAWorld.applyIfEnabled();
@@ -58,11 +58,11 @@ public class GameRendererSmaaWorldMixin {
      */
     @Inject(method = "render",
             at = @At(value = "INVOKE",
-                     target = "Lcom/mojang/blaze3d/systems/CommandEncoder;" +
-                             "clearDepthTexture(Lcom/mojang/blaze3d/textures/GpuTexture;D)V",
+                     target = "Lcom/mojang/renderpearl/api/commands/CommandEncoder;" +
+                             "clearDepthTexture(Lcom/mojang/renderpearl/api/textures/GpuTexture;D)V",
                      shift = At.Shift.BEFORE),
             remap = false)
-    private void dxr_mc$dlssBeforeDepthClear(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
+    private void dxr_mc$dlssBeforeDepthClear(CallbackInfo ci) {
         DeepLearningSuperSampling.reconcileAntiAliasingEveryFrame();
         // Reflex PCL stats
         DeepLearningSuperSampling.pclFrameBegin();

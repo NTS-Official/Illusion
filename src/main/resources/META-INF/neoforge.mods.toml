@@ -11,7 +11,10 @@ modId="${mod_id}"
 version="${mod_version}"
 displayName="${mod_name}"
 
-updateJSONURL="https://github.com/NTS-Official/Illusion/updates.json"
+# 26.3 迁移清理（P193）：原来的 updateJSONURL 指向
+# https://github.com/NTS-Official/Illusion/updates.json —— 该地址（含 raw/main、raw/master 形式）实测全部 404，
+# NeoForge 的 VersionChecker 拉回来解析后对 null 的 "promos" 调用 has() → 每次启动一条 NPE 日志。
+# 仓库里也没有这个文件，所以先去掉声明；等真正发布 updates.json 再按 raw.githubusercontent.com 的直链填回来。
 displayURL="https://github.com/NTS-Official/Illusion"
 
 iconFile="assets/${mod_id}/icon.png"

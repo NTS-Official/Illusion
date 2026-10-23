@@ -1,6 +1,6 @@
 package dev.nts.expdxr.d3d12.render.adapter
 
-import com.mojang.blaze3d.systems.DeviceType
+import com.mojang.renderpearl.api.device.DeviceType
 import java.util.*
 
 /**

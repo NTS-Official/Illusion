@@ -47,7 +47,7 @@ internal object D3D12PixCaptureController {
     /** `Ctrl`-free single key on purpose: captures are started while flying around, not in a menu. */
     private val KEY = KeyMapping(
         KEY_NAME,
-        InputConstants.Type.KEYSYM,
+        InputConstants.Type.KEYBOARD,
         InputConstants.KEY_F9,
         CATEGORY,
     )

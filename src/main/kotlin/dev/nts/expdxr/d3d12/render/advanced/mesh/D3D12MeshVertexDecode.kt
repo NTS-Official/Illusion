@@ -1,6 +1,6 @@
 package dev.nts.expdxr.d3d12.render.advanced.mesh
 
-import com.mojang.blaze3d.vertex.VertexFormat
+import com.mojang.renderpearl.api.vertex.VertexFormat
 
 /**
  * P128（mesh Step 3 后半第 1 项）：**顶点解码生成器**。
@@ -106,7 +106,15 @@ object D3D12MeshVertexDecode {
             "SPIRV_Cross_Output vs_main(SPIRV_Cross_Input stage_input)"
         )
         // P135：逐区块 cbuffer → ByteAddressBuffer + 成员宏（宏在 gSegBase 之上取值）。
-        val section = parseCBuffer(renamed, "ChunkSection")
+        // 只认 26.2 的布局：`mat4 ModelViewMat`(0..63) + `float ChunkVisibility`(64)，也就是
+        // native 那 96 字节段记录的布局。26.3 的地形改用 `MULTIDRAW_TERRAIN` 逐顶点属性后，
+        // 非 multidraw 管线里的 `ChunkSection` 只剩 `{ ivec3 ChunkPosition; float ChunkVisibility }`
+        // —— 偏移对不上，硬套宏会把 ModelViewMat 的 float 当 ivec3 读，表现就是"区块内容正常、
+        // 但位置错乱，转视角/移动时到处乱跳"。这种布局直接放弃替换，交给原版 cbuffer 绑定。
+        val sectionMembers = parseCBuffer(renamed, "ChunkSection")
+        val section = sectionMembers?.takeIf { members ->
+            members.any { it.type.endsWith("4x4") && it.offset == 0 }
+        }
         if (section != null) {
             renamed = stripCBuffer(renamed, "ChunkSection")
         }
@@ -115,7 +123,12 @@ object D3D12MeshVertexDecode {
         // 而不是 group id —— 同一段会被多个 group 分摊。
         val sectionSet = if (section == null) "" else "    gSegBase = seg.sectionIndex * 96u;"
         // P138：逐段淡入系数（`ChunkVisibility`，offset 64）走 VS→PS 插值，PS 不再读逐 draw 的 CBV。
-        val visibilityField = if (section != null && visibilitySemantic != null) {
+        // 26.3：`MULTIDRAW_TERRAIN` 地形把 `ChunkVisibility` 变成顶点属性（location 5），
+        // VS 自己算 `out chunkVisibility` → `SPIRV_Cross_Output` 里**已经有**这个字段。
+        // 这时若仍然按老路数写 `verts[vid].chunkVisibility = meshSectionF(64)`，就会用段表里
+        // 的陈旧/零值覆盖原版算好的逐顶点淡入（表现为远景整片被雾色吃掉），所以直接交给原版。
+        val vanillaOwnsVisibility = hasOutputField(renamed, "SPIRV_Cross_Output", VISIBILITY_FIELD)
+        val visibilityField = if (section != null && visibilitySemantic != null && !vanillaOwnsVisibility) {
             addInterpolant(renamed, "SPIRV_Cross_Output", VISIBILITY_FIELD, visibilitySemantic)
         } else {
             null
@@ -136,12 +149,18 @@ object D3D12MeshVertexDecode {
         // 矩阵"的管线启用 —— 视锥平面直接由 HLSL 从 Projection cbuffer 取，CPU 侧不提供矩阵
         // （`D3D12Temporal.currentProjection()` 只在 temporal 路径的 UBO 写拦截里有值，普通
         // 绘制时是 null；见 P140 实测 3583 次 "no level projection"）。
-        val projectionMember = if (meshletCull && section != null) {
-            parseCBuffer(renamed, "Projection")?.firstOrNull { it.type == "float4x4" }?.name
+        // P140：AS 剔除只要求"VS 里带 Projection 矩阵"（视锥平面由 HLSL 从 Projection cbuffer 现算）。
+        // 26.2 这里还要求 `section != null`（逐区块 cbuffer）当作"这是地形管线"的判据，但 26.3 的
+        // 地形改成 `MULTIDRAW_TERRAIN` 顶点属性路线（`ChunkPosition`/`ChunkVisibility` 变 location
+        // 4/5 的 in 变量），terrain 的 HLSL 里**不再有** `ChunkSection` cbuffer —— 沿用旧判据会让
+        // 地形永远拿不到 AS（`as_main` 不生成 → dxc "missing entry point definition"）。
+        // 是否地形已由调用方通过 `meshletCull` 决定，这里只补 Projection 这个硬前提。
+        val projectionMember = if (meshletCull) {
+            parseCBuffer(renamed, "Projection")?.firstOrNull { it.type.endsWith("4x4") }?.name
         } else {
             null
         }
-        val cullActive = meshletCull && section != null && projectionMember != null
+        val cullActive = meshletCull && projectionMember != null
         val asThreads = MAX_MESHLETS_PER_AS_GROUP
         val cullDecl = if (!cullActive) "" else """
 // P140：meshlet 包围球表（16 字节/组，与段表同序）：{ float3 模型空间球心; float 半径 }
@@ -454,6 +473,21 @@ $visibilityWrite    if ((vid % 3u) == 0u) {
     }
 
     /** 生成"按 gSegBase 读本段数据"的声明 + 成员宏。 */
+    /** `struct <structName>` 里是否已经声明了 `field`（用于避免与 26.3 原生插值量撞名）。 */
+    private fun hasOutputField(hlsl: String, structName: String, field: String): Boolean {
+        val start = hlsl.indexOf("struct $structName")
+        if (start < 0) return false
+        val open = hlsl.indexOf('{', start)
+        val close = hlsl.indexOf("};", open)
+        if (open < 0 || close < 0) return false
+        return Regex("\\b" + Regex.escape(field) + "\\s*:")
+            .containsMatchIn(hlsl.substring(open, close))
+    }
+
+    /** 26.3：VS 的 `SPIRV_Cross_Output` 是否自带 `chunkVisibility`（MULTIDRAW_TERRAIN 路线）。 */
+    fun vertexOwnsVisibility(vsHlsl: String): Boolean =
+        hasOutputField(vsHlsl, "SPIRV_Cross_Output", VISIBILITY_FIELD)
+
     private fun buildSectionAccess(members: List<CBufferMember>): String {
         val sb = StringBuilder()
         sb.append("\n// P135：逐区块数据（原 cbuffer ChunkSection）\n")
@@ -587,6 +621,28 @@ $visibilityWrite    if ((vid % 3u) == 0u) {
         return hlsl.substring(0, insertAt) +
             "    float $field : $semantic;  // P138：逐段淡入系数（VS→PS 插值）\n" +
             hlsl.substring(insertAt)
+    }
+
+    /**
+     * 26.3：原版 PS 是否**已经**自己消费 `chunkVisibility` 插值量。
+     *
+     * 26.2 的 `core/terrain.fsh` 从 `ChunkSection` UBO 里读逐 draw 的 `ChunkVisibility`，所以
+     * P138 要给 PS 造一个人造插值量 + 文件级 `static float chunkVisibility`。26.3 把淡入改成
+     * 顶点着色器输出（`terrain.vsh: layout(location = 4) out float chunkVisibility`）→
+     * spvc 生成的 `SPIRV_Cross_Input` 里已经有 `float chunkVisibility : TEXCOORDn`，再打补丁
+     * 会得到两个同名声明，DXC 直接 `redefinition of 'chunkVisibility'`。
+     *
+     * 检测到这种原生插值时，[patchFragmentVisibility] 应当跳过，调用点只需
+     * `perSectionVisibility = true` 并用**未打补丁**的 PS 编译。
+     */
+    fun fragmentConsumesVisibility(psHlsl: String): Boolean {
+        val start = psHlsl.indexOf("struct SPIRV_Cross_Input")
+        if (start < 0) return false
+        val open = psHlsl.indexOf('{', start)
+        val close = psHlsl.indexOf("};", open)
+        if (open < 0 || close < 0) return false
+        return Regex("\\bfloat\\s+" + VISIBILITY_FIELD + "\\s*:")
+            .containsMatchIn(psHlsl.substring(open, close))
     }
 
     /**

@@ -1,16 +1,17 @@
 package dev.nts.expdxr.d3d12.backend
 
 
-import com.mojang.blaze3d.IndexType
-import com.mojang.blaze3d.buffers.GpuBuffer
-import com.mojang.blaze3d.buffers.GpuBufferSlice
-import com.mojang.blaze3d.pipeline.RenderPipeline
-import com.mojang.blaze3d.systems.GpuQueryPool
-import com.mojang.blaze3d.systems.RenderPass
-import com.mojang.blaze3d.systems.RenderPass.RenderArea
-import com.mojang.blaze3d.systems.RenderPassBackend
-import com.mojang.blaze3d.textures.GpuSampler
-import com.mojang.blaze3d.textures.GpuTextureView
+import com.mojang.renderpearl.api.pipeline.IndexType
+import com.mojang.renderpearl.api.buffers.GpuBuffer
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice
+import com.mojang.renderpearl.api.pipeline.BindGroupLayout
+import com.mojang.renderpearl.backend.api.BackendRenderPipeline
+import com.mojang.renderpearl.api.commands.GpuQueryPool
+import com.mojang.renderpearl.api.commands.RenderPass
+import com.mojang.renderpearl.api.commands.RenderPass.RenderArea
+import com.mojang.renderpearl.backend.api.RenderPassBackend
+import com.mojang.renderpearl.api.textures.GpuSampler
+import com.mojang.renderpearl.api.textures.GpuTextureView
 import dev.nts.expdxr.CommandBundleMode
 import dev.nts.expdxr.d3d12.D3D12Settings
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
@@ -76,7 +77,7 @@ private const val MESHLET_BOUNDS_BYTES = 16L
  * `desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS`，并且这类缓冲**不参与池复用**
  * （池键只有堆类型+容量，复用会串标志）。
  */
-private const val MESHLET_BOUNDS_USAGE = 512
+private const val MESHLET_BOUNDS_USAGE = 1024
 
 /**
  * P137：`ChunkVisibility` 到这个值就算淡入完成（原版是 `elapsed/fadeDuration`，走完正好 1.0）。
@@ -147,6 +148,10 @@ class D3D12RenderPassBackend(
     private var pipeline: D3D12CompiledRenderPipeline? = null
     private var anyDescriptorDirty = false
 
+    /** 26.3：当前管线的 uniform 名字表（顺序 = `pipeline.getBindGroupLayouts` 展平顺序）。 */
+    private var uniformNames: List<String> = emptyList()
+    private var pushConstantsWarned = false
+
     /**
      * P141 续八：除 `ChunkSection` 外的 uniform 自上次 [materialSignature] 以来变过。
      *
@@ -172,8 +177,15 @@ class D3D12RenderPassBackend(
      * <p>原先在每 draw 的循环里现造一个 lambda（1231 次/帧），这里提到字段上一次建好 ——
      * 它只捕获 `this`，与 draw 无关。
      */
-    private val uniformUploader: RenderPass.UniformUploader =
-        RenderPass.UniformUploader { name, value -> this.setUniform(name, value) }
+    private val uniformUploader: RenderPass.UniformUploader = object : RenderPass.UniformUploader {
+        override fun setUniform(name: String, value: GpuBufferSlice) {
+            this@D3D12RenderPassBackend.setUniformByName(name, value)
+        }
+
+        override fun pushConstants(data: ByteBuffer) {
+            this@D3D12RenderPassBackend.pushConstants(data)
+        }
+    }
     private val textures: MutableMap<String, TextureViewAndSampler> = HashMap()
 
     private data class TextureViewAndSampler(val view: D3D12GpuTextureView, val sampler: D3D12GpuSampler)
@@ -240,18 +252,36 @@ class D3D12RenderPassBackend(
     // Pipeline + descriptors
     // -----------------------------------------------------------------------
 
-    override fun setPipeline(pipeline: RenderPipeline) {
+    override fun setPipeline(pipeline: BackendRenderPipeline) {
         val device = this.device
             ?: throw IllegalStateException("No D3D12 device bound to this render pass")
+        val base = pipeline as? D3D12CompiledRenderPipeline
+            ?: throw IllegalStateException(
+                "Pipeline ${pipeline.javaClass.name} is not a D3D12 compiled pipeline")
         // 注：Java 里还有 `compiled == null` 分支；D3D12Device.getOrCompilePipeline 的
         // Kotlin 声明是非空返回，该分支已不可达，故此处只保留 isValid 校验。
         // P76a 增量 2：速度改走帧末独立 pass（见 D3D12Velocity），pass 不再需要变体管线。
-        val compiled = device.getOrCompilePipeline(pipeline, this.flipY)
+        val compiled = if (this.flipY) device.getOrCompilePipeline(base.info(), true) else base
         if (!compiled.isValid()) {
             throw IllegalStateException(
-                "Pipeline ${pipeline.getLocation()} is not valid (shader compilation failed)")
+                "Pipeline ${base.info().location} is not valid (shader compilation failed)")
         }
         this.pipeline = compiled
+        // 26.3：vanilla 前端按「管线 uniform 列表下标」回调 setUniform(Int, Any?)，
+        // 下标 = `BackendRenderPipeline.CreateInfo.uniforms` 的位置（由 PipelineBuilder 按
+        // SPIR-V 描述符出现顺序编号），与 `flattenUniforms(bindGroupLayouts)` 的顺序**不同**。
+        // 名单在 D3D12Device.compilePipeline(CreateInfo) 里存进管线对象；flipY 变体是另一个
+        // 实例（CreateInfo 不会再走一次），把 base 的名单复制过去即可。
+        if (compiled !== base) {
+            compiled.setUniformNames(base.uniformNamesSnapshot())
+        }
+        this.uniformNames = compiled.uniformNamesSnapshot()
+        if (this.uniformNames.isEmpty()) {
+            // 兜底：管线只经过自检路径（没有 CreateInfo）编译时名单为空，用 layouts 展平
+            // 顺序顶上；顺序可能与下标不一致，但比“下标全部忽略”更接近可用状态。
+            this.uniformNames = BindGroupLayout.flattenUniforms(compiled.info().bindGroupLayouts)
+                .map { it.name() }
+        }
         this.anyDescriptorDirty = true
         // P22：desc.hasDepth 来自渲染 pass（是否有 depth attachment），但 PSO 变体选择
         // 应基于管线本身是否有 DepthStencilState。GUI 管线没有 depthStencilState，
@@ -261,12 +291,51 @@ class D3D12RenderPassBackend(
         val useDepth = this.hasDepth && pipelineHasDepth
         val ok = MCDR_ABI.D3D12SetPipeline(this.ctx, compiled.handle(), useDepth)
         if (!ok) {
-            throw IllegalStateException("dx12SetPipeline failed for ${pipeline.getLocation()}")
+            throw IllegalStateException("dx12SetPipeline failed for ${base.info().location}")
         }
     }
 
-    override fun bindTexture(name: String, textureView: GpuTextureView?,
-        sampler: GpuSampler?) {
+    /**
+     * 26.3：vanilla 前端把 `setUniform(String, …)` 先解析成管线 uniform 列表里的下标，再回调
+     * 到这里（`FrontendRenderPass.setUniform(String, Object)` 字节码：`uniformIndices
+     * .getOrDefault(name, -1)` → `backend.setUniform(index, value)`；纹理对会被包成
+     * `com.mojang.renderpearl.util.TextureViewAndSampler`）。本类内部仍按名字绑定描述符
+     * （与 native `pushDescriptors` 的契约一致），所以这里先把下标翻回名字。
+     */
+    override fun setUniform(index: Int, value: Any?) {
+        val name = this.uniformNames.getOrNull(index)
+        if (name == null) {
+            LOGGER.warn("setUniform({}) ignored: pipeline has {} uniforms",
+                index, this.uniformNames.size)
+            return
+        }
+        when (value) {
+            null -> {
+                this.textures.remove(name)
+                this.anyDescriptorDirty = true
+            }
+            is com.mojang.renderpearl.util.TextureViewAndSampler ->
+                this.bindTexture(name, value.view(), value.sampler())
+            is GpuBufferSlice -> this.setUniformByName(name, value)
+            is GpuBuffer -> this.setUniformByName(name, value.slice())
+            else -> throw IllegalArgumentException(
+                "Unsupported uniform value for '$name': ${value.javaClass.name}")
+        }
+    }
+
+    /**
+     * 26.3 新增的 push constant 通道。native 侧还没有根常量路径，先只告警一次而不是静默丢数据 ——
+     * 真出现视觉差异时能据此定位。
+     */
+    override fun pushConstants(data: ByteBuffer) {
+        if (!this.pushConstantsWarned) {
+            this.pushConstantsWarned = true
+            LOGGER.warn("pushConstants({} bytes) ignored: D3D12 backend has no root-constant path",
+                data.remaining())
+        }
+    }
+
+    private fun bindTexture(name: String, textureView: GpuTextureView?, sampler: GpuSampler?) {
         if (textureView == null || sampler == null) {
             if (textureView != null || sampler != null) {
                 throw IllegalArgumentException("Both texture and sampler must be null or non-null")
@@ -280,24 +349,7 @@ class D3D12RenderPassBackend(
         this.anyDescriptorDirty = true
     }
 
-    override fun setUniform(name: String, value: GpuBuffer) {
-        val slice = value.slice()
-        // P75：捕获时间性渲染需要的 UBO（`"Globals"` 走这个重载 —— RenderSystem.setGlobalSettingsUniform）。
-        // 只在有深度附件的 pass（关卡主 pass）里记录，避免 GUI/图集 blit 的 DynamicTransforms
-        // 把逐物体配对序号冲乱。
-        if (this.hasDepth) {
-            D3D12Temporal.captureUniform(name, slice)
-        }
-        if (name != CHUNK_SECTION_UNIFORM) {
-            this.materialDirty = true
-        } else {
-            this.chunkSectionSlice = slice
-        }
-        this.uniforms[name] = slice
-        this.anyDescriptorDirty = true
-    }
-
-    override fun setUniform(name: String, value: GpuBufferSlice) {
+    private fun setUniformByName(name: String, value: GpuBufferSlice) {
         // P75：捕获时间性渲染需要的逐物体 UBO：`"DynamicTransforms"`（模型视图矩阵）与
         // `"ChunkSection"`（区块模型矩阵 + 区块原点）。vanilla 的 DynamicTransforms 环由 CPU
         // 直接写（MappableRingBuffer, usage 130），所以这里 map(read) 读回是安全的。
@@ -334,7 +386,7 @@ class D3D12RenderPassBackend(
         }
         this.anyDescriptorDirty = false
         val pipeline = this.pipeline
-        if (pipeline == null || !pipeline.isValid) {
+        if (pipeline == null || !pipeline.isValid()) {
             LOGGER.warn("pushDescriptors: SKIP (pipeline null or invalid)")
             return
         }
@@ -483,7 +535,8 @@ class D3D12RenderPassBackend(
         /** DEBUG: true 时强制所有 pass 使用 withoutDepth PSO（禁用深度测试/写入），用于排查黑屏是否由深度问题导致。 */
         private const val DEBUG_DISABLE_DEPTH_TEST = false
 
-        @JvmField var gProfMultiBatches = 0L      // drawMultipleIndexed 批次数
+
+    @JvmField var gProfMultiBatches = 0L      // drawMultipleIndexed 批次数
         @JvmField var gProfMultiDraws = 0L        // 批次内 core 总数
         @JvmField var gProfMultiPathNs = 0L       // 批量入口主线程墙钟耗时
         @JvmField var gProfDrawIndexedCalls = 0L  // drawIndexed 调用次数
@@ -585,6 +638,7 @@ class D3D12RenderPassBackend(
             throw IllegalStateException("dx12DrawIndexedIndirect failed")
         }
     }
+
     @Suppress("UNCHECKED_CAST")
     private fun <T : Any> materialize(draws: Collection<RenderPass.Draw<T>>): List<RenderPass.Draw<T>> {
         if (draws is List<*>) return draws as List<RenderPass.Draw<T>>
@@ -679,7 +733,7 @@ class D3D12RenderPassBackend(
         var srvUniform = true
 
         // 方法引用在整批内恒定：提到循环外，避免每 core 一次 lambda 对象分配。
-        val uniformSetter = RenderPass.UniformUploader { name, value -> this.setUniform(name, value) }
+        val uniformSetter = this.uniformUploader
         for (d in 0 until n) {
             val draw = draws.get(d)
             val uploader = draw.uniformUploaderConsumer()
@@ -1039,10 +1093,12 @@ class D3D12RenderPassBackend(
         }
         return out
     }
-    override fun <T : Any> drawMultipleIndexed(draws: Collection<RenderPass.Draw<T>>,
+    // 26.3：多批次索引绘制已上移到前端 RenderPass（它自己按 Draw 摊平成 multiDrawIndexed），
+    // backend SPI 不再有这个方法；保留实现供本类内部/后续 mesh 批处理复用。
+    fun <T : Any> drawMultipleIndexed(draws: Collection<RenderPass.Draw<T>>,
         defaultIndexBuffer: GpuBuffer?, defaultIndexType: IndexType?,
         dynamicUniforms: Collection<String>, uniformArgument: T) {
-        if (this.pipeline == null || !this.pipeline!!.isValid) {
+        if (this.pipeline == null || !this.pipeline!!.isValid()) {
             throw IllegalStateException("drawMultipleIndexed called without a valid pipeline")
         }
         val profT0 = if (MCDR_ABI.PROF) System.nanoTime() else 0L
@@ -1100,8 +1156,7 @@ class D3D12RenderPassBackend(
         defaultIndexType: IndexType?, uniformArgument: T) {
         for (draw in draws) {
             val uploader = draw.uniformUploaderConsumer()
-            uploader?.accept(uniformArgument,
-                RenderPass.UniformUploader { name, value -> this.setUniform(name, value) })
+            uploader?.accept(uniformArgument, this.uniformUploader)
             val indexBuffer = if (draw.indexBuffer() != null) draw.indexBuffer() else defaultIndexBuffer
             val indexType = if (draw.indexType() != null) draw.indexType() else defaultIndexType
             if (indexBuffer == null || indexType == null) {
@@ -1342,7 +1397,7 @@ class D3D12RenderPassBackend(
         if (boundSection == null) {
             return this.meshSkipFor("no ready section slice")
         }
-        this.setUniform("ChunkSection", boundSection)
+        this.setUniformByName("ChunkSection", boundSection)
         val useDepth = this.hasDepth && compiled.info().depthStencilState != null
         if (!MCDR_ABI.D3D12SetPipeline(this.ctx, compiled.meshPso, useDepth)) {
             return this.meshSkipFor("bind mesh PSO failed: ${MCDR_ABI.D3D12LastError()}")

@@ -2,11 +2,11 @@ package dev.nts.expdxr.d3d12.render.core
 
 import dev.nts.expdxr.misc.IllusionLogger
 
-import com.mojang.blaze3d.systems.CommandEncoderBackend
-import com.mojang.blaze3d.systems.GpuSurface
-import com.mojang.blaze3d.systems.GpuSurfaceBackend
-import com.mojang.blaze3d.systems.SurfaceException
-import com.mojang.blaze3d.textures.GpuTextureView
+import com.mojang.renderpearl.backend.api.CommandEncoderBackend
+import com.mojang.renderpearl.api.device.GpuSurface
+import com.mojang.renderpearl.backend.api.GpuSurfaceBackend
+import com.mojang.renderpearl.api.device.SurfaceException
+import com.mojang.renderpearl.api.textures.GpuTextureView
 import dev.nts.expdxr.d3d12.render.D3D12FrameStats
 import dev.nts.expdxr.d3d12.render.adapter.D3D12RenderProf
 import dev.nts.expdxr.d3d12.render.advanced.smaa.D3D12GUISplit
@@ -177,7 +177,12 @@ class D3D12GpuSurface(hwnd: Long) : GpuSurfaceBackend {
             return
         }
         this.closed = true
+        // 退出路径计时：26.3 关窗先关 surface 再关 SDL window，destroySurface 里要等
+        // pending present / deviceWaitIdle，慢在这里就会表现为"窗口先灰几秒才消失"。
+        val started = System.nanoTime()
+        IllusionLogger.debugMessage("[backend-java] destroySurface begin")
         MCDR_ABI.D3D12DestroySurface(this.handle)
+        IllusionLogger.debugMessage("[backend-java] destroySurface took ${(System.nanoTime() - started) / 1_000_000} ms")
     }
 }
 

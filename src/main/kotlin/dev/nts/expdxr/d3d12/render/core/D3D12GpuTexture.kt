@@ -1,7 +1,8 @@
 package dev.nts.expdxr.d3d12.render.core
 
-import com.mojang.blaze3d.GpuFormat
-import com.mojang.blaze3d.textures.GpuTexture
+import com.mojang.renderpearl.api.GpuFormat
+import com.mojang.renderpearl.api.textures.GpuTexture
+import com.mojang.renderpearl.backend.common.BaseGpuTexture
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 
 /**
@@ -9,10 +10,20 @@ import dev.nts.expdxr.d3d12.extern.MCDR_ABI
  *
  * Native counterpart: {@code dx12CreateTexture} in dx12_mc.dll, which creates a
  * committed D3D12 texture resource and returns a handle ({@code Dx12Object*}).
+ *
+ * <p>26.3 起必须继承 {@code com.mojang.renderpearl.backend.common.BaseGpuTexture}：
+ * 前端的 `validateDraw` / 资源表会把纹理实现强转成这个基类，纯接口实现会 ClassCastException。
  */
 class D3D12GpuTexture(usage: Int, label: String, format: GpuFormat, width: Int,
                       height: Int, depthOrLayers: Int, mipLevels: Int) :
-    GpuTexture(usage, label, format, width, height, depthOrLayers, mipLevels) {
+    BaseGpuTexture(usage, label, format, width, height, depthOrLayers, mipLevels) {
+    private val usageFlags: Int = usage
+    private val labelValue: String = label
+    private val formatValue: GpuFormat = format
+    private val widthValue: Int = width
+    private val heightValue: Int = height
+    private val layerCount: Int = depthOrLayers
+    private val mipCount: Int = mipLevels
     private val handle: Long
     private var closed = false
     /** View 计数器（镜像 VulkanGpuTexture.views）。close() 时若 view=0 则入延迟销毁。 */
@@ -24,6 +35,36 @@ class D3D12GpuTexture(usage: Int, label: String, format: GpuFormat, width: Int,
         if (this.handle == 0L) {
             throw IllegalStateException("dx12CreateTexture returned a null handle")
         }
+    }
+
+    // 26.3：GpuTexture 从抽象类变成接口，尺寸/格式/用途改由实现方提供
+    // （官方 VulkanGpuTexture 也是这么写的）。
+    override fun getWidth(level: Int): Int {
+        return if (level <= 0) this.widthValue else (this.widthValue shr level).coerceAtLeast(1)
+    }
+
+    override fun getHeight(level: Int): Int {
+        return if (level <= 0) this.heightValue else (this.heightValue shr level).coerceAtLeast(1)
+    }
+
+    override fun getDepthOrLayers(): Int {
+        return this.layerCount
+    }
+
+    override fun getMipLevels(): Int {
+        return this.mipCount
+    }
+
+    override fun getFormat(): GpuFormat {
+        return this.formatValue
+    }
+
+    override fun getLabel(): String {
+        return this.labelValue
+    }
+
+    override fun usage(): Int {
+        return this.usageFlags
     }
 
     companion object {

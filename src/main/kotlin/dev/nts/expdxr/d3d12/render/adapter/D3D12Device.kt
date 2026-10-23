@@ -1,21 +1,39 @@
 package dev.nts.expdxr.d3d12.render.adapter
 
-import com.mojang.blaze3d.GpuFormat
+import com.mojang.renderpearl.api.GpuFormat
 import java.lang.foreign.Arena
 import java.lang.foreign.MemorySegment
 import java.lang.foreign.ValueLayout
-import com.mojang.blaze3d.buffers.GpuBuffer
-import com.mojang.blaze3d.pipeline.ColorTargetState
-import com.mojang.blaze3d.pipeline.CompiledRenderPipeline
-import com.mojang.blaze3d.pipeline.DepthStencilState
-import com.mojang.blaze3d.pipeline.RenderPipeline
-import com.mojang.blaze3d.platform.CompareOp
-import com.mojang.blaze3d.preprocessor.GlslPreprocessor
-import com.mojang.blaze3d.shaders.ShaderSource
-import com.mojang.blaze3d.shaders.ShaderType
-import com.mojang.blaze3d.systems.*
-import com.mojang.blaze3d.textures.*
-import com.mojang.blaze3d.vulkan.glsl.ShaderCompileException
+import com.mojang.renderpearl.api.buffers.GpuBuffer
+import com.mojang.renderpearl.api.pipeline.ColorTargetState
+import com.mojang.renderpearl.api.pipeline.CompiledRenderPipeline
+import com.mojang.renderpearl.api.pipeline.DepthStencilState
+import com.mojang.renderpearl.api.pipeline.RenderPipeline
+import com.mojang.renderpearl.api.pipeline.CompareOp
+import com.mojang.renderpearl.api.pipeline.ShaderSource
+import com.mojang.renderpearl.api.pipeline.ShaderType
+import com.mojang.renderpearl.api.buffers.TransientMemory
+import com.mojang.renderpearl.api.commands.GpuFence
+import com.mojang.renderpearl.api.commands.GpuQueryPool
+import com.mojang.renderpearl.api.device.DeviceFeatures
+import com.mojang.renderpearl.api.device.DeviceInfo
+import com.mojang.renderpearl.api.device.DeviceLimits
+import com.mojang.renderpearl.api.device.DeviceType
+import com.mojang.renderpearl.api.device.GpuDebugOptions
+import com.mojang.renderpearl.api.device.HintsAndWorkarounds
+import com.mojang.renderpearl.api.device.GpuSurface
+import com.mojang.renderpearl.api.textures.AddressMode
+import com.mojang.renderpearl.api.textures.FilterMode
+import com.mojang.renderpearl.api.textures.GpuSampler
+import com.mojang.renderpearl.api.textures.GpuTexture
+import com.mojang.renderpearl.api.textures.GpuTextureView
+import com.mojang.renderpearl.backend.api.BackendRenderPipeline
+import com.mojang.renderpearl.backend.api.CommandEncoderBackend
+import com.mojang.renderpearl.backend.api.GpuDeviceBackend
+import com.mojang.renderpearl.backend.api.GpuSurfaceBackend
+import com.mojang.renderpearl.backend.api.RenderPassBackend
+import com.mojang.renderpearl.util.ShaderCompileException
+import dev.nts.expdxr.misc.IllusionLogger
 import dev.nts.expdxr.d3d12.backend.D3D12CommandEncoderBackend
 import dev.nts.expdxr.d3d12.extern.MCDRMeshPipelineDesc
 import dev.nts.expdxr.d3d12.render.advanced.mesh.D3D12MeshPipelineCache
@@ -25,6 +43,7 @@ import dev.nts.expdxr.d3d12.render.core.D3D12GpuSurface
 import dev.nts.expdxr.d3d12.render.core.D3D12AsyncContext
 import dev.nts.expdxr.d3d12.backend.D3D12BindGroupEntry
 import dev.nts.expdxr.d3d12.backend.D3D12CompiledRenderPipeline
+import dev.nts.expdxr.d3d12.backend.D3D12PipelineBridge
 import dev.nts.expdxr.d3d12.render.shader.D3D12CompiledShader
 import dev.nts.expdxr.d3d12.render.shader.D3D12FallbackShaderSource
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuBuffer
@@ -36,13 +55,18 @@ import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.shader.D3D12GpuSampler
 import dev.nts.expdxr.d3d12.render.shader.D3D12IntermediaryShaderModule
 import dev.nts.expdxr.d3d12.render.shader.D3D12ShaderCompiler
+import dev.nts.expdxr.d3d12.render.shader.injectShaderDefines
 import net.minecraft.client.renderer.ShaderDefines
 import net.minecraft.resources.Identifier
-import org.lwjgl.glfw.GLFWNativeWin32
+import org.lwjgl.util.shaderc.ShadercIncludeResult
+import org.lwjgl.sdl.SDLError
+import org.lwjgl.sdl.SDLProperties
+import org.lwjgl.sdl.SDLVideo
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import java.nio.ByteBuffer
 import java.util.*
+import java.util.function.BooleanSupplier
 import java.util.function.Supplier
 
 /**
@@ -129,7 +153,9 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         return D3D12GpuSampler(addressModeU, addressModeV, minFilter, magFilter, maxAnisotropy, maxLod)
     }
 
-    override fun createTexture(label: Supplier<String>?, usage: @GpuTexture.Usage Int,
+    // 26.3 的 backend SPI 只保留 String 版 createTexture / (texture, baseMip, mipCount) 版
+    // createTextureView；Supplier 重载与单参 createTextureView 降级为内部辅助函数。
+    fun createTexture(label: Supplier<String>?, usage: @GpuTexture.Usage Int,
         format: GpuFormat, width: Int, height: Int, depthOrLayers: Int, mipLevels: Int): GpuTexture {
         val name = label?.get() ?: ""
         return D3D12GpuTexture(
@@ -147,8 +173,8 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         )
     }
 
-    override fun createTextureView(texture: GpuTexture): GpuTextureView {
-        return this.createTextureView(texture, 0, texture.mipLevels)
+    fun createTextureView(texture: GpuTexture): GpuTextureView {
+        return this.createTextureView(texture, 0, texture.getMipLevels())
     }
 
     override fun createTextureView(texture: GpuTexture, baseMipLevel: Int, mipLevels: Int): GpuTextureView {
@@ -179,12 +205,30 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
     // P3+: stubbed until the render layer lands
     // -----------------------------------------------------------------------
 
-    override fun createSurface(windowHandle: Long): GpuSurfaceBackend {
-        val hwnd = GLFWNativeWin32.glfwGetWin32Window(windowHandle)
+    /**
+     * 26.3：窗口由 SDL3 创建，句柄不再是 GLFW 的 `GLFWwindow*`，而是 `SDL_Window*`。
+     * HWND 按平台属性取（`SDL_PROP_WINDOW_WIN32_HWND_POINTER`），跨 FFM 边界仍然只是一个
+     * `uint64_t hwnd` —— native 侧的 `mcdr_dx12CreateSurface(uint64_t)` 因此**不用改**。
+     *
+     * `isIconified` 是 26.3 新加的参数（窗口最小化时游戏会跳过 configure / acquire）；
+     * 这里建 surface 只用得到窗口句柄，最小化由游戏自己判断。
+     */
+    override fun createSurface(windowHandle: Long, isIconified: BooleanSupplier): GpuSurfaceBackend {
+        val hwnd = win32Hwnd(windowHandle)
         if (hwnd == 0L) {
-            throw IllegalStateException("glfwGetWin32Window returned null for window ${windowHandle}")
+            throw IllegalStateException("SDL_PROP_WINDOW_WIN32_HWND_POINTER is null for SDL window "
+                + "${windowHandle} (video driver: ${SDLVideo.SDL_GetCurrentVideoDriver()}, "
+                + "last SDL error: ${SDLError.SDL_GetError()})")
         }
         return D3D12GpuSurface(hwnd)
+    }
+
+    /** `SDL_Window*` -> `HWND`（Win32 属性由 SDL 暴露，不再需要 GLFW 的 platform 扩展）。 */
+    private fun win32Hwnd(window: Long): Long {
+        val props = SDLVideo.SDL_GetWindowProperties(window)
+        if (props == 0) return 0L
+        return SDLProperties.SDL_GetPointerProperty(
+            props, SDLVideo.SDL_PROP_WINDOW_WIN32_HWND_POINTER, 0L)
     }
 
     override fun createCommandEncoder(): CommandEncoderBackend {
@@ -205,20 +249,61 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
     fun getOrCompilePipeline(pipeline: RenderPipeline, flipY: Boolean): D3D12CompiledRenderPipeline {
         if (!flipY) {
             return this.pipelineCache.computeIfAbsent(pipeline,
-                { ignored -> this.compilePipeline(pipeline, this.defaultShaderSource, false) })
+                { ignored -> this.compilePipeline(pipeline, this.resolveShaderSource(pipeline), false) })
         }
         return this.pipelineCacheFlipY.computeIfAbsent(FlipYKey(pipeline, true),
-            { ignored -> this.compilePipeline(pipeline, this.defaultShaderSource, true) })
+            { ignored -> this.compilePipeline(pipeline, this.resolveShaderSource(pipeline), true) })
     }
 
-    override fun precompilePipeline(pipeline: RenderPipeline,
-        shaderSource: ShaderSource?): CompiledRenderPipeline {
-        val source = shaderSource ?: this.defaultShaderSource
-        return this.pipelineCache.computeIfAbsent(pipeline,
-            { ignored -> this.compilePipeline(pipeline, source, false) })
+    /**
+     * 26.3 的 `ShaderSource` 是按次传入的（`FrontendGpuDevice.compilePipeline` 的第二个参数），
+     * `createDevice` 已经收不到 defaultShaderSource，所以真实管线的源只能从
+     * [D3D12PipelineBridge] 取；取不到才退回构造时给的兜底源（自检用内嵌 GLSL、
+     * LoadingOverlay 首帧用 [dev.nts.expdxr.d3d12.render.shader.D3D12FallbackShaderSource]）。
+     *
+     * <p>flipY 变体也必须走这里：它由 [dev.nts.expdxr.d3d12.backend.D3D12RenderPassBackend.setPipeline]
+     * 在首帧之后触发，那时 `defaultShaderSource` 往往为 null，用错源会静默产出 INVALID 管线。
+     */
+    private fun resolveShaderSource(pipeline: RenderPipeline): ShaderSource? {
+        return D3D12PipelineBridge.lookupSource(pipeline.location.toString()) ?: this.defaultShaderSource
     }
 
-    override fun clearPipelineCache() {
+    /**
+     * 26.3：backend 的编译入口只收到 [BackendRenderPipeline.CreateInfo]（SPIR-V 模块 + 状态），
+     * 拿不到 vanilla 的 [RenderPipeline]；而本后端的 GLSL→HLSL 链、`shaderDefines`、mesh 变体判定
+     * 都依赖后者。vanilla 每次编译都会先经过 `FrontendGpuDevice.compilePipeline(RenderPipeline, …)`，
+     * 由 `FrontendGpuDeviceCompilePipelineMixin` 在 [D3D12PipelineBridge] 里登记，这里按
+     * `CreateInfo.name()`（= `RenderPipeline.getLocation().toString()`）查回。
+     */
+    override fun compilePipeline(
+        info: BackendRenderPipeline.CreateInfo
+    ): BackendRenderPipeline.Pending {
+        val pipeline = D3D12PipelineBridge.lookup(info.name())
+        if (pipeline == null) {
+            LOGGER.error("[backend-java] compilePipeline({}) has no registered RenderPipeline "
+                + "({} shaders); returning NULL pending", info.name(), info.shaders().size)
+            return BackendRenderPipeline.Pending.NULL
+        }
+        // 26.3：前端回调 `setUniform(index, …)` 里的 index 就是 CreateInfo.uniforms 的下标
+        // （PipelineBuilder 按 SPIR-V 描述符出现顺序 computeIfAbsent 编号）。原样存下来，
+        // setPipeline 时用它把下标翻回名字。注意顺序 ≠ flattenUniforms(bindGroupLayouts)。
+        val uniformNames = info.uniforms().map { it.name() }
+        // P191（迁移期诊断，默认不出声）：地形逐段数据的 uniform 名单/类型，排查位置错乱时把
+        // `[logging] logLevel` 调到 DEBUG 再看。
+        if (info.name().contains("terrain")) {
+            val detail = info.uniforms().joinToString(", ") { "${it.name()}:${it.type()}" }
+            IllusionLogger.debugMessage("[backend-java] P191 uniforms ${info.name()}: [$detail]")
+        }
+        return object : BackendRenderPipeline.Pending {
+            override fun finishCompile(): BackendRenderPipeline {
+                val compiled = this@D3D12Device.getOrCompilePipeline(pipeline, false)
+                compiled.setUniformNames(uniformNames)
+                return compiled
+            }
+        }
+    }
+
+    fun clearPipelineCache() {
         // P124：mesh 管线先释放（同一设备持有，必须在设备销毁前）。
         this.meshPipelineCache.releaseAll()
         this.pipelineCache.values.forEach { p -> p.close() }
@@ -233,15 +318,12 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         return D3D12GpuQueryPool(size)
     }
 
-    override fun getTimestampNow(): Long {
-        // The native call needs a command context; keep one lazily for timestamps.
-        if (this.timestampCtx == 0L) {
-            this.timestampCtx = MCDR_ABI.D3D12CreateCommandEncoder()
-            if (this.timestampCtx == 0L) {
-                throw IllegalStateException("dx12CreateCommandEncoder returned a null handle")
-            }
-        }
-        return MCDR_ABI.D3D12GetTimestampNow(this.timestampCtx)
+    /**
+     * 26.3 用「GPU 时间戳校准偏移」取代 26.2 的 `getTimestampNow()`。本后端的时间戳 query
+     * 与呈现帧同源，偏移恒为 0。
+     */
+    override fun getTimestampCalibrationOffset(): Long {
+        return 0L
     }
 
     override fun getLastDebugMessages(): MutableList<String> {
@@ -259,12 +341,15 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         // 镜像官方 VulkanDevice.close()：先销毁共享 encoder 再清管线缓存。
         // 注意：encoder.close() 对共享 encoder 不调用 dx12DestroyCommandEncoder
         // （避免 CubeMap.render() 内部 close 时意外销毁 ctx），此处显式销毁。
+        val closeStarted = System.nanoTime()
+        IllusionLogger.debugMessage("[backend-java] P184 device.close: enter")
         val encoder = this.sharedCommandEncoder
         if (encoder != null) {
             encoder.close()
             MCDR_ABI.D3D12DestroyCommandEncoder(encoder.nativeHandle())
             this.sharedCommandEncoder = null
         }
+        IllusionLogger.debugMessage("[backend-java] P184 device.close: encoder done")
         sharedEncoderForFrame = null  // P104b：别再让帧中后处理摸到已销毁的 ctx
         this.clearPipelineCache()
         val compiler = this.glslCompiler
@@ -273,9 +358,13 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
             this.glslCompiler = null
         }
         // P33：先停 worker 池并销毁 bundle/描述符 native 资源，再销毁渲染线程。
+        IllusionLogger.debugMessage("[backend-java] P184 device.close: cache+compiler done")
+        val asyncStarted = System.nanoTime()
         D3D12AsyncContext.shutdown()
         // P33：销毁独立渲染线程。
         MCDR_ABI.D3D12DestroyAsyncRenderer()
+        IllusionLogger.debugMessage("[backend-java] P184 device.close: async renderer done")
+        val asyncMs = (System.nanoTime() - asyncStarted) / 1_000_000
         // P31：趁 DXGI/D3D12 仍然存活，显式释放设备上下文。若留给
         // DLL_PROCESS_DETACH 去析构，ComPtr::Release() 会在 dxgi.dll 已 detach
         // 之后执行 → 原生异常，进程退出码变成 2170（渲染本身无错，是退出路径的
@@ -284,6 +373,10 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         // The F3 mixin and the mod system-specs lines key off this being non-null;
         // clear it once the backend is gone so a GL/Vulkan fallback shows no DX12 rows.
         D3D12AdapterInfo.current = null
+        IllusionLogger.debugMessage(
+            "[backend-java] D3D12Device.close took ${(System.nanoTime() - closeStarted) / 1_000_000} ms" +
+                " (async ${asyncMs} ms)"
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -300,18 +393,20 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
     private fun compilePipeline(pipeline: RenderPipeline,
         shaderSource: ShaderSource?, flipY: Boolean): D3D12CompiledRenderPipeline {
         val pipeName = pipeline.location.toString()
+        val vertexId = pipeline.shaders[ShaderType.VERTEX] ?: pipeline.location
+        val fragmentId = pipeline.shaders[ShaderType.FRAGMENT] ?: pipeline.location
         val vertexShader = this.getOrCompileShader(
-            pipeline.vertexShader, ShaderType.VERTEX, pipeline.shaderDefines, shaderSource)
+            vertexId, ShaderType.VERTEX, pipeline.shaderDefines, shaderSource)
         val fragmentShader = this.getOrCompileShader(
-            pipeline.fragmentShader, ShaderType.FRAGMENT, pipeline.shaderDefines, shaderSource)
+            fragmentId, ShaderType.FRAGMENT, pipeline.shaderDefines, shaderSource)
         if (vertexShader === D3D12IntermediaryShaderModule.INVALID) {
             LOGGER.error("[backend-java] {} COMPILE FAILED (vertex): shader {} invalid",
-                pipeName, pipeline.vertexShader)
+                pipeName, vertexId)
             return D3D12CompiledRenderPipeline(pipeline, 0L, vertexShader, fragmentShader, "", "")
         }
         if (fragmentShader === D3D12IntermediaryShaderModule.INVALID) {
             LOGGER.error("[backend-java] {} COMPILE FAILED (fragment): shader {} invalid",
-                pipeName, pipeline.fragmentShader)
+                pipeName, fragmentId)
             return D3D12CompiledRenderPipeline(pipeline, 0L, vertexShader, fragmentShader, "", "")
         }
         try {
@@ -382,6 +477,11 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         // P138：淡入系数（`ChunkVisibility`）改走 VS→PS 插值，PS 不再读逐 draw 的 CBV。
         // 语义先在 VS 输出里挑一个空闲 TEXCOORD，再插进 PS 输入 —— 两边必须同一个。
         val semantic = D3D12MeshVertexDecode.pickVisibilitySemantic(compiled.vertexHlsl)
+        if (LOGGER.isInfoEnabled) {
+            LOGGER.info("[dxrmc] P138 {}: VS 输出自带 chunkVisibility={}, 可用语义={}",
+                pipeline.location, D3D12MeshVertexDecode.vertexOwnsVisibility(compiled.vertexHlsl),
+                semantic ?: "无")
+        }
         // P140：AS 剔除。开关走配置（`[mesh] terrainCull`），环境变量只是逃生口。
         var meshletCull = D3D12Settings.meshTerrainCull || System.getenv("MCDR_MESH_CULL") == "1"
         // P141 B 阶段：背面锥剔除只在光栅化也剔背面时才成立 —— `cull` 就是 native 的
@@ -431,10 +531,22 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         // 正在淡入的段交给 IMR 逐段画（P137b 的旧路径）。
         var perSectionVisibility = false
         var psDxil: ByteArray? = null
-        val patchedPs = semantic?.let { D3D12MeshVertexDecode.patchFragmentVisibility(compiled.fragmentHlsl, it) }
+        // 26.3：原版 terrain.fsh 已把 chunkVisibility 当插值量读（VS 输出 location 4），
+        // MS HLSL 里 `verts[vid].chunkVisibility = meshSectionF(...)` 直接填的就是它 ——
+        // 这时**不要**再打 P138 的补丁（会撞名），原版 PS 本身就是逐段的。
+        if (D3D12MeshVertexDecode.fragmentConsumesVisibility(compiled.fragmentHlsl)) {
+            psDxil = MCDR_ABI.D3D12CompileShaderDxc(compiled.fragmentHlsl, "main", "ps_6_0")
+            if (psDxil != null) {
+                perSectionVisibility = true
+            } else {
+                LOGGER.warn("[dxrmc] P138 原版 PS（原生 chunkVisibility）编译失败：{}", MCDR_ABI.D3D12LastError())
+            }
+        }
+        val patchedPs = if (psDxil != null) null
+            else semantic?.let { D3D12MeshVertexDecode.patchFragmentVisibility(compiled.fragmentHlsl, it) }
         if (semantic == null) {
             LOGGER.info("[dxrmc] P138 VS 输出的 TEXCOORD 已用满，淡入系数无法插值，保持 IMR 兜底")
-        } else if (patchedPs == null) {
+        } else if (patchedPs == null && psDxil == null) {
             LOGGER.info("[dxrmc] P138 PS 里找不到 ChunkVisibility，保持 IMR 兜底")
         }
         if (patchedPs != null) {
@@ -470,7 +582,6 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
                 D3D12BindGroupEntry.Type.UNIFORM_BUFFER -> 0
                 D3D12BindGroupEntry.Type.SAMPLED_IMAGE -> 1
                 D3D12BindGroupEntry.Type.TEXEL_BUFFER -> 2
-                else -> 0
             }
             type to index
         }
@@ -539,19 +650,48 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         // Configs.EMPTY（ShaderManager.java:80）→ 恒返回 null。此时回退到
         // preloadUiShader 捕获的 vanilla 包源，否则 LoadingOverlay 首帧画
         // mojang_logo 会因 INVALID 管线抛异常直接终结 JVM。
-        val source = shaderSource?.get(key.id, key.type)
+        val source = shaderSource?.getShader(key.id, key.type)
             ?: D3D12FallbackShaderSource.get(key.id, key.type)
         if (source == null) {
             LOGGER.error("Couldn't find source for {} shader ({})", key.type, key.id)
             return D3D12IntermediaryShaderModule.INVALID
         }
-        val sourceWithDefines = GlslPreprocessor.injectDefines(source, key.defines)
+        val sourceWithDefines = injectShaderDefines(source, key.defines)
+        // 26.3：GLSL `#include <minecraft:xxx.glsl>` 由官方 GlslCompiler 的 shaderc include
+        // 回调解析（`ShaderSource.getInclude`），26.2 那个 GlslPreprocessor 已删。我们这条
+        // 自建编译链没有回调，所以把 include 也在这里文本展开（见 expandShaderIncludes）。
+        val includeResolver: ((Identifier) -> String?)? = if (shaderSource != null) {
+            { id -> readShaderInclude(shaderSource, id) }
+        } else {
+            D3D12FallbackShaderSource::getInclude
+        }
         try {
             return this.getOrCreateCompiler().createIntermediary(
-                key.id.toDebugFileName(), sourceWithDefines, key.type)
+                key.id.toDebugFileName(), sourceWithDefines, key.type, includeResolver)
         } catch (e: ShaderCompileException) {
             LOGGER.error("Couldn't compile {} shader {}: {}", key.type, key.id, e.message)
             return D3D12IntermediaryShaderModule.INVALID
+        }
+    }
+
+    /**
+     * 读一条 `#include`（`shaders/include/` 下的源码）。26.3 的 [ShaderSource.getInclude]
+     * 返回缓存好的 `CachedIncludeSource`（内部持有一个 shaderc `ShadercIncludeResult` 结构，
+     * 内容随对象生命周期常驻，被 `ShaderManager` 的 include 缓存复用）——**只读不 close**：
+     * 关掉会把别人缓存里的结构释放掉。
+     */
+    private fun readShaderInclude(shaderSource: ShaderSource, id: Identifier): String? {
+        val cached = try {
+            shaderSource.getInclude(id)
+        } catch (e: Exception) {
+            LOGGER.debug("[backend-java] include {} lookup failed: {}", id, e.message)
+            null
+        } ?: return null
+        return try {
+            ShadercIncludeResult.create(cached.includeResultPtr()).contentString()
+        } catch (e: Throwable) {
+            LOGGER.debug("[backend-java] include {} content unreadable: {}", id, e.message)
+            null
         }
     }
 
@@ -573,17 +713,8 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         val elements = ArrayList<IntArray>()
         var attribLocation = 0
         val bindings = pipeline.vertexFormatBindings
-        if (bindings == null || bindings.size == 0) {
-            LOGGER.warn("[backend-java] {}: formatBindings={} inputs={}",
-                pipeline.location, if (bindings == null) "null" else bindings.size, vertexShaderInputs)
-            if (bindings != null) {
-                for (i in bindings.indices) {
-                    val fmt = bindings[i] ?: continue
-                    val text = fmt.elements.joinToString(",") { e -> "${e.name()}(${e.format()})" }
-                    LOGGER.warn("[backend-java]   slot[{}] stride={} elements=[{}]", i,
-                        fmt.vertexSize, text)
-                }
-            }
+        if (bindings.isEmpty()) {
+            LOGGER.warn("[backend-java] {}: formatBindings 为空 inputs={}", pipeline.location, vertexShaderInputs)
         }
         for (i in bindings.indices) {
             val format = bindings[i] ?: continue
@@ -598,6 +729,17 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
                 ))
                 attribLocation++
             }
+        }
+        // P191（迁移期诊断，默认不出声）：地形管线的 slot/stepRate 一览。26.3 把
+        // ChunkPosition/ChunkVisibility 挪成了逐实例顶点属性（slot 1, stepRate=1），排查位置/错位时
+        // 把 `[logging] logLevel` 调到 DEBUG 再看这里。
+        if (pipeline.location.toString().contains("terrain")) {
+            val slots = bindings.indices.joinToString(", ") { i ->
+                val fmt = bindings[i]
+                if (fmt == null) "s$i=null" else "s$i(stride=${fmt.vertexSize},step=${fmt.stepRate}," +
+                    "elems=${fmt.elements.joinToString("|") { e -> e.name() }})"
+            }
+            IllusionLogger.debugMessage("[backend-java] P191 ${pipeline.location}: inputs=$vertexShaderInputs slots=[$slots]")
         }
         return elements
     }
@@ -681,7 +823,6 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
                 D3D12BindGroupEntry.Type.UNIFORM_BUFFER -> 0   // CBV
                 D3D12BindGroupEntry.Type.SAMPLED_IMAGE -> 1    // SRV + sampler
                 D3D12BindGroupEntry.Type.TEXEL_BUFFER -> 2     // SRV (texel buffer)
-                else -> 0
             }
             desc.addBinding(type, i)   // reg = 条目序号（与 HLSL shader register 一一对应）
         }
@@ -775,10 +916,10 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
                 true,                                                        // isZZeroToOne: D3D12 NDC depth is 0..1
                 if (haveNative) nativeInfo.backendName() else "DirectX 12",        // backendName
                 timestampPeriod,
-                DeviceLimits(16, 256, 16384, Long.MAX_VALUE, 4096, 8),
-                DeviceFeatures(true, true, false, true, true, true, true),
+                DeviceLimits(16, 256, 16384, Long.MAX_VALUE, 4096, 8, 65536),
+                DeviceFeatures(true, true, false, true, true, true, true, true),
                 emptySet(),
-                HintsAndWorkarounds(false, false),
+                HintsAndWorkarounds(false, false, false, false),
                 if (haveNative) nativeInfo.deviceTypeEnum() else DeviceType.DISCRETE
             )
         }

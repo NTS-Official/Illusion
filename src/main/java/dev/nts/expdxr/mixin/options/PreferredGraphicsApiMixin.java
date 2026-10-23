@@ -1,7 +1,7 @@
 package dev.nts.expdxr.mixin.options;
 
 import com.llamalad7.mixinextras.injector.ModifyReturnValue;
-import com.mojang.blaze3d.systems.GpuBackend;
+import com.mojang.renderpearl.api.device.GpuBackend;
 import com.mojang.serialization.Codec;
 import dev.nts.expdxr.d3d12.debug.D3D12Fatal;
 import dev.nts.expdxr.d3d12.backend.D3D12Backend;

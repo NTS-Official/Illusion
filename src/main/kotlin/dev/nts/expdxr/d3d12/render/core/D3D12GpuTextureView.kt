@@ -1,29 +1,33 @@
 package dev.nts.expdxr.d3d12.render.core
 
-import com.mojang.blaze3d.textures.GpuTexture
-import com.mojang.blaze3d.textures.GpuTextureView
+import com.mojang.renderpearl.api.textures.GpuTexture
+import com.mojang.renderpearl.api.textures.GpuTextureView
+import com.mojang.renderpearl.backend.common.BaseGpuTextureView
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 
 /**
  * D3D12-backed {@link GpuTextureView} (an SRV over a {@link D3D12GpuTexture}).
+ *
+ * <p>26.3 起继承 {@code com.mojang.renderpearl.backend.common.BaseGpuTextureView}：
+ * 前端会做同款强转，纯接口实现会在首帧绘制时 ClassCastException。
  */
-class D3D12GpuTextureView(texture: GpuTexture, baseMipLevel: Int, mipLevels: Int) :
-    GpuTextureView(texture, baseMipLevel, mipLevels) {
+class D3D12GpuTextureView(private val tex: GpuTexture, private val baseMip: Int, private val levelCount: Int) :
+    BaseGpuTextureView(tex, baseMip, levelCount) {
     private var handle: Long
     private var closed = false
-    /** P3b：本 view 的 base mip（render pass 绑 RTV 时须用，图集逐级上传 mip）。 */
-    private val baseMip: Int
 
     init {
-        this.baseMip = baseMipLevel
-        val dx12Texture = texture as D3D12GpuTexture
+        val dx12Texture = tex as D3D12GpuTexture
         // 镜像 VulkanGpuTextureView：构造时注册 view 引用，close() 时 removeViews
         dx12Texture.addViews()
-        this.handle = MCDR_ABI.ID3D12CreateTextureView(dx12Texture.handle(), baseMipLevel, mipLevels)
+        this.handle = MCDR_ABI.ID3D12CreateTextureView(dx12Texture.handle(), baseMip, levelCount)
         if (this.handle == 0L) {
             throw IllegalStateException("dx12CreateTextureView returned a null handle")
         }
     }
+
+    // texture()/baseMipLevel()/mipLevels()/getWidth()/getHeight() 由基类按构造参数提供；
+    // 这里只保留 render pass 附件绑定用的 handle()/baseMip() 与生命周期。
 
     /** Native handle ({@code Dx12Object*} as long). */
     fun handle(): Long {

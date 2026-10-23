@@ -18,6 +18,7 @@ import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12Velocity
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuTexture
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuTextureView
+import com.mojang.renderpearl.api.textures.GpuTextureView
 import com.mojang.serialization.Codec
 import java.io.File
 import java.lang.foreign.Arena
@@ -1249,6 +1250,10 @@ object DeepLearningSuperSampling {
     private var pendingCrosshairCamera: CameraRenderState? = null
     private var pendingCrosshairGuiScale: Int = 0
 
+    /** 26.3：`render` 现在要求显式传目标视图，补画时原样用回这两张。 */
+    private var pendingCrosshairColor: GpuTextureView? = null
+    private var pendingCrosshairDepth: GpuTextureView? = null
+
     /**
      * P109：把 F3 的 3D 十字准星**推迟**到本帧 DLSS/DLAA 评价之后（由
      * `mixin.render.DebugCrosshairRendererMixin` 在 `render` 的 HEAD 调进来，替掉原地的画）。
@@ -1261,10 +1266,13 @@ object DeepLearningSuperSampling {
      * 保证不会把上一帧的相机状态画到这一帧。
      */
     @JvmStatic
-    fun deferCrosshair(renderer: DebugCrosshairRenderer, cameraState: CameraRenderState, guiScale: Int) {
+    fun deferCrosshair(renderer: DebugCrosshairRenderer, cameraState: CameraRenderState, guiScale: Int,
+        colorTexture: GpuTextureView, depthTexture: GpuTextureView) {
         pendingCrosshairRenderer = renderer
         pendingCrosshairCamera = cameraState
         pendingCrosshairGuiScale = guiScale
+        pendingCrosshairColor = colorTexture
+        pendingCrosshairDepth = depthTexture
     }
 
     /**
@@ -1278,10 +1286,14 @@ object DeepLearningSuperSampling {
     fun replayCrosshair() {
         val renderer = pendingCrosshairRenderer ?: return
         val cameraState = pendingCrosshairCamera
+        val colorTexture = pendingCrosshairColor
+        val depthTexture = pendingCrosshairDepth
         pendingCrosshairRenderer = null
         pendingCrosshairCamera = null
-        if (cameraState != null) {
-            renderer.render(cameraState, pendingCrosshairGuiScale)
+        pendingCrosshairColor = null
+        pendingCrosshairDepth = null
+        if (cameraState != null && colorTexture != null && depthTexture != null) {
+            renderer.render(cameraState, pendingCrosshairGuiScale, colorTexture, depthTexture)
         }
     }
 

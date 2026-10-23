@@ -1,6 +1,6 @@
 package dev.nts.expdxr.d3d12.render.core
 
-import com.mojang.blaze3d.systems.GpuQueryPool
+import com.mojang.renderpearl.api.commands.GpuQueryPool
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import java.util.*
 

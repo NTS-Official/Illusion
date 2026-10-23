@@ -2,10 +2,10 @@ package dev.nts.expdxr.mixin.render;
 
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
-import com.mojang.blaze3d.GpuFormat;
+import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.blaze3d.pipeline.MainTarget;
-import com.mojang.blaze3d.systems.GpuDevice;
-import com.mojang.blaze3d.textures.GpuTexture;
+import com.mojang.renderpearl.api.device.GpuDevice;
+import com.mojang.renderpearl.api.textures.GpuTexture;
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale;
 import java.util.function.Supplier;
 import org.spongepowered.asm.mixin.Mixin;
@@ -47,10 +47,10 @@ import org.spongepowered.asm.mixin.injection.At;
 public class MainTargetRenderScaleMixin {
     @WrapOperation(method = {"allocateColorAttachment", "allocateDepthAttachment"},
             at = @At(value = "INVOKE",
-                    target = "Lcom/mojang/blaze3d/systems/GpuDevice;" +
+                    target = "Lcom/mojang/renderpearl/api/device/GpuDevice;" +
                             "createTexture(Ljava/util/function/Supplier;" +
-                            "ILcom/mojang/blaze3d/GpuFormat;" +
-                            "IIII)Lcom/mojang/blaze3d/textures/GpuTexture;"))
+                            "ILcom/mojang/renderpearl/api/GpuFormat;" +
+                            "IIII)Lcom/mojang/renderpearl/api/textures/GpuTexture;"))
     private static GpuTexture dxr_mc$scaleAttachmentTexture(
             GpuDevice device, Supplier<String> label, int usage, GpuFormat format,
             int width, int height, int depthOrLayers, int mipLevels, Operation<GpuTexture> original) {

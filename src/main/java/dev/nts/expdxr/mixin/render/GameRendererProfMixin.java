@@ -25,22 +25,22 @@ public class GameRendererProfMixin {
     }
 
     @Inject(method = "render", at = @At("HEAD"), remap = false)
-    private void D3D12ProfRenderHead(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
+    private void D3D12ProfRenderHead(CallbackInfo ci) {
         D3D12RenderProf.begin(D3D12RenderProf.RENDER);
     }
 
     @Inject(method = "render", at = @At("RETURN"), remap = false)
-    private void D3D12ProfRenderReturn(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
+    private void D3D12ProfRenderReturn(CallbackInfo ci) {
         D3D12RenderProf.end(D3D12RenderProf.RENDER);
     }
 
     @Inject(method = "renderLevel", at = @At("HEAD"), remap = false)
-    private void D3D12ProfRenderLevelHead(DeltaTracker deltaTracker, CallbackInfo ci) {
+    private void D3D12ProfRenderLevelHead(CallbackInfo ci) {
         D3D12RenderProf.begin(D3D12RenderProf.WORLD);
     }
 
     @Inject(method = "renderLevel", at = @At("RETURN"), remap = false)
-    private void D3D12ProfRenderLevelReturn(DeltaTracker deltaTracker, CallbackInfo ci) {
+    private void D3D12ProfRenderLevelReturn(CallbackInfo ci) {
         D3D12RenderProf.end(D3D12RenderProf.WORLD);
     }
 }

@@ -1,9 +1,9 @@
 package dev.nts.expdxr.d3d12.render.advanced.mesh
 
-import com.mojang.blaze3d.buffers.GpuBuffer
-import com.mojang.blaze3d.pipeline.RenderPipeline
-import com.mojang.blaze3d.IndexType
-import com.mojang.blaze3d.systems.RenderPass
+import com.mojang.renderpearl.api.buffers.GpuBuffer
+import com.mojang.renderpearl.api.pipeline.RenderPipeline
+import com.mojang.renderpearl.api.pipeline.IndexType
+import com.mojang.renderpearl.api.commands.RenderPass
 import org.slf4j.LoggerFactory
 
 /**

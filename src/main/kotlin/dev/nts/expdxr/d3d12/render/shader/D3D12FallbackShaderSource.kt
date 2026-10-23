@@ -1,6 +1,6 @@
 package dev.nts.expdxr.d3d12.render.shader
 
-import com.mojang.blaze3d.shaders.ShaderType
+import com.mojang.renderpearl.api.pipeline.ShaderType
 import net.minecraft.resources.Identifier
 import net.minecraft.server.packs.resources.ResourceProvider
 import org.slf4j.LoggerFactory
@@ -59,6 +59,23 @@ object D3D12FallbackShaderSource {
             rp.openAsReader(location).use { it.readText() }
         } catch (e: IOException) {
             LOGGER.error("Coudln't preload {} shader {}: {}", type, id, e)
+            null
+        }
+    }
+
+    /**
+     * 26.3 的 `#include` 回退：主源（ShaderSource）尚未武装时，从 `preloadUiShader` 捕获的
+     * 原版包资源里读 `shaders/include/<path>`（`ShaderManager.listAllIncludes` 用的就是这个
+     * 目录，字节码 `ldc "shaders/include"`）。include id 形如 `minecraft:fog.glsl`。
+     */
+    @JvmStatic
+    fun getInclude(id: Identifier): String? {
+        val rp = this.provider ?: return null
+        val location = Identifier.fromNamespaceAndPath(id.namespace, "shaders/include/" + id.path)
+        return try {
+            rp.openAsReader(location).use { it.readText() }
+        } catch (e: IOException) {
+            LOGGER.debug("Couldn't preload shader include {}: {}", id, e.message)
             null
         }
     }

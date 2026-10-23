@@ -14,6 +14,7 @@
     "render.DebugEntryFpsMixin",
     "options.VideoSettingsScreenMixin",
     "render.GameRendererPreloadUiShaderMixin",
+    "render.FrontendGpuDeviceCompilePipelineMixin",
     "render.MainTargetRenderScaleMixin",
     "render.RenderTargetCreateBuffersScaleMixin",
     "render.LevelRendererWorldTargetsScaleMixin",

@@ -30,12 +30,12 @@ public class LevelRendererProfMixin {
     }
 
     @Inject(method = "prepareChunkRenders", at = @At("HEAD"), remap = false)
-    private void D3D12ProfPrepareChunksHead(Matrix4fc modelViewMatrix, CallbackInfoReturnable<ChunkSectionsToRender> cir) {
+    private void D3D12ProfPrepareChunksHead(Matrix4fc modelViewMatrix, boolean renderOutline, CallbackInfoReturnable<ChunkSectionsToRender> cir) {
         D3D12RenderProf.begin(D3D12RenderProf.PREPARE_CHUNKS);
     }
 
     @Inject(method = "prepareChunkRenders", at = @At("RETURN"), remap = false)
-    private void D3D12ProfPrepareChunksReturn(Matrix4fc modelViewMatrix, CallbackInfoReturnable<ChunkSectionsToRender> cir) {
+    private void D3D12ProfPrepareChunksReturn(Matrix4fc modelViewMatrix, boolean renderOutline, CallbackInfoReturnable<ChunkSectionsToRender> cir) {
         D3D12RenderProf.end(D3D12RenderProf.PREPARE_CHUNKS);
     }
 

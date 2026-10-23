@@ -1,19 +1,23 @@
 package dev.nts.expdxr.d3d12.backend
 
-import com.mojang.blaze3d.GLFWErrorCapture
+import com.mojang.renderpearl.api.device.BackendCreationException
+import com.mojang.renderpearl.api.device.GpuBackend
+import com.mojang.renderpearl.api.device.GpuDevice
+import com.mojang.renderpearl.api.device.GpuSurface
+import com.mojang.renderpearl.api.device.SurfaceException
+import com.mojang.renderpearl.frontend.FrontendGpuDevice
 import dev.nts.expdxr.d3d12.render.advanced.mesh.D3D12MeshShader
-import com.mojang.blaze3d.GpuFormat
-import com.mojang.blaze3d.buffers.GpuBuffer
-import com.mojang.blaze3d.buffers.GpuFence
-import com.mojang.blaze3d.pipeline.CompiledRenderPipeline
-import com.mojang.blaze3d.shaders.GpuDebugOptions
-import com.mojang.blaze3d.shaders.ShaderSource
-import com.mojang.blaze3d.shaders.ShaderType
-import com.mojang.blaze3d.systems.*
-import com.mojang.blaze3d.textures.AddressMode
-import com.mojang.blaze3d.textures.FilterMode
-import com.mojang.blaze3d.textures.GpuSampler
-import com.mojang.blaze3d.textures.GpuTexture
+import com.mojang.renderpearl.api.GpuFormat
+import com.mojang.renderpearl.api.buffers.GpuBuffer
+import com.mojang.renderpearl.api.commands.GpuFence
+import com.mojang.renderpearl.api.pipeline.CompiledRenderPipeline
+import com.mojang.renderpearl.api.device.GpuDebugOptions
+import com.mojang.renderpearl.api.pipeline.ShaderSource
+import com.mojang.renderpearl.api.pipeline.ShaderType
+import com.mojang.renderpearl.api.textures.AddressMode
+import com.mojang.renderpearl.api.textures.FilterMode
+import com.mojang.renderpearl.api.textures.GpuSampler
+import com.mojang.renderpearl.api.textures.GpuTexture
 import dev.nts.expdxr.Illusion.Companion.NATIVE_NAME
 import dev.nts.expdxr.MeshDiagnostics
 import dev.nts.expdxr.misc.IllusionLogger
@@ -25,58 +29,64 @@ import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.adapter.D3D12Device
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuSurface
 import net.minecraft.client.renderer.RenderPipelines
-import org.lwjgl.glfw.GLFW
+import net.minecraft.resources.Identifier
+import org.lwjgl.sdl.SDLError
+import org.lwjgl.sdl.SDLVideo
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import java.nio.ByteBuffer
 import java.util.*
+import java.util.function.BooleanSupplier
 
 /**
  * Direct3D 12 [GpuBackend] implementation.
  *
  * Mirrors `com.mojang.blaze3d.vulkan.VulkanBackend`'s contract:
- * - [setWindowHints] runs inside GLFW's error scope before the window is created (no hints needed for DX12).
- * - [handleWindowCreationErrors] is only called when `glfwCreateWindow` returns 0.
+ * - [createWindow] creates the SDL3 window for the game (26.3 moved window creation into the backend;
+ *   26.2 used `setWindowHints()` + vanilla's own `glfwCreateWindow`).
  * - [createDevice] is called once the window exists; it runs the full D3D12 self-test chain and, when it
  *   passes, returns a live [D3D12Device] that drives the vanilla render flow (P6+).
  */
 class D3D12Backend : GpuBackend {
+    /** [createWindow] 建出来的 `SDL_Window*`；`createDevice` 里做 surface 自检时要用它。 */
+    private var lastWindowHandle: Long = 0L
+
     override fun getName(): String = "D3D12"
 
-    override fun setWindowHints() {
-        // D3D12 后端默认让窗口**不带 OpenGL 上下文**（GLFW_NO_API），与 vanilla VulkanBackend.setWindowHints() 一致。
-        //
-        // 为什么必须这样（两条独立理由）：
-        // 1) RTSS / MSI Afterburner 的 OSD：只要进程里存在一条"被使用过"的 GL 上下文，RTSS 就把 OSD
-        //    交给它的 OpenGL 呈现路径，而 GL 的内容被我们的 D3D12 子窗口整块盖住 —— OSD 一直在画，
-        //    用户却永远看不到。进程里没有 GL 上下文时 RTSS 才走 D3D12 overlay 路径。
-        //    实测对照（2026-10-12）：普通 GL 模式 OSD 完全不可见；GLFW_NO_API 模式下 OSD 正常显示
-        //    GPU/CPU/内存/帧率（证据见 known_bugs.md §1 与 _port/noapi_osd_crop.png、_port/aa_osd_fix_1.png）。
-        // 2) GL 侧本来就从不呈现：26.2 里唯一的 GL 呈现点是 GlSurface.present() 的 glfwSwapBuffers，
-        //    我们的后端不会走到那里，因此那条 GL 上下文只是白白让 RTSS 误判进程类型。
-        //
-        // 逃生开关在配置里：[renderer] glContext（config/dxr_mc-client.toml）。打开后退回带 GL 上下文的旧行为。
-        val useNoApi = !D3D12Settings.glContext
-        if (useNoApi) GLFW.glfwWindowHint(GLFW.GLFW_CLIENT_API, GLFW.GLFW_NO_API)
+    // 26.3：GpuBackend 用 loadLibrary/unloadLibrary 显式管理后端动态库（26.2 是隐式的）。
+    // D3D12 由系统 d3d12.dll 提供、不需要预加载，这里留空即可。
+    override fun loadLibrary() {}
 
-        LOGGER.info("[$NATIVE_NAME] GLFW window hints: GLFW_CLIENT_API={} ({})",
-            if (useNoApi) "GLFW_NO_API" else "GLFW_OPENGL_API",
-            if (useNoApi) "default: no GL context in this process — required so RTSS/Afterburner draws its D3D12 OSD"
-            else "escape hatch active ([renderer] glContext = true): a real GL context will be created")
+    override fun unloadLibrary() {}
+
+    /**
+     * 26.3 把窗口创建移交给了后端：`GpuBackend.createWindow(title, w, h, flags)` 取代了 26.2 的
+     * `setWindowHints()` + vanilla 自己调 `glfwCreateWindow`。
+     *
+     * flags 是游戏算好的 SDL3 标志（26.3 传 `SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_RESIZABLE`
+     * = `0x2020`），这里**原样透传**。绝不能或上 `SDL_WINDOW_OPENGL`：那是 GlBackend 自己加的
+     * （`GlBackend.createWindow` 里 `flags | SDL_WINDOW_OPENGL`），而 D3D12 进程里一旦出现一条
+     * **被使用过**的 GL 上下文，RTSS/Afterburner 的 OSD 就会改走 OpenGL 呈现路径、被我们的
+     * D3D12 子窗口整块盖住而永远不可见（26.2 的 GLFW_NO_API 就是为这件事存在的，
+     * 证据见 known_bugs.md §1 与 _port/noapi_osd_crop.png）。
+     */
+    override fun createWindow(title: String?, width: Int, height: Int, flags: Long): Long {
+        if (D3D12Settings.glContext) {
+            LOGGER.warn("[renderer] glContext = true has no effect since 26.3: the GL context belongs to "
+                + "the OpenGL backend, the D3D12 backend never requests one")
+        }
+        val handle = SDLVideo.SDL_CreateWindow(title ?: "", width, height, flags)
+        if (handle == 0L) {
+            D3D12Fatal.crash("SDL_CreateWindow failed for DX12 (video driver: "
+                + "${SDLVideo.SDL_GetCurrentVideoDriver()}): ${SDLError.SDL_GetError()}", null)
+        }
+        lastWindowHandle = handle
+        LOGGER.info("[$NATIVE_NAME] SDL window: {}x{}, flags=0x{}", width, height, flags.toString(16))
+        return handle
     }
 
     @Throws(BackendCreationException::class)
-    override fun handleWindowCreationErrors(error: GLFWErrorCapture.Error) {
-        // P73：窗口创建失败同样不再回退到 GL/Vulkan（旧行为会接着试下一个候选后端，用户只看到
-        // 一次"正常"的 OpenGL 启动）。见 D3D12Fatal 的策略说明。
-        val what = "GLFW window creation failed for DX12 (GLFW_ERROR: 0x%X)".format(Locale.ROOT, error.error)
-        LOGGER.error("[backend] {}", what)
-        D3D12Fatal.crash(what, null)
-    }
-
-    @Throws(BackendCreationException::class)
-    override fun createDevice(window: Long, defaultShaderSource: ShaderSource,
-        debugOptions: GpuDebugOptions, criticalShaderLoader: Runnable): GpuDevice {
+    override fun createDevice(debugOptions: GpuDebugOptions): GpuDevice {
         // P6: createDevice returns a real, live GpuDevice. The game then drives
         // the full vanilla render flow through our backend (RenderSystem
         // initRenderer, surface, per-frame render passes, present) with no
@@ -96,7 +106,14 @@ class D3D12Backend : GpuBackend {
             // 原生侧在建设备时从进程环境读几个开关（调试层、DLSS 实现、原生日志文件…）。
             // 配置是唯一入口，这里在建 D3D12Device 之前把它们推进原生进程环境。
             D3D12Settings.pushToNative()
-            val device = D3D12Device(defaultShaderSource)
+            // 26.3 的 `createDevice(GpuDebugOptions)` 不再收 defaultShaderSource / criticalShaderLoader：
+            // 着色器源与"关键着色器加载失败"的处理都移进了 FrontendGpuDevice/PipelineBuilder，后端只在
+            // `compilePipeline(CreateInfo)` 里拿到具体源。
+            // 真实管线的源在 `FrontendGpuDeviceCompilePipelineMixin` 里连同管线一起登记到
+            // D3D12PipelineBridge（D3D12Device.resolveShaderSource 优先取它）；构造参数只作兜底：
+            // 这里给内嵌 GLSL 源，让下面的自检（pipeline/gui + pipeline/gui_textured）在资源包
+            // 尚未加载时也能跑完整条 GLSL→SPIR-V→HLSL→DXBC→PSO 链。
+            val device = D3D12Device(EMBEDDED_SHADER_SOURCE)
 
             // P124：mesh 能力与原因的唯一下发点（UI 置灰、路径分流都读它）。
             D3D12MeshShader.isSupported()
@@ -121,7 +138,7 @@ class D3D12Backend : GpuBackend {
                 // 装了 RTSS 也完全看不到 OSD）。探针矩阵已验证：只要有 GL/其它交换链先 Present，
                 // OSD 会永久留在那条链上。因此默认跳过，需要时用配置 `[debug] selfTestSurface = true` 打开。
                 if (D3D12Settings.selfTestSurface) {
-                    selfTestSurface(device, window)
+                    selfTestSurface(device, lastWindowHandle)
                 } else {
                     LOGGER.info("[backend] Surface self-test skipped: swapped-chain self-test would steal "
                         + "the RTSS OSD binding (enable with [debug] selfTestSurface = true)")
@@ -134,7 +151,7 @@ class D3D12Backend : GpuBackend {
             // 必须在返回给游戏前清除，否则 getOrCompilePipeline 会命中自测缓存条目，
             // 导致真实游戏 shader 从未被编译，屏幕显示的是自测阶段的嵌入 shader 输出（紫色）。
             device.clearPipelineCache()
-            return GpuDevice(device, criticalShaderLoader)
+            return FrontendGpuDevice(device)
         } catch (t: Throwable) {
             LOGGER.error("[backend] D3D12 self-test failed", t)
             LOGGER.error("[backend] D3D12 failure is fatal by design (P73): no GL/Vulkan fallback, "
@@ -389,11 +406,12 @@ class D3D12Backend : GpuBackend {
             """.trimIndent()
 
         /** 自检 shader 源：createDevice 时资源包未加载，用内嵌 GLSL 顶替真实 ShaderSource。 */
-        private val EMBEDDED_SHADER_SOURCE: ShaderSource = ShaderSource { id, type ->
-            if (!id.path.startsWith("core/")) {
-                null
-            } else {
-                when (id.path) {
+        private val EMBEDDED_SHADER_SOURCE: ShaderSource = object : ShaderSource {
+            override fun getShader(id: Identifier, type: ShaderType): String? {
+                if (!id.path.startsWith("core/")) {
+                    return null
+                }
+                return when (id.path) {
                     "core/gui" -> if (type == ShaderType.VERTEX) CORE_GUI_VSH else CORE_GUI_FSH
                     "core/position_tex_color" -> if (type == ShaderType.VERTEX) {
                         CORE_POSITION_TEX_COLOR_VSH
@@ -403,6 +421,10 @@ class D3D12Backend : GpuBackend {
                     else -> null
                 }
             }
+
+            override fun getInclude(id: Identifier): ShaderSource.CachedIncludeSource? = null
+
+            override fun close() {}
         }
 
         /**
@@ -413,17 +435,19 @@ class D3D12Backend : GpuBackend {
         private fun selfTestPipelines(device: D3D12Device) {
             val names = arrayOf("pipeline/gui", "pipeline/gui_textured")
             for (name in names) {
-                val pipeline: CompiledRenderPipeline = when (name) {
-                    "pipeline/gui" -> device.precompilePipeline(RenderPipelines.GUI,
-                        EMBEDDED_SHADER_SOURCE)
-                    else -> device.precompilePipeline(RenderPipelines.GUI_TEXTURED,
-                        EMBEDDED_SHADER_SOURCE)
+                val pipeline: D3D12CompiledRenderPipeline = when (name) {
+                    "pipeline/gui" -> device.getOrCompilePipeline(RenderPipelines.GUI, false)
+                    else -> device.getOrCompilePipeline(RenderPipelines.GUI_TEXTURED, false)
                 }
-                if (!pipeline.isValid) {
+                if (!pipeline.isValid()) {
                     throw IllegalStateException("native pipeline compile failed for $name")
                 }
             }
             LOGGER.info("[backend] Pipeline self-test OK (GLSL->SPIR-V->HLSL->DXBC->PSO for core/gui + core/position_tex_color)")
+            // 26.3 起真实 ShaderSource 是按次传进来的（见 D3D12Device.resolveShaderSource），
+            // 而这里的自检用的是内嵌 GLSL 兜底源。同一条 pipeline/gui 若把自检结果留在缓存里，
+            // 后面 vanilla 用真实源编译时会命中缓存、真实源永远不生效，所以自检完立刻清掉。
+            device.clearPipelineCache()
         }
 
         /**
@@ -700,10 +724,9 @@ class D3D12Backend : GpuBackend {
         @Throws(SurfaceException::class)
         private fun selfTestSurface(device: D3D12Device, window: Long) {
             val encoderBackend: D3D12CommandEncoderBackend = D3D12CommandEncoderBackend()
-            val encoder: CommandEncoder = CommandEncoder(null, device, encoderBackend)
             var D3DSurface: D3D12GpuSurface? = null
             try {
-                D3DSurface = device.createSurface(window) as D3D12GpuSurface
+                D3DSurface = device.createSurface(window, BooleanSupplier { false }) as D3D12GpuSurface
                 val mode: GpuSurface.PresentMode = GpuSurface.PresentMode.getSupportedVsyncMode(
                     D3DSurface.supportedPresentModes(), false)
                 D3DSurface.configure(GpuSurface.Configuration(640, 480, mode))
@@ -712,8 +735,10 @@ class D3D12Backend : GpuBackend {
                 // 纯红色清空 Backbuffer（null texture = 不做 copy，只做 ClearRenderTargetView）
                 D3DSurface.clearToRed(encoderBackend)
 
-                val fence: GpuFence = encoder.createFence()
-                encoder.submit()
+                // 26.3：前端 CommandEncoder 已改成接口 + 内部包装，自检直接走 backend 层
+                // （submit 后由 fence 等 GPU 完成，语义与旧的 encoder.createFence() 一致）。
+                val fence: GpuFence = encoderBackend.createFence()
+                encoderBackend.submit()
                 // 必须等 GPU 完成 clear 后再销毁 swapchain，否则 backbuffer 在被使用时释放。
                 if (!fence.awaitCompletion(5000L)) {
                     throw IllegalStateException("surface self-test submit timed out")

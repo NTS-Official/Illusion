@@ -1,8 +1,8 @@
 package dev.nts.expdxr.d3d12.render.shader
 
-import com.mojang.blaze3d.textures.AddressMode
-import com.mojang.blaze3d.textures.FilterMode
-import com.mojang.blaze3d.textures.GpuSampler
+import com.mojang.renderpearl.api.textures.AddressMode
+import com.mojang.renderpearl.api.textures.FilterMode
+import com.mojang.renderpearl.api.textures.GpuSampler
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import java.util.OptionalDouble
 
@@ -19,7 +19,7 @@ class D3D12GpuSampler(
     private val magFilter: FilterMode,
     private val maxAnisotropy: Int,
     private val maxLod: OptionalDouble,
-) : GpuSampler() {
+) : GpuSampler {
     private val handle: Long
     private var closed = false
 
@@ -67,5 +67,9 @@ class D3D12GpuSampler(
         }
         this.closed = true
         MCDR_ABI.ID3D12DestroyResource(this.handle)
+    }
+
+    override fun isClosed(): Boolean {
+        return this.closed
     }
 }

@@ -1,8 +1,11 @@
 package dev.nts.expdxr.mixin.render;
 
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12TAA;
 import dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling;
 import net.minecraft.client.renderer.LevelRenderer;
+import net.minecraft.client.renderer.chunk.ChunkSectionsToRender;
+import net.minecraft.client.renderer.feature.FeatureRenderDispatcher;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -70,7 +73,9 @@ public class LevelRendererMainPassDepthMixin {
      * 顺序只是为了日志里"速度 pass 先有读数"。
      */
     @Inject(method = "lambda$addMainPass$0", at = @At("RETURN"), remap = false)
-    private void dxr_mc$dlssDepthSnapshotAfterMainPass(CallbackInfo ci) {
+    private void dxr_mc$dlssDepthSnapshotAfterMainPass(GpuBufferSlice slice, boolean bl, ChunkSectionsToRender sections,
+                                                       FeatureRenderDispatcher.PreparedFrame frame, boolean bl2,
+                                                       boolean bl3, CallbackInfo ci) {
         // P77：只开 TAA（DLSS 关着）时运动矢量要从这里补录 —— captureMotionVectors 在 DLSS 关闭时
         // 第一行就返回，不补这一行 TAA 就永远拿不到运动矢量。
         D3D12TAA.captureTemporalData();

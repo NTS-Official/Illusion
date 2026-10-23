@@ -1,7 +1,8 @@
 package dev.nts.expdxr.d3d12.render.core
 
-import com.mojang.blaze3d.buffers.GpuBuffer
-import com.mojang.blaze3d.buffers.GpuBufferSlice
+import com.mojang.renderpearl.api.buffers.GpuBuffer
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice
+import com.mojang.renderpearl.backend.common.BaseGpuBuffer
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.advanced.mesh.D3D12MeshSectionSnapshot
 import java.nio.ByteBuffer
@@ -15,16 +16,21 @@ import java.nio.ByteOrder
  * MAP_READ, DEFAULT otherwise) and {@link #map} returns a direct ByteBuffer over
  * the persistently mapped memory.
  */
-class D3D12GpuBuffer(usage: @Usage Int, private val bufferSize: Long, private val label: String = "") : GpuBuffer(usage, bufferSize) {
+class D3D12GpuBuffer(private val usageFlags: Int, private val bufferSize: Long, private val label: String = "") :
+    BaseGpuBuffer(usageFlags, bufferSize) {
     private val handle: Long
     private var closed = false
 
     init {
-        this.handle = MCDR_ABI.ID3D12CreateBuffer(usage, bufferSize)
+        this.handle = MCDR_ABI.ID3D12CreateBuffer(usageFlags, bufferSize)
         if (this.handle == 0L) {
             throw IllegalStateException("dx12CreateBuffer returned a null handle")
         }
     }
+
+    // 26.3 起 `GpuBuffer` 的实现必须继承 `com.mojang.renderpearl.backend.common.BaseGpuBuffer`：
+    // `FrontendRenderPass.validateDraw` 会直接把 draw 的 vertex/index buffer 强转成它
+    // （不转就 ClassCastException）。size()/usage() 由基类按构造参数提供，这里不再 override。
 
     /** Native handle ({@code Dx12Object*} as long). */
     fun handle(): Long {

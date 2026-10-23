@@ -1,8 +1,9 @@
 package dev.nts.expdxr.d3d12.backend
 
-import com.mojang.blaze3d.pipeline.BindGroupLayout
-import com.mojang.blaze3d.pipeline.CompiledRenderPipeline
-import com.mojang.blaze3d.pipeline.RenderPipeline
+import com.mojang.renderpearl.api.pipeline.BindGroupLayout
+import com.mojang.renderpearl.api.pipeline.UniformType
+import com.mojang.renderpearl.backend.api.BackendRenderPipeline
+import com.mojang.renderpearl.api.pipeline.RenderPipeline
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.shader.D3D12IntermediaryShaderModule
 
@@ -18,12 +19,12 @@ import dev.nts.expdxr.d3d12.render.shader.D3D12IntermediaryShaderModule
  */
 class D3D12CompiledRenderPipeline(
     private val info: RenderPipeline,
-    private val handle: Long,
+    private var handle: Long,
     private val vertexShader: D3D12IntermediaryShaderModule,
     private val fragmentShader: D3D12IntermediaryShaderModule,
     private val vertexHlsl: String,
     private val fragmentHlsl: String,
-) : CompiledRenderPipeline, AutoCloseable {
+) : BackendRenderPipeline {
     /** P59：bindings 在管线生命周期内恒定，缓存以避免每帧重复构建（含 stream/集合分配）。 */
     @Volatile
     private var cachedBindings: List<D3D12BindGroupEntry>? = null
@@ -112,11 +113,8 @@ class D3D12CompiledRenderPipeline(
         }
         val allUniforms =
             BindGroupLayout.flattenUniforms(this.info.bindGroupLayouts)
-        val allSamplers =
-            BindGroupLayout.flattenSamplers(this.info.bindGroupLayouts)
         val allNames = mutableSetOf<String>()
         allUniforms.forEach { u -> allNames.add(u.name()) }
-        allNames.addAll(allSamplers)
 
         val entries = mutableListOf<D3D12BindGroupEntry>()
         val seen = mutableSetOf<String>()
@@ -131,7 +129,11 @@ class D3D12CompiledRenderPipeline(
                 if (!allNames.contains(name) || !seen.add(name)) continue
                 val utbDesc = allUniforms.stream()
                     .filter { d -> d.name() == name }.findFirst().orElse(null)
-                if (utbDesc != null) {
+                // 26.3 的 BindGroupLayout 会为**每个**纹理 uniform 报一条描述（类型 COMBINED_IMAGE_SAMPLER），
+                // 所以“名字出现在 allUniforms 里”不再等于“这是 texel buffer”：必须看 UniformType。
+                // 26.2 用的是 BindGroupLayout.getSamplers()（只有 texel buffer 才列出来），
+                // 26.3 删掉了 flattenSamplers，语义差别就在这里 —— 按类型判定而不是按存在性。
+                if (utbDesc != null && utbDesc.type() == UniformType.TEXEL_BUFFER) {
                     entries.add(D3D12BindGroupEntry(D3D12BindGroupEntry.Type.TEXEL_BUFFER, name,
                         utbDesc.gpuFormat()))
                 } else {
@@ -144,8 +146,32 @@ class D3D12CompiledRenderPipeline(
         return result
     }
 
-    override fun isValid(): Boolean {
+    /** 26.3 的 `CompiledRenderPipeline` 只剩 [isClosed]/[close]；这是本实现自己的有效性判据。 */
+    fun isValid(): Boolean {
         return this.handle != 0L
+    }
+
+    /**
+     * 26.3：前端把 `setUniform(String, …)` 解析成**管线 uniform 列表下标**后回调
+     * `backend.setUniform(index, value)`。那个下标就是 [BackendRenderPipeline.CreateInfo.uniforms]
+     * 的位置（`PipelineBuilder.generateBackendCreateInfo` 用 `computeIfAbsent(name) { map.size() }`
+     * 按 SPIR-V 描述符出现顺序编号），**不是** `BindGroupLayout.flattenUniforms` 的顺序，
+     * 所以不能自己从 layouts 推 —— 必须把 CreateInfo 的名单原样存下来（由
+     * [dev.nts.expdxr.d3d12.render.adapter.D3D12Device.compilePipeline] 填充）。
+     */
+    @Volatile
+    private var uniformNameList: List<String> = emptyList()
+
+    fun setUniformNames(names: List<String>) {
+        this.uniformNameList = names
+    }
+
+    fun uniformNamesSnapshot(): List<String> {
+        return this.uniformNameList
+    }
+
+    override fun isClosed(): Boolean {
+        return this.handle == 0L
     }
 
     override fun close() {
@@ -157,8 +183,14 @@ class D3D12CompiledRenderPipeline(
             MCDR_ABI.D3D12DestroyPipeline(this.meshPso)
             this.meshPso = 0L
         }
-        if (this.handle != 0L) {
-            MCDR_ABI.D3D12DestroyPipeline(this.handle)
+        // P184：先取走再归零 —— 26.3 的 FrontendGpuDevice.close() 会走
+        // PipelineBuilder.close() 逐条 close，本项目的缓存/桥接路径也可能再 close 一次；
+        // 不归零就是同一根 Dx12Pipeline* 被 DestroyPipeline 两次（原生 double free），
+        // 退出时 NTSTATUS 0xC0000374（堆损坏）。
+        val pipeline = this.handle
+        this.handle = 0L
+        if (pipeline != 0L) {
+            MCDR_ABI.D3D12DestroyPipeline(pipeline)
         }
     }
 }
