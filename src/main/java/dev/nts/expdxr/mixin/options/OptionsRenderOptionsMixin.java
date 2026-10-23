@@ -1,5 +1,6 @@
 package dev.nts.expdxr.mixin.options;
 
+import dev.nts.expdxr.d3d12.D3D12HdrPresentation;
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale;
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12VariableShadingRate;
 import dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling;
@@ -9,6 +10,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
  * Persists DXRMC's render scale, VRS shading rate and DLSS switch (P108b) in vanilla's own
@@ -42,6 +44,7 @@ public abstract class OptionsRenderOptionsMixin {
         D3D12VariableShadingRate.load(options.getFile());
         DeepLearningSuperSampling.load(options.getFile());
         NvidiaReflex.load(options.getFile());
+        D3D12HdrPresentation.load(options.getFile());
     }
 
     @Inject(method = "save", at = @At("TAIL"))
@@ -51,5 +54,22 @@ public abstract class OptionsRenderOptionsMixin {
         D3D12VariableShadingRate.save(options.getFile());
         DeepLearningSuperSampling.save(options.getFile());
         NvidiaReflex.save(options.getFile());
+        D3D12HdrPresentation.save(options.getFile());
+    }
+
+    /**
+     * P198：HDR 模式改了但还没重启 —— 借用原版那条“需要重启”的红色提示。
+     *
+     * <p>原版就是这么提示图形后端切换的：{@code VideoSettingsScreen} 在
+     * {@code isRestartRequiredToApplyVideoSettings()} 为真时加一个
+     * {@code options.restartRequired} 的红色 StringWidget。我们只负责把“要不要提示”这件事
+     * 补上一票，提示的位置、颜色、文案全部由原版负责。
+     */
+    @Inject(method = "isRestartRequiredToApplyVideoSettings", at = @At("RETURN"), cancellable = true)
+    private void dxr_mc$restartRequiredForHdr(CallbackInfoReturnable<Boolean> cir) {
+        if (Boolean.TRUE.equals(cir.getReturnValue()) || !D3D12HdrPresentation.isRestartPending()) {
+            return;
+        }
+        cir.setReturnValue(true);
     }
 }

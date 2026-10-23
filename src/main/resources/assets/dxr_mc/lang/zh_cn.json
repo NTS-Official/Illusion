@@ -45,6 +45,7 @@
   "dxr_mc.configuration.renderer.asyncWorkers": "异步 worker 数",
   "dxr_mc.configuration.renderer.asyncWorkers.tooltip": "并行录制使用的 worker 线程数（1-8）。默认 8 会把每帧段平均分区。",
   "dxr_mc.configuration.renderer.commandBundles": "命令 bundle 模式",
+  "dxr_mc.configuration.renderer.hdr": "HDR 呈现",
   "dxr_mc.configuration.renderer.commandBundles.tooltip": "一个多绘制批次如何切分。自动（默认）对小批次内联单 bundle、大批次并行录制；串行始终单 bundle（兼容性最好）；并行始终走 worker 池。",
   "dxr_mc.configuration.renderer.commandBundles.AUTO": "自动",
   "dxr_mc.configuration.renderer.commandBundles.SERIAL": "串行",
@@ -140,6 +141,12 @@
   "dxr_mc.configuration.mesh.terrain_cull": "在 mesh shader 之前用 amplification shader 剔除地形 meshlet",
   "dxr_mc.configuration.mesh.terrain_cull_bounds": "从 compute 生成的表里读逐 meshlet 包围球",
   "dxr_mc.configuration.mesh.terrain_cone": "用背面法线锥剔除整块背向相机的 meshlet",
+  "options.hdr": "HDR 呈现",
+  "options.hdr.tooltip": "此选项决定是否启用 HDR 呈现。\n\n自动：跟随系统的 HDR 设置，\n开：强制使用 HDR。\n关：强制使用 SDR。",
+  "options.hdr.auto": "自动",
+  "options.hdr.on": "开",
+  "options.hdr.off": "关",
   "options.inactivityFpsLimit.never": "永不",
-  "options.inactivityFpsLimit.never.tooltip": "挂机或最小化时也不降低帧率上限。"
+  "options.inactivityFpsLimit.never.tooltip": "挂机或最小化时也不降低帧率上限。",
+  "key.dxr_mc.jitter_sign": "抖动符号 A/B（调试，F7）"
 }

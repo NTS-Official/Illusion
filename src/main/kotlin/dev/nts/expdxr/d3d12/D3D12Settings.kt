@@ -2,6 +2,7 @@ package dev.nts.expdxr.d3d12
 
 import dev.nts.expdxr.CommandBundleMode
 import dev.nts.expdxr.DlssImplementation
+import dev.nts.expdxr.HdrMode
 import dev.nts.expdxr.IllusionConfig
 import dev.nts.expdxr.MeshDiagnostics
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
@@ -64,6 +65,7 @@ object D3D12Settings {
         val pixTimingCapture: Boolean,
         val pixCaptureFrames: Int,
         val pixDirectory: String,
+        val hdrMode: Int,
     )
 
     @Volatile
@@ -195,7 +197,8 @@ object D3D12Settings {
             append(s.dlssImplementation).append('|')
             append(s.reflexFrameLimitUs).append('|')
             append(s.nativeLogFile).append('|')
-            append(s.pixDirectory)
+            append(s.pixDirectory).append('|')
+            append(s.hdrMode)
         }
         if (wanted == pushed) return
         pushed = wanted
@@ -215,6 +218,8 @@ object D3D12Settings {
         MCDR_ABI.D3D12SetPIXDirectory(s.pixDirectory)
         // P131：Reflex 的限帧器没有环境变量入口 —— 直接走 ABI，配置是唯一来源。
         MCDR_ABI.D3D12SetReflexFrameLimit(s.reflexFrameLimitUs)
+        // P197：HDR 模式同理（0/1/2 = AUTO/FORCE_ON/FORCE_OFF），下次建链时生效。
+        MCDR_ABI.D3D12SetHdrMode(s.hdrMode)
     }
 
     private fun snapshot(): Snapshot = snapshot ?: build()
@@ -332,6 +337,8 @@ object D3D12Settings {
             pixTimingCapture = config(false) { IllusionConfig.PIX_TIMING_CAPTURE.get() },
             pixCaptureFrames = config(600) { IllusionConfig.PIX_CAPTURE_FRAMES.get() },
             pixDirectory = config("") { IllusionConfig.PIX_DIRECTORY.get() },
+            // P197：0 = AUTO / 1 = FORCE_ON / 2 = FORCE_OFF（native 只认序号）。
+            hdrMode = config(HdrMode.AUTO) { IllusionConfig.HDR.get() }.ordinal,
         )
 
         if (configAvailable) {

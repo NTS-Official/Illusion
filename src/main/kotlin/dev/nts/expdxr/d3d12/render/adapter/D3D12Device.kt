@@ -56,6 +56,7 @@ import dev.nts.expdxr.d3d12.render.shader.D3D12GpuSampler
 import dev.nts.expdxr.d3d12.render.shader.D3D12IntermediaryShaderModule
 import dev.nts.expdxr.d3d12.render.shader.D3D12ShaderCompiler
 import dev.nts.expdxr.d3d12.render.shader.injectShaderDefines
+import net.minecraft.client.Minecraft
 import net.minecraft.client.renderer.ShaderDefines
 import net.minecraft.resources.Identifier
 import org.lwjgl.util.shaderc.ShadercIncludeResult
@@ -675,12 +676,20 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
     }
 
     /**
-     * 读一条 `#include`（`shaders/include/` 下的源码）。26.3 的 [ShaderSource.getInclude]
-     * 返回缓存好的 `CachedIncludeSource`（内部持有一个 shaderc `ShadercIncludeResult` 结构，
-     * 内容随对象生命周期常驻，被 `ShaderManager` 的 include 缓存复用）——**只读不 close**：
-     * 关掉会把别人缓存里的结构释放掉。
+     * 读一条 `#include`（`shaders/include/` 下的源码）。
+     *
+     * P197：优先从 `ResourceManager` 直接读文件，**不要**依赖 `ShaderSource.getInclude` 返回的
+     * `CachedIncludeSource`。那个 `includeResultPtr()` 指向的结构只在 vanilla 自己的 shaderc
+     * include 回调期间有效，回调返回后 vanilla 会释放它；我们在之后异步读到的是一块已释放内存
+     * ——表现是 include 文本尾部混进几个 U+FFFD（`glsl_*.failed.glsl` 里能看到 `�~�<`），
+     * 进而让 shaderc 报 "unexpected token"。
+     *
+     * 资源路径与 vanilla 一致：`<namespace>:shaders/include/<path>`（`ShaderManager` 的
+     * `ldc "shaders/include"`）。资源包覆盖同样生效，因为读的就是当前 ResourceManager。
+     * 读不到时才退回 `getInclude`（可能仍在缓存有效期内，聊胜于无），并丢弃含替换字符的结果。
      */
     private fun readShaderInclude(shaderSource: ShaderSource, id: Identifier): String? {
+        readIncludeFromResources(id)?.let { if ('\uFFFD' !in it) return it }
         val cached = try {
             shaderSource.getInclude(id)
         } catch (e: Exception) {
@@ -688,9 +697,26 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
             null
         } ?: return null
         return try {
-            ShadercIncludeResult.create(cached.includeResultPtr()).contentString()
+            val text = ShadercIncludeResult.create(cached.includeResultPtr()).contentString()
+            if ('\uFFFD' in text) {
+                LOGGER.warn("[backend-java] include {} from cache looks corrupted (freed buffer?)", id)
+                null
+            } else {
+                text
+            }
         } catch (e: Throwable) {
             LOGGER.debug("[backend-java] include {} content unreadable: {}", id, e.message)
+            null
+        }
+    }
+
+    /** 直接按原版路径 `shaders/include/<path>` 从当前资源管理器读 include 源码。 */
+    private fun readIncludeFromResources(id: Identifier): String? {
+        return try {
+            val location = Identifier.fromNamespaceAndPath(id.namespace, "shaders/include/" + id.path)
+            Minecraft.getInstance().resourceManager.openAsReader(location).use { it.readText() }
+        } catch (e: Exception) {
+            LOGGER.debug("[backend-java] include {} resource read failed: {}", id, e.message)
             null
         }
     }

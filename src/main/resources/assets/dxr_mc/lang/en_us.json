@@ -45,6 +45,7 @@
   "dxr_mc.configuration.renderer.asyncWorkers": "Async Workers",
   "dxr_mc.configuration.renderer.asyncWorkers.tooltip": "Worker threads used for parallel command recording (1-8). The default of 8 partitions the per-frame segment evenly.",
   "dxr_mc.configuration.renderer.commandBundles": "Command Bundles",
+  "dxr_mc.configuration.renderer.hdr": "HDR Presentation",
   "dxr_mc.configuration.renderer.commandBundles.tooltip": "How one multi-draw batch is split. AUTO (default) inlines a single bundle for small batches and records in parallel for large ones; SERIAL always uses one bundle (most compatible); PARALLEL always splits across the worker pool.",
   "dxr_mc.configuration.renderer.commandBundles.AUTO": "Auto",
   "dxr_mc.configuration.renderer.commandBundles.SERIAL": "Serial",
@@ -140,6 +141,12 @@
   "dxr_mc.configuration.mesh.terrain_cull": "Cull terrain meshlets with an amplification shader",
   "dxr_mc.configuration.mesh.terrain_cull_bounds": "Read per-meshlet bounding spheres from a compute table",
   "dxr_mc.configuration.mesh.terrain_cone": "Cull whole back-facing meshlets with a normal cone",
+  "options.hdr": "HDR Presentation",
+  "options.hdr.tooltip": "Presents the frame through a scRGB (16-bit float) swap chain instead of SDR, so the display can show the full brightness range.\n\nAuto follows the Windows advanced-colour setting; On forces HDR even on an SDR display (the picture will look overexposed - it is a pipeline test); Off forces SDR.\n\nThe setting applies the next time the swap chain is created, which in normal play means after restarting the game.",
+  "options.hdr.auto": "Auto",
+  "options.hdr.on": "On",
+  "options.hdr.off": "Off",
   "options.inactivityFpsLimit.never": "Never",
-  "options.inactivityFpsLimit.never.tooltip": "Never lower the framerate while AFK or minimized."
+  "options.inactivityFpsLimit.never.tooltip": "Never lower the framerate while AFK or minimized.",
+  "key.dxr_mc.jitter_sign": "Jitter sign A/B (debug, F7)"
 }

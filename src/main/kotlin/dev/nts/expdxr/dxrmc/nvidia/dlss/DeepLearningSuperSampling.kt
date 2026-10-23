@@ -1435,6 +1435,29 @@ object DeepLearningSuperSampling {
                 + "the unsharpenened DLSS output")
         }
     }
+    /**
+     * P199 诊断：DLSS/DLAA 抖动符号 A/B（F7 现场循环）。
+     *
+     * <p>0 = `(-Jx, +Jy)`（P154 起的写法）、1 = `(+Jx, -Jy)`、2 = `(-Jx, -Jy)`、3 = `(+Jx, +Jy)`。
+     * 静止场景下逐档按 F7，哪一档不晃就是对的。定下来后删掉开关与按键，只留选中的那一档。
+     */
+    @Volatile
+    private var jitterSignMode: Int = 0
+
+    @JvmStatic
+    fun cycleJitterSignMode(): Int {
+        jitterSignMode = (jitterSignMode + 1) and 3
+        return jitterSignMode
+    }
+
+    /** 把 Halton 抖动换算成上报给 DLSS/DLAA 的像素空间值，见 [jitterSignMode]。 */
+    private fun reportedJitter(jx: Float, jy: Float): FloatArray = when (jitterSignMode) {
+        1 -> floatArrayOf(jx, -jy)
+        2 -> floatArrayOf(-jx, -jy)
+        3 -> floatArrayOf(jx, jy)
+        else -> floatArrayOf(-jx, jy)
+    }
+
     private fun pushDlssConstants(renderWidth: Int, renderHeight: Int, targetWidth: Int,
         targetHeight: Int, jitterX: Float, jitterY: Float, reset: Boolean) {
         val proj = D3D12Temporal.currentProjection()
@@ -1487,8 +1510,9 @@ object DeepLearningSuperSampling {
             // 了 y：DLSS 每帧会按 `2Jy` 多做一次竖直去抖，正是 DLAA 静态残余抖动（m15149）的
             // 量级。P132 的 A/B 只翻了**两轴一起**（180° 旋转），错误量的模长不变，所以当时
             // 测出"一样抖"（m14989）—— 那次实验设计不足以分辨单轴反号。
-            val slJitterX = -jitterX
-            val slJitterY = jitterY
+            val reported = reportedJitter(jitterX, jitterY)
+            val slJitterX = reported[0]
+            val slJitterY = reported[1]
             seg.set(F32, layout.byteOffset(PathElement.groupElement("jitterOffsetX")), slJitterX)
             seg.set(F32, layout.byteOffset(PathElement.groupElement("jitterOffsetY")), slJitterY)
             seg.set(F32, layout.byteOffset(PathElement.groupElement("mvecScaleX")),
@@ -1774,8 +1798,9 @@ object DeepLearningSuperSampling {
         packet.set(I32, offset("renderHeight"), renderHeight)
         packet.set(I32, offset("targetWidth"), targetWidth)
         packet.set(I32, offset("targetHeight"), targetHeight)
-        packet.set(F32, offset("jitterOffsetX"), -jitterX)   // P154：y 单轴反号，见 pushDlssConstants
-        packet.set(F32, offset("jitterOffsetY"), jitterY)
+        val reported = reportedJitter(jitterX, jitterY)
+        packet.set(F32, offset("jitterOffsetX"), reported[0])
+        packet.set(F32, offset("jitterOffsetY"), reported[1])
         packet.set(F32, offset("mvScaleX"), MV_SCALE)
         packet.set(F32, offset("mvScaleY"), MV_SCALE)
         packet.set(F32, offset("preExposure"), PRE_EXPOSURE)

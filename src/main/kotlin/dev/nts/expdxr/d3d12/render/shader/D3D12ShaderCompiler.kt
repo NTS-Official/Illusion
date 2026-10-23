@@ -64,8 +64,13 @@ class D3D12ShaderCompiler : AutoCloseable {
                 runCatching {
                     val dir = java.nio.file.Path.of(System.getProperty("user.dir"), "dxrmc")
                     java.nio.file.Files.createDirectories(dir)
+                    // 顶点/片元同名着色器会在不同线程同时编译，文件名里必须带 stage 和线程，
+                    // 否则两个线程互相截断/覆盖同一个文件，落盘内容会出现乱码字节（P197 排查时
+                    // 一度被误认成 include 读取越界）。
                     val safe = filename.replace('/', '_').replace(':', '_')
-                    java.nio.file.Files.writeString(dir.resolve("glsl_${safe}.failed.glsl"), source)
+                    val stage = if (type == ShaderType.FRAGMENT) "frag" else "vert"
+                    val unique = "${safe}.${stage}.${Thread.currentThread().threadId()}.failed.glsl"
+                    java.nio.file.Files.writeString(dir.resolve("glsl_$unique"), source)
                 }
                 throw ShaderCompileException(
                     "Couldn't parse GLSL: ${Shaderc.shaderc_result_get_error_message(result)}")

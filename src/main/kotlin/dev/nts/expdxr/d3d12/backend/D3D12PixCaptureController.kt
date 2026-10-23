@@ -52,6 +52,18 @@ internal object D3D12PixCaptureController {
         CATEGORY,
     )
 
+    /**
+     * P199 诊断键：循环 DLSS/DLAA 的抖动符号档位（0..3），用来现场 A/B 静止抖动。
+     *
+     * <p>临时按键 —— 符号定下来后连同 [DeepLearningSuperSampling.cycleJitterSignMode] 一起删。
+     */
+    private val JITTER_KEY = KeyMapping(
+        "key.dxr_mc.jitter_sign",
+        InputConstants.Type.KEYBOARD,
+        InputConstants.KEY_F7,
+        CATEGORY,
+    )
+
     /** Highest index tried for `run/pix/dxrmc-capture-N.wpix` before giving up. */
     private const val MAX_CAPTURE_INDEX = 999
 
@@ -95,6 +107,7 @@ internal object D3D12PixCaptureController {
         modEventBus.addListener<RegisterKeyMappingsEvent> { event ->
             event.registerCategory(CATEGORY)
             event.register(KEY)
+            event.register(JITTER_KEY)
         }
         NeoForge.EVENT_BUS.addListener<ClientTickEvent.Post> { tick() }
     }
@@ -102,6 +115,12 @@ internal object D3D12PixCaptureController {
     private fun tick() {
         while (KEY.consumeClick()) {
             toggle()
+        }
+        while (JITTER_KEY.consumeClick()) {
+            val mode = dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling.cycleJitterSignMode()
+            val text = "[dxrmc] DLSS jitter sign mode=$mode"
+            LOGGER.info(text)
+            Minecraft.getInstance().player?.sendSystemMessage(Component.literal(text))
         }
         if (recording && ++frames >= frameLimit) {
             stop(StopCause.LIMIT)

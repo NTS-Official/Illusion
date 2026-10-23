@@ -64,6 +64,8 @@ class D3D12GpuSurface(hwnd: Long) : GpuSurfaceBackend {
         this.acquireDeferred = false
         this.acquireDeferredFailed = false
         this.blitSkipped = false
+        // P196：真 DXGI 独占（SetFullscreenState）已放弃 —— 在“链已创建后再切独占”的路径上会
+        // 卡死 Present 并锁住 Alt+Tab（见 known_bugs.md P196）。独占全屏交给 SDL 切显示模式。
         val ok = MCDR_ABI.D3D12ConfigureSurface(this.handle, config.width(), config.height(),
             config.presentMode().ordinal)
         IllusionLogger.debugMessage("[backend-java] configureSurface: ${config.width()}x${config.height()}"
@@ -73,6 +75,7 @@ class D3D12GpuSurface(hwnd: Long) : GpuSurfaceBackend {
                 + "${config.width()}x${config.height()}")
         }
     }
+
 
     override fun isSuboptimal(): Boolean {
         return MCDR_ABI.D3D12IsSurfaceSuboptimal(this.handle)
@@ -152,6 +155,7 @@ class D3D12GpuSurface(hwnd: Long) : GpuSurfaceBackend {
         // 帧边界：时间性 jitter / 历史只在帧首滚动一次（P144）。必须在任何"本帧"的判断之前递增，
         // 这样即便本帧跳过了 blit，下一帧仍被视为新的一帧。
         D3D12Temporal.onFramePresented()
+        // P196：独占全屏的“想要/已应用”差值可能在尺寸不变时产生，所以每帧也比对一次。
         // P95：本帧跳过过 blit（没有可写 back buffer）就绝不 present —— present 一张本帧
         // 没写过的 back buffer 正是「上一帧叠在本帧上 / OSD 重影」的来源。native
         // presentSurface() 也加了同一道守卫（依据 surface->blittedThisFrame），

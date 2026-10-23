@@ -18,7 +18,7 @@ displayName="${mod_name}"
 displayURL="https://github.com/NTS-Official/Illusion"
 
 iconFile="assets/${mod_id}/icon.png"
-logoFile="assets/${mod_id}/logo_flat_dark.png"
+bannerFile="assets/${mod_id}/logo_flat_dark.png"
 
 credits="DXM Dev Team"
 authors="NoTuring_Steve"

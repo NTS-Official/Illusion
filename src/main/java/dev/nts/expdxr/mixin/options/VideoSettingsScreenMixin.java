@@ -1,6 +1,6 @@
 package dev.nts.expdxr.mixin.options;
 
-import com.llamalad7.mixinextras.injector.ModifyReturnValue;
+import dev.nts.expdxr.d3d12.D3D12HdrPresentation;
 import dev.nts.expdxr.d3d12.render.advanced.D3D12AntiAliasing;
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale;
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12VariableShadingRate;
@@ -9,6 +9,7 @@ import dev.nts.expdxr.dxrmc.nvidia.reflex.NvidiaReflex;
 import java.util.Arrays;
 
 import net.minecraft.client.OptionInstance;
+import net.minecraft.client.Options;
 import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.OptionsList;
 import net.minecraft.client.gui.screens.options.OptionsSubScreen;
@@ -19,16 +20,22 @@ import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
  * Puts DXRMC's rendering options into the vanilla video-settings screen.
  *
  * <p>Vanilla assembles that screen from three static arrays -
  * {@code displayOptions}, {@code qualityOptions} and {@code preferenceOptions} -
- * so the anti-aliasing entry is appended to the quality array, which places it at the end
- * of the quality section, right after vanilla's own texture/mipmap/anisotropy
- * options. Appending to the array rather than injecting a widget into
- * {@code addOptions} keeps vanilla's two-per-row layout intact.
+ * so the anti-aliasing entry is appended to the quality array and the HDR entry (P198) to the
+ * display array, which places each one at the end of its section, right after vanilla's own
+ * options. Appending to the array rather than injecting a widget into {@code addOptions} keeps
+ * vanilla's two-per-row layout intact.
+ *
+ * <p>Both arrays are extended with {@code @Inject(..., at = RETURN) + CallbackInfoReturnable}
+ * rather than {@code @ModifyReturnValue}: NeoForge's bundled MixinExtras rejects the natural
+ * handler shape here (it wants the original return value <em>before</em> the captured arguments -
+ * see the run46 log), and plain Mixin has no such ambiguity.
  *
  * <p>The render scale and the VRS shading rate (migrated out of the mod's own
  * {@code [render]} config section, m10294) are appended at the very end of
@@ -43,9 +50,11 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * no longer borrows a slot from the anti-aliasing cycle button. It deliberately stays out of
  * vanilla's graphics presets, like the other two entries of this section.
  *
- * <p>Like vanilla's anisotropy options, all four buttons are greyed out whenever the
- * setting cannot do anything - here, whenever the game is not rendering through
- * the D3D12 backend.
+ * <p>P198（用户请求）: every option this mod adds is <b>hidden</b> - not merely greyed out - when the
+ * live device is not D3D12 ({@link D3D12HdrPresentation#isAvailable()} is the shared probe).
+ * Both array taps therefore leave the vanilla array untouched, and {@code addOptions} does not
+ * even create the section header. Greying them out was the old behaviour; it still left a dead
+ * "Illusion Settings" section on OpenGL/Vulkan players' screens.
  *
  * <p><b>DLSS and anti-aliasing are mutually exclusive (user m05600).</b> DLSS upscales with its
  * own temporal anti-aliasing, so running our AA under it only blurs the input it then has to
@@ -58,13 +67,27 @@ public abstract class VideoSettingsScreenMixin {
     @Unique private int dxr_mc$renderScaleSynced = Integer.MIN_VALUE;
     @Unique private int dxr_mc$antiAliasingSynced = Integer.MIN_VALUE;
 
-    @ModifyReturnValue(method = "qualityOptions", at = @At("RETURN"))
-    private static OptionInstance<?>[] dxr_mc$addAntiAliasing(OptionInstance<?>[] vanilla) {
-        // Anti-aliasing
+    // HDR (P198) - 追加到原版"显示"页末尾
+    @Inject(method = "displayOptions", at = @At("RETURN"), cancellable = true)
+    private static void dxr_mc$addHdr(Options options, CallbackInfoReturnable<OptionInstance<?>[]> cir) {
+        if (!D3D12HdrPresentation.isAvailable()) {
+            return;
+        }
+        OptionInstance<?>[] vanilla = cir.getReturnValue();
+        OptionInstance<?>[] extended = Arrays.copyOf(vanilla, vanilla.length + 1);
+        extended[vanilla.length] = D3D12HdrPresentation.option();
+        cir.setReturnValue(extended);
+    }
+
+    @Inject(method = "qualityOptions", at = @At("RETURN"), cancellable = true)
+    private static void dxr_mc$addAntiAliasing(Options options, CallbackInfoReturnable<OptionInstance<?>[]> cir) {
+        if (!D3D12HdrPresentation.isAvailable()) {
+            return;
+        }
+        OptionInstance<?>[] vanilla = cir.getReturnValue();
         OptionInstance<?>[] extended = Arrays.copyOf(vanilla, vanilla.length + 1);
         extended[vanilla.length] = D3D12AntiAliasing.option();
-
-        return extended;
+        cir.setReturnValue(extended);
     }
 
     // Illusion settings
@@ -72,6 +95,8 @@ public abstract class VideoSettingsScreenMixin {
     private void dxr_mc$addIllusionSection(CallbackInfo ci) {
         OptionsList list = ((OptionsSubScreen) (Object) this).list;
         if (list == null) return;
+        // 非 D3D12 后端：整块设置不出现（不是灰掉）。
+        if (!D3D12HdrPresentation.isAvailable()) return;
 
         // Header
         list.addHeader(Component.translatable("options.video.illusion.header"));
@@ -91,6 +116,7 @@ public abstract class VideoSettingsScreenMixin {
     private void dxr_mc$updateDxrMcButtons(CallbackInfo ci) {
         OptionsList list = ((OptionsSubScreen) (Object) this).list;
         if (list == null) return;
+        if (!D3D12HdrPresentation.isAvailable()) return;
 
         // Update scaling value when applying DLSS/DLAA options change.
         int scaleGeneration = D3D12RenderScale.syncGeneration();

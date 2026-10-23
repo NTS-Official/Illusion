@@ -129,6 +129,8 @@ object MCDR_ABI {
     /** P122：Reflex 模式与可用性。 */
     private var MH_setreflexmode: MethodHandle? = null
     private var MH_setreflexframelimit: MethodHandle? = null
+    private var MH_sethdrmode: MethodHandle? = null
+    private var MH_gethdrappliedmode: MethodHandle? = null
     private var MH_reflexavailable: MethodHandle? = null
 
     private var MH_createdevice: MethodHandle? = null
@@ -210,6 +212,7 @@ object MCDR_ABI {
 
     private var MH_createsurface: MethodHandle? = null
     private var MH_surfacepresentmodes: MethodHandle? = null
+    private var MH_setexclusivefullscreen: MethodHandle? = null
     private var MH_configuresurface: MethodHandle? = null
     private var MH_acquiresurface: MethodHandle? = null
     private var MH_blitsurface: MethodHandle? = null
@@ -1010,6 +1013,36 @@ object MCDR_ABI {
             handle.invokeExact(micros)
         } catch (t: Throwable) {
             System.err.println("[backend-java] dx12SetReflexFrameLimit(${micros}) failed: ${t}")
+        }
+    }
+
+    /**
+     * P197：HDR 模式（0 = auto / 1 = 强制开 / 2 = 强制关）。只改进程级状态，真正生效在下次
+     * 创建或重建交换链时 —— 换格式必须重建链，不能原地改。旧 DLL 没有这个入口时静默跳过。
+     */
+    fun D3D12SetHdrMode(mode: Int) {
+        if (LOAD_FAILURE != null) return
+        val handle = MH_sethdrmode ?: return
+        try {
+            handle.invokeExact(mode)
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12SetHdrMode($mode) failed: ${t}")
+        }
+    }
+
+    /**
+     * P198：建链时**实际用掉**的 HDR 模式（0/1/2），-1 表示还没建过交换链。
+     *
+     * <p>JVM 侧拿它和 `IllusionConfig` 里的当前值比较，决定视频设置里要不要出现原版那条
+     * 「需要重启」提示 —— 换 HDR 格式必须重建交换链（setHdrMode 的注释），运行期不换。
+     */
+    fun D3D12HdrAppliedMode(): Int {
+        if (LOAD_FAILURE != null) return -1
+        val handle = MH_gethdrappliedmode ?: return -1
+        return try {
+            handle.invokeExact() as Int
+        } catch (t: Throwable) {
+            -1
         }
     }
 
@@ -2218,6 +2251,16 @@ object MCDR_ABI {
     }
 
     /** ResizeBuffers to `width x height` with the given present mode. */
+    /** P196：向 DXGI 申请真独占全屏（`on=false` 退回合成）。失败返回 false，画面照旧。 */
+    fun D3D12SetExclusiveFullscreen(surface: Long, on: Boolean): Boolean {
+        requireLoaded()
+        try {
+            return ok(MH_setexclusivefullscreen!!.invokeExact(ptr(surface), if (on) 1 else 0) as Int)
+        } catch (t: Throwable) {
+            throw unexpected(t)
+        }
+    }
+
     fun D3D12ConfigureSurface(surface: Long, width: Int, height: Int, presentMode: Int): Boolean {
         requireLoaded()
         try {
@@ -3148,6 +3191,10 @@ object MCDR_ABI {
         ))
         MH_setreflexmode = skipOptional("mcdr_dx12SetReflexMode", fdv(MCDRLayout.I32))
         MH_setreflexframelimit = skipOptional("mcdr_dx12SetReflexFrameLimit", fdv(MCDRLayout.I32))
+        // P197：HDR 模式必须在设备/交换链创建前就可用（配置在 createDevice 前推送）。
+        MH_sethdrmode = skipOptional("mcdr_dx12SetHdrMode", fdv(MCDRLayout.I32))
+        // P198：建链时实际用掉的模式，视频设置据此判断要不要提示“需要重启”。
+        MH_gethdrappliedmode = skipOptional("mcdr_dx12GetHdrAppliedMode", fd(MCDRLayout.I32))
         MH_reflexavailable = skipOptional("mcdr_dx12ReflexAvailable", fd(MCDRLayout.I32))
         MH_setdlssoutput = skipOptional("mcdr_dx12SetDlssOutput",
             fd(MCDRLayout.I32, MCDRLayout.PTR))
@@ -3470,6 +3517,11 @@ object MCDR_ABI {
 
         MH_createsurface = skip("mcdr_dx12CreateSurface", fd(MCDRLayout.PTR, MCDRLayout.I64))
         MH_surfacepresentmodes = skip("mcdr_dx12SurfacePresentModes", fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.I32))
+        MH_setexclusivefullscreen = skip("mcdr_dx12SetExclusiveFullscreen", fd(
+            MCDRLayout.I32,
+            MCDRLayout.PTR,
+            MCDRLayout.I32
+        ))
         MH_configuresurface = skip("mcdr_dx12ConfigureSurface", fd(
             MCDRLayout.I32,
             MCDRLayout.PTR,

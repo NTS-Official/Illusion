@@ -25,6 +25,24 @@ enum class DlssImplementation {
     STREAMLINE,
 }
 
+/**
+ * `[renderer] hdr` — native HDR (scRGB) presentation.
+ *
+ * AUTO follows the display's advanced-colour state (the same DXGI output query Windows
+ * itself uses), FORCE_ON is for testing the HDR path on an SDR display, FORCE_OFF keeps the
+ * 8-bit SDR swapchain even when the display is in HDR mode.
+ */
+enum class HdrMode {
+    /** Follow the display: HDR when advanced colour is on, SDR otherwise. */
+    AUTO,
+
+    /** Always create the scRGB (R16G16B16A16_FLOAT) swapchain. */
+    FORCE_ON,
+
+    /** Always create the 8-bit SDR swapchain. */
+    FORCE_OFF,
+}
+
 /** `[debug] meshDiagnostics` — one-shot isolation test for "texture write vs read-back". */
 enum class MeshDiagnostics {
     /** Off (default). */
@@ -72,6 +90,9 @@ object IllusionConfig {
 
     /** `[renderer] commandBundles` — serial vs parallel bundle recording. */
     val COMMAND_BUNDLES: ModConfigSpec.EnumValue<CommandBundleMode>
+
+    /** `[renderer] hdr` — native HDR (scRGB) presentation mode. */
+    val HDR: ModConfigSpec.EnumValue<HdrMode>
 
     /** `[renderer] sharpenAmount` — post-sharpen strength for DLAA/DLSS. */
     val SHARPEN_AMOUNT: ModConfigSpec.DoubleValue
@@ -244,6 +265,17 @@ object IllusionConfig {
             .translation("dxr_mc.configuration.renderer.commandBundles")
             .gameRestart()
             .defineEnum("commandBundles", CommandBundleMode.AUTO)
+
+        HDR = BUILDER
+            .comment(
+                "Native HDR presentation (scRGB swapchain).",
+                "AUTO follows the display's Windows advanced-colour state. FORCE_ON creates the",
+                "HDR swapchain even on an SDR display (for testing the path), FORCE_OFF keeps the",
+                "8-bit SDR swapchain. Takes effect on the next swapchain creation (resize or",
+                "fullscreen toggle), so a restart is not required."
+            )
+            .translation("dxr_mc.configuration.renderer.hdr")
+            .defineEnum("hdr", HdrMode.AUTO)
 
         SHARPEN_AMOUNT = BUILDER
             .comment(
