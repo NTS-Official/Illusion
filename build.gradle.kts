@@ -445,6 +445,12 @@ val vendorDevLibs = listOf(
     // FidelityFX 运行时在 MCDR\lib\fsr\（git 不记录，见 MCDR\.gitignore 的 /lib/）。
     // 发行 JAR 不再包含它，开发目录仍然要有，否则 dev 侧无法试 FSR。
     VendorDevLib(dir = file("../MCDR/lib/fsr"), pattern = "amd_fidelityfx_*.dll"),
+    // P213：Streamline 的插件与拦截面。sl.interposer 会按 `<module 目录>\sl.<feature>.dll`
+    // 去找插件，所以它们必须和 MCDR.dll 并排落在 run/dxrmc/ 下；缺 sl.dlss_g.dll 时
+    // DLSS-G 只会“支持但加载不了”，P213 的支持性探针就是用来抓这个的。
+    VendorDevLib(dir = file("../MCDR/lib/streamline"), pattern = "sl.*.dll"),
+    // Reflex 的低延迟后端（sl.reflex.dll 会去加载它）。
+    VendorDevLib(dir = file("../MCDR/lib/streamline"), pattern = "NvLowLatencyVk.dll"),
 )
 
 
