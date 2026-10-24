@@ -111,8 +111,7 @@ object DLSSFrameGeneration {
      * 这里比 HDR 多一个 DLSS 条件：后端是 D3D12 且 DLSS 已启用。
      */
     @JvmStatic
-    fun isAvailable(): Boolean =
-        D3D12AdapterInfo.current != null && DeepLearningSuperSampling.isEnabled()
+    fun isAvailable(): Boolean = D3D12AdapterInfo.current != null
 
     /** 当前模式（0 关 / 1 开）；“自动”由倍率档位 0 表达，见 [nativeMode]。 */
     @JvmStatic
@@ -142,6 +141,11 @@ object DLSSFrameGeneration {
         // mode 抬到 On，这里同步 UI/配置状态，免得设置里显示“Reflex 关着”却实际被强制开启）。
         if (isEnabled() && NvidiaReflex.mode() == 0) {
             NvidiaReflex.forceOn()
+        }
+        // 帧生成的输入就是 DLSS 的输出：开着 FG 却关着 DLSS 没有意义（native 也会拒绝）。
+        // 顺手打开 DLSS，配合“FG 开启时 DLSS 只读”，避免出现自相矛盾的状态。
+        if (isEnabled() && !DeepLearningSuperSampling.isEnabled()) {
+            DeepLearningSuperSampling.option().set(true)
         }
         MCDR_ABI.D3D12SetDlssgMode(nativeMode(), nativeFrames())
     }

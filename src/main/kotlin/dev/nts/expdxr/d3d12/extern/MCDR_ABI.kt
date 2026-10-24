@@ -677,13 +677,13 @@ import java.util.concurrent.atomic.AtomicInteger
         if (LOAD_FAILURE != null) return
         val handle = MH_setdlssgmode
         if (handle == null) {
-            dev.nts.expdxr.misc.IllusionLogger.warnMessage("[P213] set_fg_mode: MH_setdlssgmode is null")
+            dev.nts.expdxr.misc.IllusionLogger.warnMessage("[dxrmc] DLSS-G: mcdr_dx12SetDlssgMode is not bound (native build too old?)")
             return
         }
         try {
             handle.invokeExact(mode, frames)
         } catch (t: Throwable) {
-            dev.nts.expdxr.misc.IllusionLogger.warnMessage("[P213] set_fg_mode threw: ${t.javaClass.simpleName}: ${t.message}")
+            dev.nts.expdxr.misc.IllusionLogger.warnMessage("[dxrmc] DLSS-G: mcdr_dx12SetDlssgMode threw ${t.javaClass.simpleName}: ${t.message}")
         }
     }
 

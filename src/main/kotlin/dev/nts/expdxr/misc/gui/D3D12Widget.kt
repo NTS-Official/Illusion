@@ -161,6 +161,9 @@ abstract class D3D12Widget(x: Int, y: Int, width: Int, height: Int) {
         val RED: Int = ARGB.color(255, 255, 85, 85)
 
         /** 提示块底色：比行底更实一点，保证文字在亮背景上也读得清。 */
+        /** 锁定提示的表头色（亮黄，用户 m10226）。 */
+        val WARNING: Int = ARGB.color(255, 255, 214, 64)
+
         val TOOLTIP_BG: Int = ARGB.color(232, 0, 0, 0)
 
         /** 悬浮提示的细边框。 */

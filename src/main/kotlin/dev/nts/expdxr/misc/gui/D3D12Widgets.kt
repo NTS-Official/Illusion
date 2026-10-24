@@ -128,12 +128,14 @@ class D3D12OptionWidget<T : Any>(
      * 只读行（用户 m07432）：值由别处决定时（例如 DLSS 开着时渲染缩放被绑到 DLSS 输入比例），
      * 这一行只显示取值、不接受任何点击/拖拽，文字转灰。
      */
-    private val readOnly: Boolean = false,
+    private val readOnlyProvider: () -> Boolean = { false },
     /**
      * 允许取值白名单（每次点击时求值）：帧生成生效期间 Reflex 只允许在 On / Boost 之间切换，
      * 不允许被切回 Off（那会让 SDK 静默禁用插帧，用户却以为还开着）。
      */
     private val allowedValues: (() -> Set<T>)? = null,
+    /** 只读原因（用户 m10067）：非空时，悬停这一行会额外显示一条说明。 */
+    private val lockReasonProvider: () -> Component? = { null },
 ) : D3D12Widget(x, y, width, DEFAULT_HEIGHT + if (expanded) SLIDER_LINE else 0) {
 
     private val caption: Component = (option as OptionInstanceAccessor).`dxr_mc$caption`()
@@ -228,7 +230,7 @@ class D3D12OptionWidget<T : Any>(
     }
 
     override fun render(renderer: D3D12WidgetRenderer, mouseX: Int, mouseY: Int, delta: Float) {
-        if (readOnly) {
+        if (readOnlyProvider()) {
             // 只读：不响应悬停、不高亮、不画滑轨/手柄，只把标题与取值转灰（用户 m07432）。
             renderer.rect(x, y, x + width, y + height, BG)
             renderDisabled(renderer)
@@ -260,7 +262,10 @@ class D3D12OptionWidget<T : Any>(
     }
 
     /** 屏幕用它判断这一行值不值得退化成折叠控件：只有滑条行才需要（开关/枚举没有展开态）。 */
-    fun canCollapse(): Boolean = slider != null && !isSwitch
+    fun canCollapse(): Boolean = !isSwitch
+
+    /** 这一行是否带滑条（屏幕用它决定“窄窗是否一律折叠”）。 */
+    fun hasSlider(): Boolean = slider != null
 
     /** 取值（展开态、悬停布局用）的像素宽度：屏幕据此判断标题加取值是否放得下。 */
     fun hoverHintWidth(): Int = Minecraft.getInstance().font.width(formattedValue().string)
@@ -276,6 +281,9 @@ class D3D12OptionWidget<T : Any>(
      *
      * <p>原版只给“已按固定宽度换好行”的序列；版式宽度由屏幕决定，所以这里拿原始组件回去自己拆行。
      */
+    /** 只读原因；为空表示这一行没有额外解释。 */
+    fun lockReasonText(): Component? = if (readOnlyProvider()) lockReasonProvider() else null
+
     fun tooltipText(): Component? {
         val supplier = (option as OptionInstanceAccessor).`dxr_mc$tooltipSupplier`() ?: return null
         val tooltip = supplier.apply(displayValue()) ?: return null
@@ -297,13 +305,25 @@ class D3D12OptionWidget<T : Any>(
     }
 
     private fun renderTitle(renderer: D3D12WidgetRenderer, hovered: Boolean) {
-        val limit = width / 3
+        // 纯取值行（枚举/文本）也要给右对齐的取值留位置：否则长取值会和标题直接叠在一起
+        // （用户 m10244 的「独占全屏模式 + 2560x1440@165Hz（24位色深）」）。滑条/开关仍按悬停收窄。
+        val font = Minecraft.getInstance().font
+        // 悬停中的滑条行把取值挪到左半边（右半边给滑轨），此时不需要再预留整段取值宽度；
+        // 其余情况（含未悬停的滑条行）都必须给右对齐的取值/开关留位置，否则标题会被取值直接盖住。
+        val valueReserve = when {
+            hovered && slider != null -> 0
+            isSwitch -> renderer.textHeight() + 2 + 8
+            else -> minOf(renderer.textWidth(formattedValue()), (width - width / 4 - 12).coerceAtLeast(16))
+        }
+        val limit = if (valueReserve > 0) (width - valueReserve - 12).coerceAtLeast(width / 4) else width / 3
         val captionWidth = renderer.textWidth(caption)
 
-        if (hovered && captionWidth > limit) {
+        if (valueReserve > 0 && captionWidth > limit) {
+            renderer.text(ellipsizeRight(font, caption.string, limit), x + 6, centerTextY(renderer), WHITE)
+        } else if (hovered && captionWidth > limit) {
             val ellipsis = "..."
             val available = (limit - renderer.textWidth(ellipsis)).coerceAtLeast(0)
-            val trimmed = Minecraft.getInstance().font.plainSubstrByWidth(caption.string, available)
+            val trimmed = font.plainSubstrByWidth(caption.string, available)
             renderer.text(trimmed + ellipsis, x + 6, centerTextY(renderer), WHITE)
         } else {
             renderer.text(caption, x + 6, centerTextY(renderer), WHITE)
@@ -315,17 +335,28 @@ class D3D12OptionWidget<T : Any>(
         hovered: Boolean,
         valueRenderer: OptionInstance.SliderableValueSet<T>,
     ) {
-        if (!hovered) {
+        val font = Minecraft.getInstance().font
+        // 展开态的滑条在第二行，第一行不再受“中线左侧”限制，整行都可用（用户 m10358）。
+        if (!hovered || expanded) {
+            // 未悬停时取值右对齐；限宽给标题留出位置（长取值如 2560x1440@165Hz）。
             val text = formattedValue()
-            renderer.text(text, alignRight(renderer.textWidth(text)), centerTextY(renderer), WHITE)
+            val limit = if (expanded) (width - 12).coerceAtLeast(16) else (width - width / 4 - 12).coerceAtLeast(16)
+            val capped = ellipsizeLeft(font, text.string, limit)
+            renderer.text(capped, alignRight(renderer.textWidth(capped)), centerTextY(renderer), WHITE)
             return
         }
 
-        // 悬停时取值缩到左半边，右半边让给滑轨。取值同样从左边省略（数值有意义的部分在尾部）。
+        // 悬停：标题占左侧（最多 width/3），取值只能填在“标题右侧到行中线”这段；不够就整体省略。
+        // 之前只按 width/2 限宽、右对齐到中线，长取值会向左越过标题（用户 m10244 的重叠）。
         val hoverText = sliderHoverText()
-        val available = (width / 2 - 12).coerceAtLeast(16)
-        val shown = ellipsizeLeft(Minecraft.getInstance().font, hoverText, available)
-        renderer.text(shown, alignRight(renderer.textWidth(shown), width / 2), centerTextY(renderer), WHITE)
+        val captionBudget = minOf(renderer.textWidth(caption), width / 3)
+        val valueLeft = x + 6 + captionBudget + 8
+        val valueRight = x + width / 2
+        val available = (valueRight - valueLeft).coerceAtLeast(0)
+        if (available > 0) {
+            val shown = ellipsizeLeft(font, hoverText, available)
+            renderer.text(shown, alignRight(renderer.textWidth(shown), width / 2), centerTextY(renderer), WHITE)
+        }
 
         val trackX1 = x + width / 2
         val trackX2 = x + width - 6
@@ -376,21 +407,34 @@ class D3D12OptionWidget<T : Any>(
             (inner - minCaption - 6).coerceIn(16, inner)
         }
 
+        // 纯取值行展开后，取值挪到第二行，第一行整行都留给标题（这样“有省略”时展开真的能看全，用户 m10319）。
+        val valueInline = !(expanded && slider == null)
+
         // 取值从左边省略：数值/分辨率这类文本有意义的部分在尾部（“…0@165”），砍尾巴会只剩前缀。
-        val value = ellipsizeLeft(font, valueText, valueBudget)
+        val value = if (valueInline) ellipsizeLeft(font, valueText, valueBudget) else ""
         val valueWidth = renderer.textWidth(value)
         val valueX = alignRight(valueWidth + markerWidth + 4)
-        renderer.text(value, valueX, centerTextY(renderer), WHITE)
+        if (valueInline) {
+            renderer.text(value, valueX, centerTextY(renderer), WHITE)
+        }
         renderer.text(marker, x + width - 6 - markerWidth, centerTextY(renderer), ACCENT)
 
-        val captionShown = ellipsizeRight(font, captionText, (valueX - (x + 6) - 6).coerceAtLeast(16))
+        val captionBudget = if (valueInline) (valueX - (x + 6) - 6) else (width - 12 - markerWidth - 4)
+        val captionShown = ellipsizeRight(font, captionText, captionBudget.coerceAtLeast(16))
         renderer.text(captionShown, x + 6, centerTextY(renderer), WHITE)
 
         if (!expanded) {
             return
         }
 
-        val valueRenderer = slider ?: return
+        val valueRenderer = slider
+        if (valueRenderer == null) {
+            // 纯取值行没有滑轨可露，展开就是“把完整取值放到第二行”；只有第二行也放不下才省略（用户 m10319）。
+            val full = ellipsizeRight(font, formattedValue().string, width - 12)
+            renderer.text(full, x + 6, y + DEFAULT_HEIGHT + 1, WHITE)
+            return
+        }
+
         val x1 = x + 6
         val x2 = x + width - 6
         val lineY = y + DEFAULT_HEIGHT + (SLIDER_LINE - 2) / 2
@@ -447,12 +491,13 @@ class D3D12OptionWidget<T : Any>(
         }
 
         renderer.pushAlpha(valueAnimation)
-        renderer.text(shownValue, alignRight(renderer.textWidth(shownValue)), centerTextY(renderer), WHITE)
+        val capped = ellipsizeLeft(Minecraft.getInstance().font, shownValue.string, (width - width / 4 - 12).coerceAtLeast(16))
+        renderer.text(capped, alignRight(renderer.textWidth(capped)), centerTextY(renderer), WHITE)
         renderer.popAlpha()
     }
 
     override fun mouseClicked(mouseX: Double, mouseY: Double, button: Int): Boolean {
-        if (readOnly || !isMouseOver(mouseX, mouseY)) {
+        if (readOnlyProvider() || !isMouseOver(mouseX, mouseY)) {
             return false
         }
 
@@ -506,7 +551,7 @@ class D3D12OptionWidget<T : Any>(
 
     override fun mouseDragged(mouseX: Double, mouseY: Double, button: Int, dragX: Double, dragY: Double): Boolean {
         val valueRenderer = slider ?: return false
-        if (readOnly || !dragging) {
+        if (readOnlyProvider() || !dragging) {
             return false
         }
 

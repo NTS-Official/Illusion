@@ -240,7 +240,6 @@ object DeepLearningSuperSampling {
 
     /** 上一次**真正评价成功**时的输入状态，用来判 `reset`。 */
     private var evaluatedOnce = false
-    private var dimensionLogsLeft = 6
 
     /**
      * P211b：本会话是否已经做过“启动期把渲染缩放绑到 DLSS 挡位”。
@@ -251,13 +250,7 @@ object DeepLearningSuperSampling {
      */
     private var startupScaleBound = false
 
-    /** P211d：上次自愈重建主目标的时间戳（限频 2s）。 */
-    private var lastScaleRebuildNs = 0L
-    private var sizeTraceFrames = 0
 
-    /** P211c 探针：本会话是否已打过入口一行。 */
-    private var applyTraceDone = false
-    private var applyTraceLevelDone = false
     private var lastRenderWidth = -1
     private var lastRenderHeight = -1
     private var lastTargetWidth = -1
@@ -960,34 +953,7 @@ object DeepLearningSuperSampling {
         //
         // 这里做自愈：只要附件尺寸与“窗口 × 当前比例”不一致，就排一次主目标重建（限频 2s，最多
         // 每帧一次判断，零分配）。窗口刚变尺寸的那几帧本来就要重建，这条不会抢在它前面。
-        if (D3D12RenderScale.isEnabled() && !dlaaActive) {
-            val rt0 = minecraft.gameRenderer.mainRenderTarget()
-            val attach = (rt0.colorTextureView as? D3D12GpuTextureView)?.texture() as? D3D12GpuTexture
-            val wantW = D3D12RenderScale.scaled(minecraft.window.width)
-            val wantH = D3D12RenderScale.scaled(minecraft.window.height)
-            // 每 120 帧一行真实尺寸（临时取证，确认世界层确实按比例出图）。
-            if ((++sizeTraceFrames % 120) == 0) {
-                Illusion.LOGGER.info(
-                    "[dxrmc] $PREFIX P211e sizes: window={}x{} world={}x{} want={}x{} percent={} split={}",
-                    minecraft.window.width, minecraft.window.height,
-                    attach?.getWidth(0) ?: -1, attach?.getHeight(0) ?: -1, wantW, wantH,
-                    D3D12RenderScale.percent(), D3D12GUISplit.isActive(),
-                )
-            }
-            if (attach != null && (attach.getWidth(0) != wantW || attach.getHeight(0) != wantH)) {
-                val now = System.nanoTime()
-                if (now - lastScaleRebuildNs > 2_000_000_000L) {
-                    lastScaleRebuildNs = now
-                    Illusion.LOGGER.info(
-                        "[dxrmc] $PREFIX P211d world layer is {}x{} but the DLSS input scale asks for {}x{} "
-                            + "(percent={}); re-creating the main render target",
-                        attach.getWidth(0), attach.getHeight(0), wantW, wantH,
-                        D3D12RenderScale.percent(),
-                    )
-                    // P211e：自愈重建已停用 —— 实测它与窗口 resize 路径互相打架，每 2s 重建主目标一次。
-                }
-            }
-        }
+        
         ensureDataPlane()
         // P108c：速度通道若已自我关闭，趁这一帧把闩锁清掉（限速：最多每 1 秒一次），下一帧才有运动矢量。
         retryVelocityIfLatched()
@@ -1055,34 +1021,7 @@ object DeepLearningSuperSampling {
         //
         // 这里做自愈：只要附件尺寸与“窗口 × 当前比例”不一致，就排一次主目标重建（限频 2s，最多
         // 每帧一次判断，零分配）。窗口刚变尺寸的那几帧本来就要重建，这条不会抢在它前面。
-        if (D3D12RenderScale.isEnabled() && !dlaaActive) {
-            val rt0 = minecraft.gameRenderer.mainRenderTarget()
-            val attach = (rt0.colorTextureView as? D3D12GpuTextureView)?.texture() as? D3D12GpuTexture
-            val wantW = D3D12RenderScale.scaled(minecraft.window.width)
-            val wantH = D3D12RenderScale.scaled(minecraft.window.height)
-            // 每 120 帧一行真实尺寸（临时取证，确认世界层确实按比例出图）。
-            if ((++sizeTraceFrames % 120) == 0) {
-                Illusion.LOGGER.info(
-                    "[dxrmc] $PREFIX P211e sizes: window={}x{} world={}x{} want={}x{} percent={} split={}",
-                    minecraft.window.width, minecraft.window.height,
-                    attach?.getWidth(0) ?: -1, attach?.getHeight(0) ?: -1, wantW, wantH,
-                    D3D12RenderScale.percent(), D3D12GUISplit.isActive(),
-                )
-            }
-            if (attach != null && (attach.getWidth(0) != wantW || attach.getHeight(0) != wantH)) {
-                val now = System.nanoTime()
-                if (now - lastScaleRebuildNs > 2_000_000_000L) {
-                    lastScaleRebuildNs = now
-                    Illusion.LOGGER.info(
-                        "[dxrmc] $PREFIX P211d world layer is {}x{} but the DLSS input scale asks for {}x{} "
-                            + "(percent={}); re-creating the main render target",
-                        attach.getWidth(0), attach.getHeight(0), wantW, wantH,
-                        D3D12RenderScale.percent(),
-                    )
-                    // P211e：自愈重建已停用 —— 实测它与窗口 resize 路径互相打架，每 2s 重建主目标一次。
-                }
-            }
-        }
+        
         ensureDataPlane()
         val encoder = D3D12Device.sharedCommandEncoder() ?: return
         snapshotDlssDepth(encoder, minecraft)
@@ -1255,16 +1194,6 @@ object DeepLearningSuperSampling {
 
     @JvmStatic
     fun applyIfEnabled() {
-        // P211c（临时取证，用户 m08039“帧数没变化、GPU 满”）：先确认这一帧到底进没进 DLSS 闸门、
-        // 内部比例与挡位各是多少。每会话一行，确认完即删。
-        if (!applyTraceDone) {
-            applyTraceDone = true
-            Illusion.LOGGER.warn(
-                "[dxrmc] $PREFIX P211c enter: enabled={} legacy={} broken={} level={} percent={} tier={}",
-                isEnabled(), legacyBridge, broken, Minecraft.getInstance().level != null,
-                D3D12RenderScale.percent(), quality(),
-            )
-        }
         // 闸门：只看 DLSS 自己的开关（`dxrMcDlss`）。关掉时把数据面与状态复位。
         // 与抗锯齿无关：抗锯齿的模式在本类这一侧只是被锁成 OFF（用户 m05600），两件事各判各的开关。
         if (!isEnabled()) {
@@ -1291,34 +1220,7 @@ object DeepLearningSuperSampling {
         //
         // 这里做自愈：只要附件尺寸与“窗口 × 当前比例”不一致，就排一次主目标重建（限频 2s，最多
         // 每帧一次判断，零分配）。窗口刚变尺寸的那几帧本来就要重建，这条不会抢在它前面。
-        if (D3D12RenderScale.isEnabled() && !dlaaActive) {
-            val rt0 = minecraft.gameRenderer.mainRenderTarget()
-            val attach = (rt0.colorTextureView as? D3D12GpuTextureView)?.texture() as? D3D12GpuTexture
-            val wantW = D3D12RenderScale.scaled(minecraft.window.width)
-            val wantH = D3D12RenderScale.scaled(minecraft.window.height)
-            // 每 120 帧一行真实尺寸（临时取证，确认世界层确实按比例出图）。
-            if ((++sizeTraceFrames % 120) == 0) {
-                Illusion.LOGGER.info(
-                    "[dxrmc] $PREFIX P211e sizes: window={}x{} world={}x{} want={}x{} percent={} split={}",
-                    minecraft.window.width, minecraft.window.height,
-                    attach?.getWidth(0) ?: -1, attach?.getHeight(0) ?: -1, wantW, wantH,
-                    D3D12RenderScale.percent(), D3D12GUISplit.isActive(),
-                )
-            }
-            if (attach != null && (attach.getWidth(0) != wantW || attach.getHeight(0) != wantH)) {
-                val now = System.nanoTime()
-                if (now - lastScaleRebuildNs > 2_000_000_000L) {
-                    lastScaleRebuildNs = now
-                    Illusion.LOGGER.info(
-                        "[dxrmc] $PREFIX P211d world layer is {}x{} but the DLSS input scale asks for {}x{} "
-                            + "(percent={}); re-creating the main render target",
-                        attach.getWidth(0), attach.getHeight(0), wantW, wantH,
-                        D3D12RenderScale.percent(),
-                    )
-                    // P211e：自愈重建已停用 —— 实测它与窗口 resize 路径互相打架，每 2s 重建主目标一次。
-                }
-            }
-        }
+        
         ensureDataPlane()
         // P108c：速度通道若已自我关闭，趁这一帧把闩锁清掉（每会话一次），下一帧才有运动矢量。
         retryVelocityIfLatched()
@@ -1376,19 +1278,6 @@ object DeepLearningSuperSampling {
         if (renderWidth <= 0 || renderHeight <= 0 || targetWidth <= 0 || targetHeight <= 0) {
             return noteState("degenerate sizes: render ${renderWidth}x${renderHeight}, "
                 + "target ${targetWidth}x${targetHeight}")
-        }
-        // 临时取证（2026-10-24，用户 m07719“DLSS 开启后 GPU 满、帧数反而低”）：DLSS 真正拿到的
-        // 输入/输出尺寸。两者相等就说明缩放没生效、NGX 在做 1:1（白付代价），也是这次掉帧最可能的解释。
-        if (dimensionLogsLeft > 0) {
-            dimensionLogsLeft--
-            Illusion.LOGGER.info(
-                "[dxrmc] $PREFIX P212 sizes: color {}x{} target {}x{} percent={} scaleEnabled={} "
-                    + "mainTarget={}x{} window={}x{}",
-                renderWidth, renderHeight, targetWidth, targetHeight,
-                D3D12RenderScale.percent(), D3D12RenderScale.isEnabled(),
-                renderTarget.width, renderTarget.height,
-                minecraft.window.width, minecraft.window.height,
-            )
         }
 
         // P108z：把 JVM 建的 target 尺寸 UAV 纹理交给 native 当 DLSS 输出 —— **默认路径**。
@@ -1551,13 +1440,10 @@ object DeepLearningSuperSampling {
      * [applyIfEnabled] 的下一行。绝不能挪进 [applyIfEnabled] 内部：它有多条提前 `return`
      * （本帧不评价时直接退出），补画放在里面就会在那些帧把十字准星整个丢掉。
      */
-    private var replayCalls: Int = 0
+
     @JvmStatic
     fun replayCrosshair() {
-        replayCalls += 1
-        if (replayCalls <= 3 || replayCalls % 120 == 0) {
-            Illusion.LOGGER.warn("[dxrmc] P219 replayCrosshair: calls={} pending={}", replayCalls, pendingCrosshairRenderer != null)
-        }
+
         val renderer = pendingCrosshairRenderer ?: return
         val cameraState = pendingCrosshairCamera
         val guiScale = pendingCrosshairGuiScale
@@ -1579,12 +1465,7 @@ object DeepLearningSuperSampling {
         val target = D3D12GUISplit.replayTarget() ?: mainTarget
         val colorView = target.colorTextureView ?: return
         val depthView = target.depthTextureView ?: return
-        if (replayCalls <= 3 || replayCalls % 120 == 0) {
-            Illusion.LOGGER.warn(
-                "[dxrmc] P221 replay target: {} color={}x{} depth={}x{} split={}",
-                target.javaClass.simpleName, target.width, target.height, target.width, target.height,
-                D3D12GUISplit.replayTarget() != null)
-        }
+
         D3D12RenderPassBackend.replayProbe = true
         try {
             renderer.render(cameraState, guiScale, colorView, depthView)

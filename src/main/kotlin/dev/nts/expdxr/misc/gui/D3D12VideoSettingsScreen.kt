@@ -219,8 +219,23 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
         // 或者内容区本来就窄，就退化成折叠控件。之前只比“取值 > 半行宽”，标题一长就漏判。
         val captionWidth = probe.captionWidth()
         val valueWidth = probe.hoverHintWidth()
-        val wanted = maxOf(captionWidth, width / 3) + valueWidth + 18
-        val collapsible = probe.canCollapse() && (width < MIN_EXPANDED_WIDTH || wanted > width)
+        // 折叠只在“真的放不下”时触发（用户 m10344：标题很短、取值放得下的行被无谓折叠又省略了）。
+        // 滑条行额外要求整行宽度够放滑轨（点得准），所以它的标题按 1/3 行宽估算。
+        val wanted = if (probe.hasSlider()) {
+            maxOf(captionWidth, width / 3) + valueWidth + 18
+        } else {
+            captionWidth + valueWidth + 18
+        }
+        // 优先“变成可展开控件”，展开后仍放不下才省略（用户 m10319）：纯取值行只在真的放不下时折叠，
+        // 滑条行在窄窗也折叠（滑轨需要整行宽度才点得准）。
+        // 滑条行内联时：标题最多占 1/3 行宽，取值只能填在“标题右缘 → 行中线”这一段
+        // （`x + width/2 - (x + 6 + min(captionW, width/3) + 8)`）。取值比这段宽就一定会被
+        // 省略，按用户要求直接折叠成可展开控件（m10319/m10358/m10394）。
+        val inlineCaption = minOf(captionWidth, width / 3)
+        val inlineValueSpace = (width / 2 - 14 - inlineCaption).coerceAtLeast(0)
+        val valueOverflowsInlineSlider = probe.hasSlider() && valueWidth > inlineValueSpace
+        val collapsible = probe.canCollapse() &&
+            (wanted > width || valueOverflowsInlineSlider || (probe.hasSlider() && width < MIN_EXPANDED_WIDTH))
         if (!collapsible) {
             // 窗口拉宽后不再折叠：把残留的展开状态清掉，否则行高会一直停在一行半（用户 m06567）。
             expandedOptions.remove(option)
@@ -234,7 +249,7 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
                 null
             }
         return D3D12OptionWidget(
-            x, y, width, typed, collapsible, expanded, { toggleExpand(option) }, isReadOnly(option), allowed,
+            x, y, width, typed, collapsible, expanded, { toggleExpand(option) }, { isReadOnly(option) }, allowed, { lockReasonFor(option) },
         )
     }
 
@@ -245,33 +260,44 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
      * （见 `DeepLearningSuperSampling.bindRenderScaleToDlss`），滑条再可拖就是自相矛盾的。
      * DLAA 不算上采样（比例锁 100%），仍然可拖。
      */
-    private fun isReadOnly(option: OptionInstance<*>): Boolean {
-        // 缩放滑条：DLSS 上采样已接管比例时只读（此时由挡位决定，玩家不该手拖）。
-        if (option === D3D12RenderScale.option() &&
-            DeepLearningSuperSampling.isEnabled() &&
-            !DeepLearningSuperSampling.isDlaaActive()
-        ) {
-            return true
+    /**
+     * 只读原因（用户 m10067 / m10163）：返回 null 表示这一行可改；非 null 时整行只读，
+     * 悬停会额外显示这条原因（固定提示块放在说明框下方，悬浮提示放到鼠标上方）。
+     *
+     * <p>四种锁定都来自“两套时域/超分机制不能同时说话”：
+     * DLSS 上采样接管了分辨率与时域消解，DLAA 接管了 DLSS 的开关与挡位，帧生成又把 DLSS 的输出当输入。
+     */
+    private fun lockReasonFor(option: OptionInstance<*>): Component? {
+        val upscaling = DeepLearningSuperSampling.isEnabled() && !DeepLearningSuperSampling.isDlaaActive()
+        val dlaa = DeepLearningSuperSampling.isDlaaActive()
+        // 渲染缩放：DLSS 上采样时比例由挡位决定（bindRenderScaleToDlss），手拖会自相矛盾。
+        if (option === D3D12RenderScale.option() && upscaling) {
+            return Component.translatable("dxr_mc.video.lock.renderscale_dlss")
         }
-        // P211i（用户 m08236）：抗锯齿选了 DLAA 并生效时，DLSS 的「开关」与「挡位」只读 ——
-        // DLAA 走的就是 DLSS 特性链路，两者同时可调只会互相打架（缩放被钉在 100% 又被挡位改）。
-        // 但「模型预设」（用户 m08252）仍然可改：DLAA 有自己的模型选择，换预设不影响挡位。
-        // P211k（用户 m08293）：DLSS 上采样开着时，抗锯齿那一行只读 —— 此时时域消解由 DLSS
-        // 自己负责，再让玩家切 SMAA/TAA 只会双重处理。**但 DLAA 生效时不锁**：DLAA 本身就是
-        // 抗锯齿选项的一个取值，锁死会把玩家困在 DLAA 里出不来。
-        if (option === D3D12AntiAliasing.option() &&
-            DeepLearningSuperSampling.isEnabled() &&
-            !DeepLearningSuperSampling.isDlaaActive()
-        ) {
-            return true
+        // 抗锯齿：DLSS 上采样自己就是时域消解，再叠加 TAA/SMAA 只会双重处理（DLAA 时反而不锁）。
+        if (option === D3D12AntiAliasing.option() && upscaling) {
+            return Component.translatable("dxr_mc.video.lock.aa_dlss")
         }
-        // P213 联动：帧生成开着时 Reflex 不能被关掉（关掉会让 SDK 静默禁用插帧），
-        // 但 On 与 On+Boost 都是合法组合，所以这一行**不锁**，只把 Off 从循环里摘掉
-        // （见 optionWidgetFor 传入的 allowedValues）。
-        return DeepLearningSuperSampling.isDlaaActive() &&
-            (option === DeepLearningSuperSampling.option() ||
-                option === DeepLearningSuperSampling.qualityOption())
+        if (option === DeepLearningSuperSampling.option()) {
+            // 帧生成的输入就是 DLSS 输出：关掉 DLSS 等于关掉帧生成。
+            if (DLSSFrameGeneration.isEnabled()) {
+                return Component.translatable("dxr_mc.video.lock.dlss_framegen")
+            }
+            // DLAA 走的就是 DLSS 特性链路，开关与挡位由 DLAA 决定。
+            if (dlaa) {
+                return Component.translatable("dxr_mc.video.lock.dlss_dlaa")
+            }
+        }
+        if (option === DeepLearningSuperSampling.qualityOption() && dlaa) {
+            return Component.translatable("dxr_mc.video.lock.dlss_dlaa")
+        }
+        // 帧生成开着时 Reflex 不能回到 Off（那会让 SDK 静默禁用插帧），但 On / On+Boost
+        // 都合法，所以这一行不锁，只把 Off 从循环里摘掉（见 optionWidgetFor 的 allowedValues）。
+        return null
     }
+
+    /** 这一行是否只读：唯一判据就是“有没有锁定原因”。 */
+    private fun isReadOnly(option: OptionInstance<*>): Boolean = lockReasonFor(option) != null
 
     /** 折叠/展开一行；只重建行，保留滚动位置（不重进 `init()`，否则页签与标题也会被重建）。 */
     private fun toggleExpand(option: OptionInstance<*>) {
@@ -422,7 +448,12 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
             return
         }
 
-        val hovered = optionRows.lastOrNull { (_, widget) -> widget.isMouseOver(mouseX.toDouble(), mouseY.toDouble()) }
+        // 用户 m10226：内容区外的行（被下半部分按钮挡住/滚出边界）不能再弹提示。
+        if (mouseY < contentTop || mouseY > contentBottom) return
+        val hovered = optionRows.lastOrNull { (_, widget) ->
+            widget.y >= contentTop && widget.y + widget.height <= contentBottom &&
+                widget.isMouseOver(mouseX.toDouble(), mouseY.toDouble())
+        }
             ?.second ?: return
         val tooltipText = hovered.tooltipText() ?: return
 
@@ -440,10 +471,18 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
             FLOAT_HINT_WIDTH - pad * 2
         }
         val lines = font.split(tooltipText, textZone)
+        // 固定块里把锁定原因并进同一个框（用户 m10189：两块半透明背景叠在一起会显得更黑）。
+        val lockReason = hovered.lockReasonText()
+        val reasonLines = if (anchored && lockReason != null) font.split(lockReason, textZone) else emptyList()
+        val reasonExtra = if (reasonLines.isEmpty()) 0 else 2 + reasonLines.size  // 空行 + 注意 + 原因
         // 悬浮提示不显示标题行（用户 m06708），固定块仍然“标题 / 空行 / 描述”。
         val headerLines = if (anchored) 2 else 0
-        val boxWidth = maxOf(lines.maxOf { font.width(it) }, if (anchored) renderer.textWidth(caption) else 0) + pad * 2
-        val boxHeight = pad * 2 + lineHeight * (lines.size + headerLines)
+        val boxWidth = maxOf(
+            lines.maxOf { font.width(it) },
+            reasonLines.maxOfOrNull { font.width(it) } ?: 0,
+            if (anchored) renderer.textWidth(caption) else 0,
+        ) + pad * 2
+        val boxHeight = pad * 2 + lineHeight * (lines.size + headerLines + reasonExtra)
 
         val boxX: Int
         val boxY: Int
@@ -454,13 +493,32 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
             boxX = (mouseX + 12).coerceIn(4, (width - boxWidth - 4).coerceAtLeast(4))
             boxY = (mouseY + 12).coerceIn(4, (height - boxHeight - 4).coerceAtLeast(4))
         }
-        drawTooltipBox(renderer, caption, lines, boxX, boxY, boxWidth, boxHeight, pad, lineHeight, anchored)
+        val reasonHeader = if (reasonLines.isEmpty()) null else Component.translatable("dxr_mc.video.lock.notice")
+        drawTooltipBox(renderer, caption, lines, reasonLines, reasonHeader, boxX, boxY, boxWidth, boxHeight, pad, lineHeight, anchored)
+
+        // 悬浮式提示（窄窗）：锁定原因仍然单独画在鼠标上方；固定块里已经并进同一个框（见上）。
+        if (!anchored && lockReason != null) {
+            val floatLines = font.split(lockReason, textZone)
+            val floatWidth = floatLines.maxOf { font.width(it) } + pad * 2
+            val floatHeight = pad * 2 + lineHeight * (floatLines.size + 1)
+            val floatY = (mouseY - floatHeight - 12).coerceAtLeast(4)
+            renderer.rect(boxX, floatY, boxX + floatWidth, floatY + floatHeight, D3D12Widget.TOOLTIP_BG)
+            var floatRow = floatY + pad
+            renderer.text(Component.translatable("dxr_mc.video.lock.notice"), boxX + pad, floatRow, D3D12Widget.WARNING)
+            floatRow += lineHeight
+            for (floatLine in floatLines) {
+                renderer.text(floatLine, boxX + pad, floatRow, D3D12Widget.DISABLED)
+                floatRow += lineHeight
+            }
+        }
     }
 
     private fun drawTooltipBox(
         renderer: D3D12WidgetRenderer,
         caption: Component,
         lines: List<net.minecraft.util.FormattedCharSequence>,
+        reasonLines: List<net.minecraft.util.FormattedCharSequence>,
+        reasonHeader: Component?,
         boxX: Int,
         boxY: Int,
         boxWidth: Int,
@@ -488,6 +546,18 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
         for (line in lines) {
             renderer.text(line, boxX + pad, textY, D3D12Widget.WHITE)
             textY += lineHeight
+        }
+        if (reasonLines.isNotEmpty()) {
+            // 空一行，先写亮黄色的“注意：”，再接锁定原因（同一框内，颜色更暗）。
+            textY += lineHeight
+            if (reasonHeader != null) {
+                renderer.text(reasonHeader, boxX + pad, textY, D3D12Widget.WARNING)
+                textY += lineHeight
+            }
+            for (reasonLine in reasonLines) {
+                renderer.text(reasonLine, boxX + pad, textY, D3D12Widget.DISABLED)
+                textY += lineHeight
+            }
         }
     }
     private fun restartPending(): Boolean =
