@@ -14,6 +14,7 @@ import dev.nts.expdxr.d3d12.render.advanced.D3D12AntiAliasing
 import dev.nts.expdxr.d3d12.render.advanced.D3D12PostSharpen
 import dev.nts.expdxr.d3d12.render.advanced.smaa.D3D12GUISplit
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12Temporal
+import dev.nts.expdxr.misc.IllusionLogger
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12Velocity
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuTexture
@@ -27,6 +28,7 @@ import java.lang.foreign.MemorySegment
 import java.lang.foreign.ValueLayout
 import java.lang.ref.WeakReference
 import java.nio.charset.StandardCharsets
+import java.util.Locale
 import java.util.Optional
 import net.minecraft.client.Minecraft
 import net.minecraft.client.OptionInstance
@@ -1268,6 +1270,11 @@ object DeepLearningSuperSampling {
     @JvmStatic
     fun deferCrosshair(renderer: DebugCrosshairRenderer, cameraState: CameraRenderState, guiScale: Int,
         colorTexture: GpuTextureView, depthTexture: GpuTextureView) {
+        // 目标纹理已经关了（典型场景：玩家在界面里把 DLSS 关掉，DLSS 的输出纹理随之下线），
+        // 这一帧的准星就不能再往那份旧视图上推迟 —— 就地画回当前目标。
+        if (colorTexture.isClosed() || depthTexture.isClosed()) {
+            return
+        }
         pendingCrosshairRenderer = renderer
         pendingCrosshairCamera = cameraState
         pendingCrosshairGuiScale = guiScale
@@ -1293,7 +1300,12 @@ object DeepLearningSuperSampling {
         pendingCrosshairColor = null
         pendingCrosshairDepth = null
         if (cameraState != null && colorTexture != null && depthTexture != null) {
-            renderer.render(cameraState, pendingCrosshairGuiScale, colorTexture, depthTexture)
+            // P203b：推迟期间目标纹理可能已被关闭（关 DLSS / 重建渲染目标）。此时补画只会让
+        // vanilla 抛 Color texture 0 is closed 把客户端带崩 —— 宁可这一帧不画准星。
+        if (colorTexture == null || depthTexture == null || colorTexture.isClosed() || depthTexture.isClosed()) {
+            return
+        }
+        renderer.render(cameraState, pendingCrosshairGuiScale, colorTexture, depthTexture)
         }
     }
 
@@ -1444,6 +1456,10 @@ object DeepLearningSuperSampling {
     @Volatile
     private var jitterSignMode: Int = 0
 
+    /** P203 诊断：jitter 上报日志的节流计数。 */
+    @Volatile
+    private var p203Counter: Int = 0
+
     @JvmStatic
     fun cycleJitterSignMode(): Int {
         jitterSignMode = (jitterSignMode + 1) and 3
@@ -1513,6 +1529,22 @@ object DeepLearningSuperSampling {
             val reported = reportedJitter(jitterX, jitterY)
             val slJitterX = reported[0]
             val slJitterY = reported[1]
+            // P203 诊断：核对“喂给光栅的 jitter”与“这里上报给 DLSS 的 jitter”是否同一帧、同一值。
+            // 两者不等时 DLSS 会按错误的量去抖，表现为整幅逐帧轻微跳动——且翻符号无效。
+            p203Counter++
+            if (p203Counter % 120 == 0) {
+                val injected = D3D12Temporal.injectedJitter()
+                IllusionLogger.warnMessage(
+                    "[P203] jitter current=({}, {}) injected=({}, {}) reported=({}, {}) mismatch={}"
+                        .format(
+                            Locale.ROOT,
+                            jitterX, jitterY,
+                            injected?.get(0) ?: Double.NaN, injected?.get(1) ?: Double.NaN,
+                            slJitterX, slJitterY,
+                            D3D12Temporal.injectedJitterMismatch(),
+                        ),
+                )
+            }
             seg.set(F32, layout.byteOffset(PathElement.groupElement("jitterOffsetX")), slJitterX)
             seg.set(F32, layout.byteOffset(PathElement.groupElement("jitterOffsetY")), slJitterY)
             seg.set(F32, layout.byteOffset(PathElement.groupElement("mvecScaleX")),

@@ -142,7 +142,58 @@ class D3D12OptionWidget<T : Any>(
     }
     private val isSwitch: Boolean = option.get() is Boolean
 
-    private var switchAnimation: Double = if (option.get() == true) 1.0 else 0.0
+    /**
+     * 暂存值（用户 m06864）：改动只记在这里，点“应用”才真正写回 [OptionInstance]。
+     *
+     * <p>这样“改一下看看效果”不会再立刻重建渲染目标/开关 DLSS——以前那种即时生效正是
+     * “关掉 DLSS 却没点应用也崩”的直接原因。
+     */
+    private var pendingValue: T? = null
+    private var hasPending: Boolean = false
+
+    /** 显示用的取值：有暂存就显示暂存，否则显示已生效的值。 */
+    @Suppress("UNCHECKED_CAST")
+    private fun displayValue(): T = if (hasPending) pendingValue as T else option.get()
+
+    /** 记下暂存值（不写回 OptionInstance）。 */
+    private fun stage(value: T) {
+        pendingValue = value
+        hasPending = true
+    }
+
+    /** 这一行是否有“尚未应用”的改动。 */
+    fun hasPendingChange(): Boolean = hasPending && pendingValue != option.get()
+
+    /** 把暂存值写回 OptionInstance（“应用”按钮与撤销基线都用它）。 */
+    fun commitPending() {
+        if (hasPending) {
+            @Suppress("UNCHECKED_CAST")
+            option.set(pendingValue as T)
+            pendingValue = null
+            hasPending = false
+        }
+    }
+
+    /** 丢弃暂存值（“撤销”与关闭界面时用）。 */
+    fun clearPending() {
+        pendingValue = null
+        hasPending = false
+    }
+
+    /** 供界面在重建行时携带暂存值（切页签/重新布局不该丢掉未应用的改动）。 */
+    fun pendingOrNull(): Any? = if (hasPending) pendingValue else null
+
+    /** 把外部带回来的暂存值重新挂上（与 [pendingOrNull] 配套）。 */
+    @Suppress("UNCHECKED_CAST")
+    fun stageExternal(value: Any?) {
+        if (value == null) {
+            return
+        }
+
+        stage(value as T)
+    }
+
+    private var switchAnimation: Double = if (displayValue() == true) 1.0 else 0.0
     /** 是否正从右半边的滑轨上拖拽；左边名称区按下不进入拖拽（见 [mouseClicked]）。 */
     private var dragging: Boolean = false
     private var shownValue: Component = formattedValue()
@@ -163,7 +214,7 @@ class D3D12OptionWidget<T : Any>(
 
     fun restore(value: Any?) {
         @Suppress("UNCHECKED_CAST")
-        option.set(value as T)
+        stage(value as T)
     }
 
     override fun render(renderer: D3D12WidgetRenderer, mouseX: Int, mouseY: Int, delta: Float) {
@@ -172,7 +223,7 @@ class D3D12OptionWidget<T : Any>(
 
         if (isSwitch) {
             switchAnimation = Mth.clamp(
-                switchAnimation + delta * 6.0 * (if (option.get() == true) 1.0 else -1.0),
+                switchAnimation + delta * 6.0 * (if (displayValue() == true) 1.0 else -1.0),
                 0.0,
                 1.0,
             )
@@ -211,7 +262,7 @@ class D3D12OptionWidget<T : Any>(
      */
     fun tooltipText(): Component? {
         val supplier = (option as OptionInstanceAccessor).`dxr_mc$tooltipSupplier`() ?: return null
-        val tooltip = supplier.apply(option.get()) ?: return null
+        val tooltip = supplier.apply(displayValue()) ?: return null
         return (tooltip as TooltipAccessor).`dxr_mc$message`()
     }
 
@@ -251,7 +302,7 @@ class D3D12OptionWidget<T : Any>(
         val midY = centerY(1)
         renderer.rect(trackX1, midY, trackX2, midY + 1, WHITE)
 
-        val progress = valueRenderer.toSliderValue(option.get()).coerceIn(0.0, 1.0)
+        val progress = valueRenderer.toSliderValue(displayValue()).coerceIn(0.0, 1.0)
         val handleWidth = 3
         val handleHeight = renderer.textHeight() + 2
         // 手柄必须落在滑轨上：轨道从 x + width/2 开始、到 x + width - 6 结束，所以按轨道长度换算。
@@ -315,7 +366,7 @@ class D3D12OptionWidget<T : Any>(
         val lineY = y + DEFAULT_HEIGHT + (SLIDER_LINE - 2) / 2
         renderer.rect(x1, lineY, x2, lineY + 1, WHITE)
 
-        val progress = valueRenderer.toSliderValue(option.get()).coerceIn(0.0, 1.0)
+        val progress = valueRenderer.toSliderValue(displayValue()).coerceIn(0.0, 1.0)
         val handleWidth = 3
         val handleHeight = renderer.textHeight() + 2
         val handleX = (x1 + (progress * (x2 - x1)).toInt()).coerceIn(x1, x2 - handleWidth)
@@ -397,7 +448,7 @@ class D3D12OptionWidget<T : Any>(
                 dragging = true
                 applyFraction(valueRenderer, mouseX)
             } else {
-                valueRenderer.previous(option.get()).ifPresent { option.set(it) }
+                valueRenderer.previous(displayValue()).ifPresent { stage(it) }
             }
             playClickSound()
             return true
@@ -411,10 +462,10 @@ class D3D12OptionWidget<T : Any>(
 
         val values = cycleValues
         if (values != null && values.isNotEmpty()) {
-            val current = values.indexOf(option.get())
+            val current = values.indexOf(displayValue())
             val step = if (button == 1) -1 else 1
             val next = values[(current + step + values.size) % values.size]
-            option.set(next)
+            stage(next)
             playClickSound()
             return true
         }
@@ -445,20 +496,22 @@ class D3D12OptionWidget<T : Any>(
     private fun applyFraction(valueRenderer: OptionInstance.SliderableValueSet<T>, mouseX: Double) {
         val track = (width / 2 - 6).coerceAtLeast(1)
         val fraction = ((mouseX - x - width / 2) / track).coerceIn(0.0, 1.0)
-        option.set(valueRenderer.fromSliderValue(fraction))
+        stage(valueRenderer.fromSliderValue(fraction))
     }
 
     /** 折叠控件展开后的滑轨铺满整行（x+6 .. x+width-6），命中换算必须跟着它走。 */
     private fun applyFractionExpanded(valueRenderer: OptionInstance.SliderableValueSet<T>, mouseX: Double) {
         val track = (width - 12).coerceAtLeast(1)
         val fraction = ((mouseX - x - 6) / track).coerceIn(0.0, 1.0)
-        option.set(valueRenderer.fromSliderValue(fraction))
+        stage(valueRenderer.fromSliderValue(fraction))
     }
 
     @Suppress("UNCHECKED_CAST")
     private fun toggleSwitch() {
-        val boolean = option.get() as Boolean
-        (option as OptionInstance<Boolean>).set(!boolean)
+        val boolean = displayValue() as Boolean
+        // 开关也必须走暂存（用户 m06937：DLSS 开关一拨就生效、却不显示“应用”）。
+        @Suppress("UNCHECKED_CAST")
+        stage((!boolean) as T)
     }
 
     /**
@@ -468,7 +521,7 @@ class D3D12OptionWidget<T : Any>(
      * 只按 `": "` 匹配的话中文界面会把标题原样留在取值里（P201 实机所见）。
      */
     private fun formattedValue(): Component {
-        val text = stringifier.apply(option.get())
+        val text = stringifier.apply(displayValue())
         val prefix = caption.string
         val flat = text.string
 

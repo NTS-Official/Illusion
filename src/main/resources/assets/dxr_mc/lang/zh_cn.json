@@ -8,6 +8,7 @@
   "dxr_mc.video.group.game": "游戏",
   "dxr_mc.video.group.advanced": "高级",
   "dxr_mc.video.group.preset": "画面预设",
+  "dxr_mc.video.group.quality": "画面品质表现",
   "dxr_mc.video.group.extra": "额外表现",
   "dxr_mc.video.group.vrs": "可变速率渲染",
   "dxr_mc.video.group.nvidia": "NVIDIA 设备专用",

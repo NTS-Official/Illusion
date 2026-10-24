@@ -1,4 +1,4 @@
-package dev.nts.expdxr.misc.gui
+﻿package dev.nts.expdxr.misc.gui
 
 import dev.nts.expdxr.Illusion.Companion.MODID
 import dev.nts.expdxr.d3d12.D3D12HdrPresentation
@@ -145,6 +145,7 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
                     Entry.Heading(translatable("dxr_mc.video.group.preset")),
                     Entry.Setting(options.graphicsPreset()),
                     Entry.Heading(Component.empty()),
+                    Entry.Heading(Component.translatable("$MODID.video.group.quality")),
                 ) + quality.map { Entry.Setting(it) } + listOfNotNull(
                     Entry.Heading(Component.empty()),
                     Entry.Heading(translatable("dxr_mc.video.group.extra")),
@@ -174,6 +175,11 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
     }
 
     private fun buildRows() {
+        // 切页签/重新布局会重建行，未点“应用”的暂存值要跟着走（用户 m06864 的暂存模型）。
+        val carried = optionRows.mapNotNull { (option, widget) ->
+            widget.pendingOrNull()?.let { option to it }
+        }.toMap()
+
         rows.clear()
         optionRows.clear()
 
@@ -183,6 +189,7 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
                 is Entry.Heading -> D3D12HeadingWidget(contentLeft, y, contentWidth, entry.text)
                 is Entry.Setting -> {
                     val row = optionWidgetFor(entry.option, contentLeft, y, contentWidth)
+                    carried[entry.option]?.let { row.stageExternal(it) }
                     optionRows += entry.option to row
                     row
                 }
@@ -281,19 +288,26 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
         }
     }
 
-    private fun hasChanges(): Boolean = optionRows.any { (option, _) -> option.get() != baseline[option] }
+    private fun hasChanges(): Boolean = optionRows.any { (_, widget) -> widget.hasPendingChange() }
 
+    /**
+     * 应用：把各行的暂存值一次性写回 [OptionInstance]（到这一步才真正重建渲染目标、开关 DLSS），
+     * 然后落盘。用户 m06864 要求“点了应用才生效”。
+     */
     private fun apply() {
+        for ((_, widget) in optionRows) {
+            widget.commitPending()
+        }
+
         minecraft.options.save()
         snapshotBaseline()
     }
 
+    /** 撤销：丢掉暂存值，界面回落到“已生效”的取值。 */
     private fun undo() {
-        for ((option, widget) in optionRows) {
-            widget.restore(baseline[option])
+        for ((_, widget) in optionRows) {
+            widget.clearPending()
         }
-
-        snapshotBaseline()
     }
 
     // ------------------------------------------------------------ 绘制/输入
@@ -497,6 +511,11 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
     // ------------------------------------------------------------ 生命周期
 
     override fun onClose() {
+        // 关界面不等于应用（用户 m06864）：没点“应用”的改动一律丢弃。
+        for ((_, widget) in optionRows) {
+            widget.clearPending()
+        }
+
         minecraft.setScreenAndShow(parent)
     }
 

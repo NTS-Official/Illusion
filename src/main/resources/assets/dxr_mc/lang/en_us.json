@@ -8,6 +8,7 @@
   "dxr_mc.video.group.game": "Game",
   "dxr_mc.video.group.advanced": "Advanced",
   "dxr_mc.video.group.preset": "Graphics Preset",
+  "dxr_mc.video.group.quality": "Graphics Quality",
   "dxr_mc.video.group.extra": "Additional Performance",
   "dxr_mc.video.group.vrs": "Variable Rate Shading",
   "dxr_mc.video.group.nvidia": "NVIDIA Only",
