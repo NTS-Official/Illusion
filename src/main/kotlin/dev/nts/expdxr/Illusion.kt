@@ -2,7 +2,7 @@ package dev.nts.expdxr
 
 import com.mojang.logging.LogUtils
 import dev.nts.expdxr.Illusion.Companion.OPTIONS_KEY_PREFERRED_GRAPHICS
-import dev.nts.expdxr.d3d12.D3D12Settings
+import dev.nts.expdxr.misc.D3D12Settings
 import dev.nts.expdxr.d3d12.backend.D3D12GraphicsApi
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.adapter.D3D12AdapterInfo

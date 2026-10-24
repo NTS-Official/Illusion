@@ -3,7 +3,7 @@ package dev.nts.expdxr.d3d12.render.advanced.taa
 import com.mojang.renderpearl.api.GpuFormat
 import com.mojang.renderpearl.api.buffers.GpuBuffer
 import com.mojang.renderpearl.api.textures.GpuTexture
-import dev.nts.expdxr.d3d12.D3D12Settings
+import dev.nts.expdxr.misc.D3D12Settings
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.extern.MCDRPipelineDesc
 import dev.nts.expdxr.d3d12.render.adapter.D3D12Device

@@ -13,7 +13,7 @@ import com.mojang.renderpearl.backend.api.RenderPassBackend
 import com.mojang.renderpearl.api.textures.GpuSampler
 import com.mojang.renderpearl.api.textures.GpuTextureView
 import dev.nts.expdxr.CommandBundleMode
-import dev.nts.expdxr.d3d12.D3D12Settings
+import dev.nts.expdxr.misc.D3D12Settings
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.adapter.D3D12Device
 import dev.nts.expdxr.d3d12.render.advanced.mesh.D3D12MeshSectionSnapshot

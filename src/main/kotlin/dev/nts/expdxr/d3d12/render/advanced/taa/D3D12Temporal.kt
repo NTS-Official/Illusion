@@ -2,7 +2,7 @@ package dev.nts.expdxr.d3d12.render.advanced.taa
 
 import com.mojang.renderpearl.api.buffers.GpuBuffer
 import com.mojang.renderpearl.api.buffers.GpuBufferSlice
-import dev.nts.expdxr.d3d12.D3D12Settings
+import dev.nts.expdxr.misc.D3D12Settings
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuBuffer
 import dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling
@@ -314,6 +314,31 @@ object D3D12Temporal {
     @Synchronized
     fun jitter(): DoubleArray = doubleArrayOf(jitterX, jitterY)
 
+    /** P203 诊断：最近一次投影注入用的 jitter 及其帧身份 `(jx, jy, frameId)`；从未注入时返回 `null`。 */
+    @Synchronized
+    fun injectedJitter(): DoubleArray? {
+        if (injectedFrameId == Long.MIN_VALUE) {
+            return null
+        }
+        return doubleArrayOf(injectedJitterX, injectedJitterY, injectedFrameId.toDouble())
+    }
+
+    /**
+     * P203 诊断：本帧“注入给光栅的 jitter”与“当前序列 jitter”之差（两轴取大者）。
+     *
+     * <p>两者不等 ⇒ 本帧光栅抖动 A、DLSS 却按 B 补偿，这正是“翻 jitterOffset 符号照样抖”的来源。
+     * 帧身份不一致（本帧还没注入过投影）时返回 -1。
+     */
+    @Synchronized
+    fun injectedJitterMismatch(): Double {
+        if (injectedFrameId != presentedFrameId) {
+            return -1.0
+        }
+        val dx = kotlin.math.abs(injectedJitterX - jitterX)
+        val dy = kotlin.math.abs(injectedJitterY - jitterY)
+        return if (dx >= dy) dx else dy
+    }
+
     /**
      * 帧边界：由 `D3D12GpuSurface.present()` 每帧调用一次，递增"帧身份"。
      *
@@ -406,6 +431,11 @@ object D3D12Temporal {
             onLevelProjectionUpload(pristine, size[0], size[1])
         }
 
+        // P203 诊断：记下本帧真正喂给光栅的 jitter 与帧身份，供 DLSS 侧核对“上报值 == 渲染色值”。
+        injectedJitterX = jitterX
+        injectedJitterY = jitterY
+        injectedFrameId = presentedFrameId
+
         // P108d：**就地改写调用方自己的缓冲**（偏移按 position 算），不再造一个新的 ByteBuffer 返回。
         // 返回新缓冲时，`uploadStaging` 会用一个剩余长度相同的陌生缓冲，而调用方后续若有基于原缓冲
         // 的假设（长度/生命周期/身份）就会错位；就地改写的语义与"vanilla 写了一个抖动过的矩阵"
@@ -482,6 +512,11 @@ object D3D12Temporal {
 
     /** 已 present 的帧数，作为"帧身份"（见 [onFramePresented]）。 */
     private var presentedFrameId: Long = 0L
+
+    /** P203 诊断：最近一次投影注入用的 jitter 与帧身份，见 [injectedJitter]。 */
+    private var injectedJitterX: Double = 0.0
+    private var injectedJitterY: Double = 0.0
+    private var injectedFrameId: Long = Long.MIN_VALUE
 
     /** 最近一次滚动历史时所在的帧身份；同一帧内的重复上传不再滚动。 */
     private var lastRollFrameId: Long = -1L

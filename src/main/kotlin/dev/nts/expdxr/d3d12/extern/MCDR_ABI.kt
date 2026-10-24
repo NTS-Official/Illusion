@@ -2,7 +2,7 @@
 
 package dev.nts.expdxr.d3d12.extern
 
-import dev.nts.expdxr.d3d12.D3D12Settings
+import dev.nts.expdxr.misc.D3D12Settings
 import dev.nts.expdxr.misc.IllusionLogger
 import dev.nts.expdxr.d3d12.backend.D3D12FenceCallback
 import java.lang.foreign.*

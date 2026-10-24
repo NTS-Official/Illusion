@@ -1,4 +1,4 @@
-package dev.nts.expdxr.d3d12
+package dev.nts.expdxr.misc
 
 import dev.nts.expdxr.CommandBundleMode
 import dev.nts.expdxr.DlssImplementation
@@ -6,7 +6,6 @@ import dev.nts.expdxr.HdrMode
 import dev.nts.expdxr.IllusionConfig
 import dev.nts.expdxr.MeshDiagnostics
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
-import dev.nts.expdxr.misc.IllusionLogger
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 

@@ -3,7 +3,7 @@ package dev.nts.expdxr.d3d12.backend
 import com.mojang.blaze3d.platform.InputConstants
 import dev.nts.expdxr.Illusion.Companion.MODID
 import dev.nts.expdxr.IllusionConfig
-import dev.nts.expdxr.d3d12.D3D12Settings
+import dev.nts.expdxr.misc.D3D12Settings
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import net.minecraft.ChatFormatting
 import net.minecraft.client.KeyMapping

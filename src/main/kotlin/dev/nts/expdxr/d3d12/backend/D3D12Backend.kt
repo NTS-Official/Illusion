@@ -10,7 +10,6 @@ import dev.nts.expdxr.d3d12.render.advanced.mesh.D3D12MeshShader
 import com.mojang.renderpearl.api.GpuFormat
 import com.mojang.renderpearl.api.buffers.GpuBuffer
 import com.mojang.renderpearl.api.commands.GpuFence
-import com.mojang.renderpearl.api.pipeline.CompiledRenderPipeline
 import com.mojang.renderpearl.api.device.GpuDebugOptions
 import com.mojang.renderpearl.api.pipeline.ShaderSource
 import com.mojang.renderpearl.api.pipeline.ShaderType
@@ -21,7 +20,7 @@ import com.mojang.renderpearl.api.textures.GpuTexture
 import dev.nts.expdxr.Illusion.Companion.NATIVE_NAME
 import dev.nts.expdxr.MeshDiagnostics
 import dev.nts.expdxr.misc.IllusionLogger
-import dev.nts.expdxr.d3d12.D3D12Settings
+import dev.nts.expdxr.misc.D3D12Settings
 import dev.nts.expdxr.d3d12.debug.D3D12Fatal
 import dev.nts.expdxr.d3d12.extern.MCDRMeshPipelineDesc
 import dev.nts.expdxr.d3d12.extern.MCDRPipelineDesc

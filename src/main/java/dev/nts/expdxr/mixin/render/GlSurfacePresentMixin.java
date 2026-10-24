@@ -1,7 +1,7 @@
 package dev.nts.expdxr.mixin.render;
 
 import com.mojang.renderpearl.backend.opengl.GlSurface;
-import dev.nts.expdxr.d3d12.D3D12Settings;
+import dev.nts.expdxr.misc.D3D12Settings;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;

@@ -5,6 +5,8 @@
   "mixins": [],
   "client": [
     "options.PreferredGraphicsApiAccessor",
+    "options.OptionInstanceAccessor",
+    "options.TooltipAccessor",
     "options.PreferredGraphicsApiMixin",
     "options.OptionsMixin",
     "options.OptionsAntiAliasingMixin",
@@ -12,7 +14,8 @@
     "options.OptionsGraphicsPresetMixin",
     "render.DebugEntrySystemSpecsMixin",
     "render.DebugEntryFpsMixin",
-    "options.VideoSettingsScreenMixin",
+    "options.VideoSettingsScreenOptionsAccessor",
+    "options.OptionsScreenVideoMixin",
     "render.GameRendererPreloadUiShaderMixin",
     "render.FrontendGpuDeviceCompilePipelineMixin",
     "render.MainTargetRenderScaleMixin",

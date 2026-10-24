@@ -62,7 +62,7 @@ enum class MeshDiagnostics {
  * the working directory (`DXR_MC_GL_CONTEXT`, `gl_context.flag`, `DX12_ASYNC`,
  * `DX12_BUNDLE_MODE`, `dxrmc.selfTestMesh`, `dxrmc.temporal`, …) now have an option here. Those
  * old sources still work as a deprecated escape hatch for scripts, but the config is the
- * documented way — see [dev.nts.expdxr.d3d12.D3D12Settings], which resolves every switch.
+ * documented way — see [dev.nts.expdxr.misc.D3D12Settings], which resolves every switch.
  *
  * <p>Values are read once per session (a few of them say `gameRestart` because the renderer
  * cannot change them later); nothing here is per-frame.

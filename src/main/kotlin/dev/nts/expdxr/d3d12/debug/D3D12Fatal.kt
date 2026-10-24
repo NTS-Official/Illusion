@@ -1,7 +1,7 @@
 package dev.nts.expdxr.d3d12.debug
 
 import com.mojang.blaze3d.platform.MessageBox
-import dev.nts.expdxr.d3d12.D3D12Settings
+import dev.nts.expdxr.misc.D3D12Settings
 import dev.nts.expdxr.d3d12.backend.D3D12GraphicsApi
 import net.minecraft.CrashReport
 import net.minecraft.ReportedException

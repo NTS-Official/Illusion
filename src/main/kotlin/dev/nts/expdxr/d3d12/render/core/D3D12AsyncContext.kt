@@ -1,6 +1,6 @@
 package dev.nts.expdxr.d3d12.render.core
 
-import dev.nts.expdxr.d3d12.D3D12Settings
+import dev.nts.expdxr.misc.D3D12Settings
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory

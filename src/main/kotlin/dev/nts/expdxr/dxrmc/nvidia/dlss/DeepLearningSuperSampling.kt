@@ -2,7 +2,7 @@ package dev.nts.expdxr.dxrmc.nvidia.dlss
 
 import dev.nts.expdxr.Illusion
 import dev.nts.expdxr.d3d12.backend.D3D12CommandEncoderBackend
-import dev.nts.expdxr.d3d12.D3D12Settings
+import dev.nts.expdxr.misc.D3D12Settings
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.extern.MCDRLayout
 import dev.nts.expdxr.d3d12.extern.MCDRLayout.F32

@@ -5,7 +5,7 @@ import com.mojang.renderpearl.api.pipeline.RenderPipeline
 import com.mojang.renderpearl.api.pipeline.ShaderType
 import com.mojang.renderpearl.api.pipeline.UniformType
 import com.mojang.renderpearl.util.ShaderCompileException
-import dev.nts.expdxr.d3d12.D3D12Settings
+import dev.nts.expdxr.misc.D3D12Settings
 import dev.nts.expdxr.misc.IllusionLogger
 import dev.nts.expdxr.d3d12.backend.D3D12BindGroupEntry
 import net.minecraft.client.renderer.ShaderDefines
