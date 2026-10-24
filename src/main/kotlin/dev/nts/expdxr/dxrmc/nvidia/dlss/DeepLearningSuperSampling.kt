@@ -3,6 +3,7 @@ package dev.nts.expdxr.dxrmc.nvidia.dlss
 import dev.nts.expdxr.Illusion
 import dev.nts.expdxr.d3d12.backend.D3D12CommandEncoderBackend
 import dev.nts.expdxr.misc.D3D12Settings
+import dev.nts.expdxr.d3d12.backend.D3D12RenderPassBackend
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.extern.MCDRLayout
 import dev.nts.expdxr.d3d12.extern.MCDRLayout.F32
@@ -1550,23 +1551,47 @@ object DeepLearningSuperSampling {
      * [applyIfEnabled] 的下一行。绝不能挪进 [applyIfEnabled] 内部：它有多条提前 `return`
      * （本帧不评价时直接退出），补画放在里面就会在那些帧把十字准星整个丢掉。
      */
+    private var replayCalls: Int = 0
     @JvmStatic
     fun replayCrosshair() {
+        replayCalls += 1
+        if (replayCalls <= 3 || replayCalls % 120 == 0) {
+            Illusion.LOGGER.warn("[dxrmc] P219 replayCrosshair: calls={} pending={}", replayCalls, pendingCrosshairRenderer != null)
+        }
         val renderer = pendingCrosshairRenderer ?: return
         val cameraState = pendingCrosshairCamera
-        val colorTexture = pendingCrosshairColor
-        val depthTexture = pendingCrosshairDepth
+        val guiScale = pendingCrosshairGuiScale
         pendingCrosshairRenderer = null
         pendingCrosshairCamera = null
+        pendingCrosshairGuiScale = 0
         pendingCrosshairColor = null
         pendingCrosshairDepth = null
-        if (cameraState != null && colorTexture != null && depthTexture != null) {
-            // P203b：推迟期间目标纹理可能已被关闭（关 DLSS / 重建渲染目标）。此时补画只会让
-        // vanilla 抛 Color texture 0 is closed 把客户端带崩 —— 宁可这一帧不画准星。
-        if (colorTexture == null || depthTexture == null || colorTexture.isClosed() || depthTexture.isClosed()) {
+        if (cameraState == null) {
             return
         }
-        renderer.render(cameraState, pendingCrosshairGuiScale, colorTexture, depthTexture)
+        // P214：补画的目标必须是“这一刻真正会被 present 的主目标”，不能再沿用推迟时记下的
+        // 那两张视图 —— DLSS 真的跑起来之后，世界层已经被 D3D12GUISplit 搬进 GUI 目标，
+        // 而推迟时记的是渲染分辨率的输入目标，画上去等于画进一张没人再读的纹理里
+        // （用户 m09400：F3 的 3D 十字准星整个消失）。
+        // P217：拆分启用时界面被画进 GUI 目标、最终呈现的也是它；再往主目标画等于画进一张没人读的
+        // 纹理（这就是自动测试里"世界正常但没有准星"的原因）。优先取本帧的呈现目标，取不到才回主目标。
+        val mainTarget = Minecraft.getInstance().gameRenderer.mainRenderTarget()
+        val target = D3D12GUISplit.replayTarget() ?: mainTarget
+        val colorView = target.colorTextureView ?: return
+        val depthView = target.depthTextureView ?: return
+        if (replayCalls <= 3 || replayCalls % 120 == 0) {
+            Illusion.LOGGER.warn(
+                "[dxrmc] P221 replay target: {} color={}x{} depth={}x{} split={}",
+                target.javaClass.simpleName, target.width, target.height, target.width, target.height,
+                D3D12GUISplit.replayTarget() != null)
+        }
+        D3D12RenderPassBackend.replayProbe = true
+        try {
+            renderer.render(cameraState, guiScale, colorView, depthView)
+        } catch (e: Throwable) {
+            Illusion.LOGGER.warn("[dxrmc] P222 replay threw: {}", e.toString())
+        } finally {
+            D3D12RenderPassBackend.replayProbe = false
         }
     }
 

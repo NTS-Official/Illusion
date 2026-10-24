@@ -1,4 +1,4 @@
-package dev.nts.expdxr.d3d12
+package dev.nts.expdxr.misc
 
 import com.mojang.serialization.Codec
 import dev.nts.expdxr.Illusion

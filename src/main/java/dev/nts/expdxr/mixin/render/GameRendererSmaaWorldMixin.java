@@ -34,13 +34,15 @@ public class GameRendererSmaaWorldMixin {
         DeepLearningSuperSampling.applyIfEnabled();
         // P117：世界层已画完 —— eSimulationEnd + eRenderSubmitStart。
         DeepLearningSuperSampling.pclRenderSubmitStart();
-        // P109：F3 的 3D 十字准星推迟到这里才画 —— 上面那一笔已经把本帧世界层（不含它）喂给
-        // DLSS/DLAA 评价了，所以它进不了 NGX 的时间性输入（不会拖影），但仍然画在同一个主目标上。
-        // 必须留在**调用点**、不能塞进 applyIfEnabled()：那条路径有多条提前 return，放进去就会在
-        // "本帧不评价"的时候把十字准星整个丢掉。
-        DeepLearningSuperSampling.replayCrosshair();
         // P106：世界层（含 SMAA / DLSS 结果）随后被搬进 GUI 自己的窗口尺寸目标 —— 顺序不能反。
         D3D12GUISplit.prepareForGui();
+        // P109 + P214：F3 的 3D 十字准星推迟到这里才画 —— 上面那一笔已经把本帧世界层（不含它）
+        // 喂给 DLSS/DLAA 评价了，所以它进不了 NGX 的时间性输入（不会拖影）。
+        // 必须在 prepareForGui() **之后**：DLSS 把世界层搬进 GUI 目标之后，主目标才是最终画面；
+        // 提前画会被随后的搬移覆盖，表现为准星整个消失（用户 m09400）。
+        // P223：补画链接管已停用（见 DebugCrosshairRendererMixin 类注释），这里不再调用。
+        // P223：接管停用，补画不再调用。
+        // DeepLearningSuperSampling.replayCrosshair();
     }
 
     /**

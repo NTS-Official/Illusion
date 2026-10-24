@@ -113,6 +113,10 @@ class D3D12Backend : GpuBackend {
             // 这里给内嵌 GLSL 源，让下面的自检（pipeline/gui + pipeline/gui_textured）在资源包
             // 尚未加载时也能跑完整条 GLSL→SPIR-V→HLSL→DXBC→PSO 链。
             val device = D3D12Device(EMBEDDED_SHADER_SOURCE)
+            // P213：**在这之前** MCDR_ABI 还没加载完（DLL 是在 D3D12Device 里 load 的），所以上面那次
+            // pushToNative() 的调用会静默丢掉（ABI 句柄为 null）。设备建好后必须再推一次，否则
+            // [dlss] frameGeneration 这类“只在启动时读一次”的开关永远到不了 native。
+            D3D12Settings.pushToNative()
 
             // P124：mesh 能力与原因的唯一下发点（UI 置灰、路径分流都读它）。
             D3D12MeshShader.isSupported()

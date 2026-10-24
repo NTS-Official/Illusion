@@ -822,6 +822,13 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
             if (flipY && loc.contains("/item_cutout") && dss.depthTest() == CompareOp.NEVER_PASS) {
                 dss = DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, dss.writeDepth())
             }
+            // P217：26.3 的默认十字准星走 `pipeline/crosshair` 这条**带深度测试**的 GUI 管线，
+            // 而 GUI 目标在 prepareForGui() 里把深度清成 0.0（反向 Z 下即"最远"），准星按 GREATER
+            // 比较会被整条丢弃 —— 热键栏/文字走免深度测试的管线，所以只有准星消失。准星是 2D 贴图，
+            // 关掉深度测试既符合本意，也不会影响世界内任何管线。
+            if (loc.contains("pipeline/crosshair")) {
+                dss = DepthStencilState(CompareOp.ALWAYS_PASS, false)
+            }
             desc.depth(GpuFormat.D32_FLOAT.ordinal, dss.writeDepth(), dss.depthTest().ordinal)
         }
 

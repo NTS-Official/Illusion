@@ -33,14 +33,23 @@ object D3D12FrameStats {
     private var windowFrames = 0
     private var outputFps = 0
 
+
+    /**
+     * P213：输出/渲染比值的指数平滑值。
+     *
+     * <p>F3 每秒会被重画很多次，而 `presented` 每帧都可能变（动态多帧会在 1/2/3 之间跳），
+     * 直接显示单帧值会闪成“有时候有、有时候没有”。这里对比值做低通，再按阈值决定要不要显示。
+     */
+    private var smoothedMultiplier = 1.0
+
     /** D3D12 后端真正 present 了一帧；由 [dev.nts.expdxr.d3d12.render.core.D3D12GpuSurface.present] 调用。 */
     @JvmStatic
-    fun onFramePresented() {
+    fun onFramePresented(frames: Int = 1) {
         val now = System.nanoTime()
         if (windowStartNanos == 0L) {
             windowStartNanos = now
         }
-        windowFrames++
+        windowFrames += frames.coerceAtLeast(1)
         val elapsed = now - windowStartNanos
         if (elapsed >= WINDOW_NANOS) {
             outputFps = (windowFrames * 1_000_000_000.0 / elapsed).roundToInt()
@@ -67,6 +76,15 @@ object D3D12FrameStats {
         val match = FPS_LINE.matchEntire(vanilla) ?: return vanilla
         val rendered = match.groupValues[1].toIntOrNull() ?: return vanilla
         val output = if (outputFps > 0) outputFps else rendered
-        return "${match.groupValues[1]}/$output fps${match.groupValues[2]}"
+        // P213：用 output/rendered 的比值（不是单帧 presented）做平滑，避免数字闪烁。
+        val instant = if (rendered > 0) output.toDouble() / rendered else 1.0
+        smoothedMultiplier = smoothedMultiplier * 0.8 + instant * 0.2
+        val frameGen = if (smoothedMultiplier >= 1.25) {
+            val tenths = (smoothedMultiplier * 10.0).roundToInt()
+            " (FG ${tenths / 10}.${tenths % 10}x)"
+        } else {
+            ""
+        }
+        return "${match.groupValues[1]}/$output fps$frameGen${match.groupValues[2]}"
     }
 }

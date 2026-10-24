@@ -129,6 +129,11 @@ class D3D12OptionWidget<T : Any>(
      * 这一行只显示取值、不接受任何点击/拖拽，文字转灰。
      */
     private val readOnly: Boolean = false,
+    /**
+     * 允许取值白名单（每次点击时求值）：帧生成生效期间 Reflex 只允许在 On / Boost 之间切换，
+     * 不允许被切回 Off（那会让 SDK 静默禁用插帧，用户却以为还开着）。
+     */
+    private val allowedValues: (() -> Set<T>)? = null,
 ) : D3D12Widget(x, y, width, DEFAULT_HEIGHT + if (expanded) SLIDER_LINE else 0) {
 
     private val caption: Component = (option as OptionInstanceAccessor).`dxr_mc$caption`()
@@ -485,7 +490,8 @@ class D3D12OptionWidget<T : Any>(
             return true
         }
 
-        val values = cycleValues
+        val allowed = allowedValues?.invoke()
+        val values = cycleValues?.let { all -> if (allowed == null) all else all.filter { it in allowed } }
         if (values != null && values.isNotEmpty()) {
             val current = values.indexOf(displayValue())
             val step = if (button == 1) -1 else 1

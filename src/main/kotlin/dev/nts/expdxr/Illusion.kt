@@ -7,6 +7,7 @@ import dev.nts.expdxr.d3d12.backend.D3D12GraphicsApi
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.adapter.D3D12AdapterInfo
 import dev.nts.expdxr.misc.IllusionLogger
+import dev.nts.expdxr.misc.block.SkyBlocks
 import net.neoforged.bus.api.IEventBus
 import net.neoforged.fml.ModContainer
 import net.neoforged.fml.common.Mod
@@ -31,6 +32,8 @@ class Illusion(modEventBus: IEventBus, modContainer: ModContainer) {
 
     init {
         modContainer.registerConfig(ModConfig.Type.CLIENT, IllusionConfig.SPEC)
+        // 天空方块：方块 / 物品 / 方块实体都要在注册表冻结之前挂上。
+        SkyBlocks.register(modEventBus)
         // Construct log level before initialize the logger.
         IllusionLogger.applyDefaults()
         modEventBus.addListener<ModConfigEvent.Loading> {

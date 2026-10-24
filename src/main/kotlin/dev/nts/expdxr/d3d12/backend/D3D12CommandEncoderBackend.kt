@@ -11,6 +11,7 @@ import com.mojang.renderpearl.api.commands.RenderPass
 import com.mojang.renderpearl.api.commands.RenderPassDescriptor
 import com.mojang.renderpearl.api.textures.GpuTexture
 import dev.nts.expdxr.misc.IllusionLogger
+import dev.nts.expdxr.Illusion
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.adapter.D3D12Device
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12TAA

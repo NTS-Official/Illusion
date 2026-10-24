@@ -1,6 +1,6 @@
 package dev.nts.expdxr.mixin.options;
 
-import dev.nts.expdxr.d3d12.D3D12HdrPresentation;
+import dev.nts.expdxr.misc.D3D12HdrPresentation;
 import dev.nts.expdxr.misc.gui.D3D12VideoSettingsScreen;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.Button;

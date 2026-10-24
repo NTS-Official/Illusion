@@ -1,6 +1,7 @@
 package dev.nts.expdxr.mixin.options;
 
-import dev.nts.expdxr.d3d12.D3D12HdrPresentation;
+import dev.nts.expdxr.dxrmc.nvidia.dlss.DLSSFrameGeneration;
+import dev.nts.expdxr.misc.D3D12HdrPresentation;
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale;
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12VariableShadingRate;
 import dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling;
@@ -45,6 +46,7 @@ public abstract class OptionsRenderOptionsMixin {
         DeepLearningSuperSampling.load(options.getFile());
         NvidiaReflex.load(options.getFile());
         D3D12HdrPresentation.load(options.getFile());
+        DLSSFrameGeneration.load(options.getFile());
     }
 
     @Inject(method = "save", at = @At("TAIL"))
@@ -55,6 +57,7 @@ public abstract class OptionsRenderOptionsMixin {
         DeepLearningSuperSampling.save(options.getFile());
         NvidiaReflex.save(options.getFile());
         D3D12HdrPresentation.save(options.getFile());
+        DLSSFrameGeneration.save(options.getFile());
     }
 
     /**

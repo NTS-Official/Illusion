@@ -330,6 +330,18 @@ object D3D12GUISplit {
      * 最终 blit（呈现）该用哪张纹理：本帧已经把世界层搬进 GUI 目标时用 GUI 目标，
      * 否则用 vanilla 传进来的主渲染目标纹理。
      */
+    /**
+     * P217：本帧最终会被 present 的那张目标；拆分没生效（或已放弃）时返回 null，调用方退回主目标。
+     * 供 DLSS 的准星补画使用 —— 拆分启用时界面画在 GUI 目标上，画进主目标等于画进没人读的纹理。
+     */
+    @JvmStatic
+    fun replayTarget(): RenderTarget? {
+        if (!preparedThisFrame || givenUp) {
+            return null
+        }
+        return target
+    }
+
     @JvmStatic
     fun presentSourceView(fallback: GpuTextureView): GpuTextureView {
         if (!preparedThisFrame || givenUp) {

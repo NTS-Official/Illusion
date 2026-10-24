@@ -1,44 +1,26 @@
 package dev.nts.expdxr.mixin.render;
 
-import com.mojang.renderpearl.api.textures.GpuTextureView;
-import dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling;
 import net.minecraft.client.renderer.DebugCrosshairRenderer;
-import net.minecraft.client.renderer.state.level.CameraRenderState;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * P109：F3 的「3D 十字准星」不进 DLSS/DLAA 的时间性输入。
+ * P109 的 3D 准星接管点 —— <b>P223 起停用，该类目前是一个空标记</b>。
  *
- * <p>症状：那个小 gizmo 是**世界对齐**的（转视角时跟着转），却画进 `mainRenderTarget`
- * （`DebugCrosshairRenderer.java:68`）而且没有任何运动矢量；NGX 于是把它当静止的世界内容做
- * 时间累积，转视角时拖出一条鬼影/涂抹。
+ * <p>原设计：26.3 的 `DebugCrosshairRenderer.render(CameraRenderState, int, GpuTextureView,
+ * GpuTextureView)` 在世界层里画那个世界对齐的小 gizmo，它没有运动矢量，会被 DLSS/DLAA 的时间
+ * 累积当成静止内容 → 转视角时拖鬼影。原来的做法是在 HEAD 处 `ci.cancel()` 把这次绘制推迟到
+ * 世界层搬进 GUI 目标之后再补画。
  *
- * <p>为什么不用 reactive mask：本机这版 NGX 运行库没有这个能力 ——
- * `MCDR\build\_dl\x\DLSS-main\include\*` 里搜不到任何 `ReactiveMask`，
- * `nvsdk_ngx_helpers_d3d.h:225` 的评价参数结构体也没有该字段。所以只能**推迟画**：在
- * `render` 的 HEAD 把这一笔拦下来交给 `DeepLearningSuperSampling.deferCrosshair(...)` 存着，
- * 等 `GameRendererSmaaWorldMixin` 在 `applyIfEnabled()` 之后调 `replayCrosshair()` 再画。
- * 那一刻升采样已经消费完本帧输入，迟到的十字准星只落在最终画面上，不参与累积。
+ * <p>为什么停用：补画链实测**一笔都提交不上去** —— 同一次运行里 `P219` 每帧 pending=true、
+ * `P221` 补画目标与尺寸都对（`D3D12GUIRenderTarget` 854x480）、`P222` 无异常，但 `P220`
+ * （补画期间的管线绑定点）0 命中；同时因为不再取消原版绘制，3D 准星关掉后仍会被 replay
+ * 重复画出来。现在把整条接管停掉：3D 准星开 → 原版就地画；关 → 原版画 2D 十字，与原版一致。
  *
- * <p>DLSS/DLAA 关闭时整段不生效（`ci.cancel()` 只在 `isEnabled()` 为真时发生），行为与
- * vanilla 逐字节一致。
+ * <p>恢复条件：查清前端 `CommandEncoder.createRenderPass(...)` / `RenderPass.setPipeline(...)`
+ * 在 replay 期间为什么没有落到 `D3D12RenderPassBackend`，修好后再把 defer + cancel 收回来，
+ * 并顺带解决 gizmo 的 DLSS 拖影。
  */
 @Mixin(DebugCrosshairRenderer.class)
 public class DebugCrosshairRendererMixin {
-    // 26.3：render(CameraRenderState, int, GpuTextureView, GpuTextureView) 多出 color/depth
-    // 两个目标视图参数；@Inject 的处理器签名必须**逐个对上**目标参数，否则启动时
-    // Mixin 报 "Invalid descriptor on render"。补画时把同一对视图原样传回去。
-    @Inject(method = "render", at = @At("HEAD"), cancellable = true, remap = false)
-    private void dxr_mc$deferForDlss(CameraRenderState cameraState, int guiScale,
-            GpuTextureView colorTexture, GpuTextureView depthTexture, CallbackInfo ci) {
-        if (DeepLearningSuperSampling.isEnabled()) {
-            DeepLearningSuperSampling.deferCrosshair(
-                    (DebugCrosshairRenderer) (Object) this, cameraState, guiScale,
-                    colorTexture, depthTexture);
-            ci.cancel();
-        }
-    }
+    // 故意为空：不留 @Inject，保证我们既不改写也不取消原版的绘制。
 }

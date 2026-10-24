@@ -1,6 +1,7 @@
 package dev.nts.expdxr.misc
 
 import dev.nts.expdxr.CommandBundleMode
+import dev.nts.expdxr.DlssFrameGeneration
 import dev.nts.expdxr.DlssImplementation
 import dev.nts.expdxr.HdrMode
 import dev.nts.expdxr.RtMode
@@ -66,6 +67,10 @@ object D3D12Settings {
         val pixCaptureFrames: Int,
         val pixDirectory: String,
         val hdrMode: Int,
+
+    /** P213：帧生成（0=off 1=on 2=dynamic）与每帧生成张数。 */
+    val dlssgMode: Int,
+    val dlssgFrames: Int,
 
     /** P117：光追可见性分层（0=off 1=ao 2=ao_shadows 3=full）。 */
     val rtMode: Int,
@@ -226,6 +231,11 @@ object D3D12Settings {
         MCDR_ABI.D3D12SetHdrMode(s.hdrMode)
         // P117：光追模式（0..3）。设备创建前就要知道，后续 G-Buffer 创建看它。
         MCDR_ABI.D3D12SetRaytracingMode(s.rtMode)
+        // P213：帧生成。选项在渲染线程的下一次 present 生效（Reflex 必须开着）。
+        
+        // 与 GUI 选项保持同一套语义：模式 2（动态）只能配 1 张额外帧，具体张数由驱动决定；
+    // 固定倍率配置里若写成 1 张（2×）也照旧下发。
+    MCDR_ABI.D3D12SetDlssgMode(s.dlssgMode, if (s.dlssgMode == 2) 1 else s.dlssgFrames)
     }
 
     private fun snapshot(): Snapshot = snapshot ?: build()
@@ -346,6 +356,9 @@ object D3D12Settings {
             // P197：0 = AUTO / 1 = FORCE_ON / 2 = FORCE_OFF（native 只认序号）。
             hdrMode = config(HdrMode.AUTO) { IllusionConfig.HDR.get() }.ordinal,
             rtMode = config(RtMode.OFF) { IllusionConfig.RAYTRACING_MODE.get() }.ordinal,
+            // P213：0 = OFF / 1 = ON / 2 = DYNAMIC（native 只认序号）。
+            dlssgMode = config(DlssFrameGeneration.OFF) { IllusionConfig.DLSS_FRAME_GENERATION.get() }.ordinal,
+            dlssgFrames = config(1) { IllusionConfig.DLSS_FRAME_GENERATION_FRAMES.get() },
         )
 
         if (configAvailable) {

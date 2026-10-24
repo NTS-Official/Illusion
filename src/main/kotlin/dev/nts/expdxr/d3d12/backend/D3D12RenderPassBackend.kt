@@ -1,4 +1,5 @@
 package dev.nts.expdxr.d3d12.backend
+import dev.nts.expdxr.Illusion
 
 
 import com.mojang.renderpearl.api.pipeline.IndexType
@@ -252,6 +253,8 @@ class D3D12RenderPassBackend(
     // Pipeline + descriptors
     // -----------------------------------------------------------------------
 
+
+    private var crosshairBinds: Int = 0
     override fun setPipeline(pipeline: BackendRenderPipeline) {
         val device = this.device
             ?: throw IllegalStateException("No D3D12 device bound to this render pass")
@@ -266,7 +269,14 @@ class D3D12RenderPassBackend(
             throw IllegalStateException(
                 "Pipeline ${base.info().location} is not valid (shader compilation failed)")
         }
-        this.pipeline = compiled
+                // P218（临时探针）：确认 `pipeline/crosshair` 这一笔有没有被绑定过。
+        if (compiled.info().location.toString().contains("crosshair")) {
+            crosshairBinds += 1
+            if (crosshairBinds <= 3 || crosshairBinds % 600 == 0) {
+                Illusion.LOGGER.warn("[dxrmc] P218 crosshair pipeline bound: n={}", crosshairBinds)
+            }
+        }
+this.pipeline = compiled
         // 26.3：vanilla 前端按「管线 uniform 列表下标」回调 setUniform(Int, Any?)，
         // 下标 = `BackendRenderPipeline.CreateInfo.uniforms` 的位置（由 PipelineBuilder 按
         // SPIR-V 描述符出现顺序编号），与 `flattenUniforms(bindGroupLayouts)` 的顺序**不同**。
@@ -525,6 +535,11 @@ class D3D12RenderPassBackend(
     // D3D12CommandEncoderBackend 每 300 帧汇总打印并清零）。用于判断帧时间到底
     // 花在「mod 的绘制/提交路径」还是「MC 自身逻辑」上。
     companion object {
+        /** P220（临时）：准星补画期间为 true，用来打印这一笔到底绑了什么管线。 */
+        @JvmStatic
+        var replayProbe: Boolean = false
+        @JvmStatic
+        var replayBinds: Int = 0
         private val LOGGER: Logger = LoggerFactory.getLogger("dxrmc")
 
         private const val USAGE_VERTEX = 0x20

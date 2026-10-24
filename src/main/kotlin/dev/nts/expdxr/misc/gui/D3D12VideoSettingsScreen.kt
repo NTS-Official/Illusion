@@ -1,7 +1,8 @@
 package dev.nts.expdxr.misc.gui
 
 import dev.nts.expdxr.Illusion.Companion.MODID
-import dev.nts.expdxr.d3d12.D3D12HdrPresentation
+import dev.nts.expdxr.dxrmc.nvidia.dlss.DLSSFrameGeneration
+import dev.nts.expdxr.misc.D3D12HdrPresentation
 import dev.nts.expdxr.d3d12.render.advanced.D3D12AntiAliasing
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12VariableShadingRate
@@ -169,6 +170,9 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
                     Entry.Setting(DeepLearningSuperSampling.presetOption()),
                     Entry.Setting(DeepLearningSuperSampling.qualityOption()),
                     Entry.Setting(NvidiaReflex.option()),
+                    // P213：帧生成只在 DLSS 启用时才有意义，这里的 listOfNotNull 会把它藏掉。
+                    if (DLSSFrameGeneration.isAvailable()) Entry.Setting(DLSSFrameGeneration.option()) else null,
+                    if (DLSSFrameGeneration.isAvailable()) Entry.Setting(DLSSFrameGeneration.framesOption()) else null,
                 ),
             ),
         )
@@ -222,7 +226,16 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
             expandedOptions.remove(option)
         }
         val expanded = collapsible && expandedOptions.contains(option)
-        return D3D12OptionWidget(x, y, width, typed, collapsible, expanded, { toggleExpand(option) }, isReadOnly(option))
+        // P213 联动：帧生成生效时 Reflex 只允许 On(1) / On+Boost(2)，不许回到 Off(0)。
+        val allowed: (() -> Set<Any>)? =
+            if (option === NvidiaReflex.option()) {
+                { if (DLSSFrameGeneration.isEnabled()) setOf<Any>(1, 2) else setOf<Any>(0, 1, 2) }
+            } else {
+                null
+            }
+        return D3D12OptionWidget(
+            x, y, width, typed, collapsible, expanded, { toggleExpand(option) }, isReadOnly(option), allowed,
+        )
     }
 
     /**
@@ -252,6 +265,9 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
         ) {
             return true
         }
+        // P213 联动：帧生成开着时 Reflex 不能被关掉（关掉会让 SDK 静默禁用插帧），
+        // 但 On 与 On+Boost 都是合法组合，所以这一行**不锁**，只把 Off 从循环里摘掉
+        // （见 optionWidgetFor 传入的 allowedValues）。
         return DeepLearningSuperSampling.isDlaaActive() &&
             (option === DeepLearningSuperSampling.option() ||
                 option === DeepLearningSuperSampling.qualityOption())

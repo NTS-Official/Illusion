@@ -26,7 +26,15 @@
 
   "options.hdr": "HDR Presentation",
   "options.hdr.tooltip": "Presents the frame through a scRGB (16-bit float) swap chain instead of SDR, so the display can show the full brightness range.\n\nAuto follows the Windows advanced-colour setting; On forces HDR even on an SDR display (the picture will look overexposed - it is a pipeline test); Off forces SDR.\n\nThe setting applies the next time the swap chain is created, which in normal play means after restarting the game.",
-  "options.hdr.auto": "Auto",
+  "options.frameGeneration": "Frame Generation",
+    "options.frameGeneration.tooltip": "Interpolates extra frames with DLSS-G. Requires DLSS; turning it on also forces NVIDIA Reflex on (while Frame Generation is active it still switches between On and On+Boost, but cannot be turned Off).",
+    "options.frameGeneration.off": "Off",
+    "options.frameGeneration.on": "On",
+"options.frameGeneration.auto": "Auto",
+    "options.frameGeneration.dynamic": "Dynamic",
+    "options.frameGeneration.frames": "Multiplier",
+    "options.frameGeneration.frames.tooltip": "Multiplier. The lowest step is Auto: the driver picks the frame count to match the display. Above that, n = (n+1)x output, 6x is the cap.",
+    "options.hdr.auto": "Auto",
   "options.hdr.on": "On",
   "options.hdr.off": "Off",
 
@@ -114,6 +122,10 @@
   "dxr_mc.configuration.dlss.outputHandover.tooltip": "ON (default) hands a JVM-created UAV texture to native as the DLSS output target - the shipped path. OFF makes native use its own private texture instead, which cannot be written on some machines (troubleshooting only).",
   "dxr_mc.configuration.dlss.reflexFrameLimitUs": "Reflex Frame Limit (microseconds)",
   "dxr_mc.configuration.dlss.reflexFrameLimitUs.tooltip": "Reflex limits the frame rate itself, in microseconds per frame (0 = off, 144 fps = 6944). It stays accurate even when the CPU is far ahead of the GPU.",
+  "dxr_mc.configuration.dlss.frameGeneration": "Frame Generation (DLSS-G)",
+  "dxr_mc.configuration.dlss.frameGeneration.tooltip": "DLSS frame generation. OFF disables it, ON generates the fixed number of extra frames below, DYNAMIC lets the driver pick the count to match the display (driver 595.41+). Needs Reflex enabled; requires the sl.dlss_g runtime in the game directory.",
+  "dxr_mc.configuration.dlss.frameGenerationFrames": "Frame Generation Multiplier",
+  "dxr_mc.configuration.dlss.frameGenerationFrames.tooltip": "Extra frames generated per rendered frame when Frame Generation is ON (1-5): n frames means (n+1)x output, up to 6x. Higher means more latency.",
 
   "dxr_mc.configuration.logging": "Logging",
   "dxr_mc.configuration.logging.button": "Edit",
@@ -183,5 +195,6 @@
   "chat.dxr_mc.pix_capture.cause.manual": "user terminated manually",
   "chat.dxr_mc.pix_capture.fail.hresult": "PIX refused the operation (HRESULT %s).",
   "chat.dxr_mc.pix_capture.fail.recording": "PIX is already recording; press the key again once it has stopped.",
-  "chat.dxr_mc.pix_capture.fail.missing": "this MCDR.dll has no capture entry point - rebuild the native library."
+  "chat.dxr_mc.pix_capture.fail.missing": "this MCDR.dll has no capture entry point - rebuild the native library.",
+  "block.dxr_mc.sky_block": "Sky Block"
 }

@@ -2,6 +2,7 @@ package dev.nts.expdxr.dxrmc.nvidia.reflex
 
 import com.mojang.serialization.Codec
 import dev.nts.expdxr.Illusion
+import dev.nts.expdxr.dxrmc.nvidia.dlss.DLSSFrameGeneration
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import java.io.File
 import java.nio.charset.StandardCharsets
@@ -69,10 +70,46 @@ object NvidiaReflex {
     /** 最后一次真正推给 native 的模式；`save` 以它为准（见 [save] 的说明）。 */
     private var currentMode: Int = DEFAULT_MODE
 
+    /** 帧生成强制开启前玩家自己的模式（关掉帧生成时还原）。 */
+    private var modeBeforeFrameGeneration: Int = 0
+    private var forcedByFrameGeneration: Boolean = false
+
     /** 把模式推给 native；下一帧 Present 前生效。 */
     private fun push(mode: Int) {
-        currentMode = mode
-        MCDR_ABI.D3D12SetReflexMode(mode)
+        // P213 联动：帧生成开着时 Reflex 必须为 On。用户（或旧配置）想关掉也按 On 处理，
+        // 这样“设置里显示关 / 实际强制开”这种错位不会出现；关掉帧生成后即可自由切换。
+        val effective = if (mode == 0 && DLSSFrameGeneration.isEnabled()) 1 else mode
+        currentMode = effective
+        MCDR_ABI.D3D12SetReflexMode(effective)
+    }
+
+    /**
+     * 联动入口：帧生成打开时由 [DLSSFrameGeneration] 调用，
+     * 把 Reflex 抬到 On。
+     *
+     * 不能只 `OPTION.set(1)`：`Options.load` 期间 `OptionInstance.set` 不触发回调，
+     * native 那边的 user 模式会停在旧值，所以这里把选项与 native 一起写。
+     */
+    @JvmStatic
+    fun forceOn() {
+        if (currentMode != 0) {
+            return
+        }
+        modeBeforeFrameGeneration = currentMode
+        forcedByFrameGeneration = true
+        OPTION.set(1)
+        push(1)
+    }
+
+    /** 帧生成关掉时把 Reflex 还原成玩家原本的选择（只还原被我们强制过的那次）。 */
+    @JvmStatic
+    fun releaseFrameGenerationForce() {
+        if (!forcedByFrameGeneration) {
+            return
+        }
+        forcedByFrameGeneration = false
+        OPTION.set(modeBeforeFrameGeneration)
+        push(modeBeforeFrameGeneration)
     }
 
     /** 从 `options.txt` 读回模式（认名字与数字两种写法），并立刻推给 native。 */
@@ -100,6 +137,11 @@ object NvidiaReflex {
         // `Options.load` 跑在 Minecraft 构造函数里，`OptionInstance.set` 那时不触发回调，
         // 所以这里补一次 push（与 DLSS 选项同一处理）。
         push(OPTION.get())
+        // P213 联动：帧生成开着时把 UI 值也纠正过来——只改 native 不改选项，
+        // 设置界面会显示“Reflex 关着”却又被强制开启。
+        if (OPTION.get() != currentMode) {
+            OPTION.set(currentMode)
+        }
     }
 
     /** 把模式写回 `options.txt`（先删同键旧行再追加，与 DLSS 的写法一致）。 */

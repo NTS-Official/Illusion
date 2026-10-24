@@ -25,6 +25,18 @@ enum class DlssImplementation {
     STREAMLINE,
 }
 
+/** `[dlss] frameGeneration` — DLSS-G (frame generation). */
+enum class DlssFrameGeneration {
+    /** No generated frames. */
+    OFF,
+
+    /** Fixed multiplier (`frameGenerationFrames` per rendered frame). */
+    ON,
+
+    /** Dynamic multi-frame: the driver picks the count to hit the display rate (595.41+). */
+    DYNAMIC,
+}
+
 /**
  * `[renderer] hdr` — native HDR (scRGB) presentation.
  *
@@ -129,6 +141,12 @@ object IllusionConfig {
 
     /** `[dlss] reflexFrameLimitUs` — Reflex's own frame-rate limiter, microseconds per frame. */
     val DLSS_REFLEX_FRAME_LIMIT_US: ModConfigSpec.IntValue
+
+    /** `[dlss] frameGeneration` — DLSS frame generation (DLSS-G). */
+    val DLSS_FRAME_GENERATION: ModConfigSpec.EnumValue<DlssFrameGeneration>
+
+    /** `[dlss] frameGenerationFrames` — generated frames per rendered frame (1-5). */
+    val DLSS_FRAME_GENERATION_FRAMES: ModConfigSpec.IntValue
 
     /**
      * `[debug] pixCapture` — load Microsoft PIX's GPU capture layer at startup.
@@ -350,6 +368,23 @@ object IllusionConfig {
             )
             .translation("dxr_mc.configuration.dlss.reflexFrameLimitUs")
             .defineInRange("reflexFrameLimitUs", 0, 0, 100_000)
+
+        DLSS_FRAME_GENERATION = BUILDER
+            .comment(
+                "P213: DLSS frame generation (DLSS-G). OFF, ON = fixed multiplier or DYNAMIC.",
+                "Needs Reflex enabled and the sl.dlss_g runtime next to MCDR.dll; the DLL reports",
+                "the feature state in the log at startup ([P213] DLSS-G probe).",
+            )
+            .translation("dxr_mc.configuration.dlss.frameGeneration")
+            .defineEnum("frameGeneration", DlssFrameGeneration.OFF)
+
+        DLSS_FRAME_GENERATION_FRAMES = BUILDER
+            .comment(
+                "Frame generation multiplier when frameGeneration = ON: n extra frames means (n+1)x output, 1..5 -> 2x..6x.",
+                "Streamline reports the real maximum in DLSSGState::numFramesToGenerateMax.",
+            )
+            .translation("dxr_mc.configuration.dlss.frameGenerationFrames")
+            .defineInRange("frameGenerationFrames", 1, 1, 5)
 
         BUILDER.pop()
 

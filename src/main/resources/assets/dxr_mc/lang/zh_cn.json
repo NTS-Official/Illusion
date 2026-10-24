@@ -18,7 +18,7 @@
 
   "options.video.illusion.header": "Illusion 设置",
 
-  "options.graphicsApi.tooltip.d3d12": "由 Illusion 提供的 D3D12 渲染后端选项，使用 Java FFM API 访问 MCDR 动态链接库实现。\n\n实验性设置。在部分情况下可能降低性能或导致不稳定。",
+  "options.graphicsApi.tooltip.d3d12": "[DXEGP] 由 Illusion 提供的 D3D12 渲染后端选项，需启用此选项方可使用 Illusion 模组的全部功能。\n\n实验性设置。在部分情况下可能降低性能或导致不稳定。",
   "options.graphicsApi.d3d12": "优先 DirectX 12（实验性）",
 
   "options.inactivityFpsLimit.never": "永不",
@@ -26,7 +26,15 @@
 
   "options.hdr": "HDR 呈现",
   "options.hdr.tooltip": "此选项决定是否启用 HDR 呈现。\n\n自动：跟随系统的 HDR 设置，\n开：强制使用 HDR。\n关：强制使用 SDR。",
-  "options.hdr.auto": "自动",
+  "options.frameGeneration": "DLSS 帧生成",
+    "options.frameGeneration.tooltip": "用 DLSS-G 在两个渲染帧之间使用 AI 技术补帧。\n\n需要开启 DLSS 与 NVIDIA Reflex。",
+    "options.frameGeneration.off": "关闭",
+    "options.frameGeneration.on": "开启",
+"options.frameGeneration.auto": "自动",
+    "options.frameGeneration.dynamic": "自动",
+    "options.frameGeneration.frames": "帧生成倍率",
+    "options.frameGeneration.frames.tooltip": "帧生成倍率。最低档是“自动”：由驱动按显示器刷新率决定生成张数；往上 n 倍即 (n+1) 倍输出，最高 6 倍。\n\n注意，实际的呈现帧数会因为 Reflex 的限制而改变。",
+    "options.hdr.auto": "自动",
   "options.hdr.on": "开",
   "options.hdr.off": "关",
 
@@ -114,6 +122,10 @@
   "dxr_mc.configuration.dlss.outputHandover.tooltip": "开启（默认）时把 JVM 建的 UAV 纹理交给原生侧作为 DLSS 输出目标，这是正式路径。关闭则让原生侧用自己的私有纹理，那条路在某些机器上写不进内容（仅供排查）。",
   "dxr_mc.configuration.dlss.reflexFrameLimitUs": "Reflex 限帧（微秒）",
   "dxr_mc.configuration.dlss.reflexFrameLimitUs.tooltip": "由 Reflex 自己限帧，单位微秒/帧（0 = 关闭，144 fps = 6944）。即使 CPU 远远跑在 GPU 前面也能保持准确。",
+  "dxr_mc.configuration.dlss.frameGeneration": "帧生成（DLSS-G）",
+  "dxr_mc.configuration.dlss.frameGeneration.tooltip": "DLSS 帧生成。OFF 关闭；ON 按下面的张数固定生成；DYNAMIC 交给驱动按显示器刷新率决定张数（需 595.41 以上驱动）。需要开启 Reflex，且游戏目录里要有 sl.dlss_g 运行库。",
+  "dxr_mc.configuration.dlss.frameGenerationFrames": "帧生成倍率（额外帧数）",
+  "dxr_mc.configuration.dlss.frameGenerationFrames.tooltip": "帧生成开着时每个渲染帧额外生成几帧（1-5）：n 帧即 (n+1) 倍输出，最高 6 倍。倍率越高延迟越高。",
 
   "dxr_mc.configuration.logging": "日志",
   "dxr_mc.configuration.logging.button": "编辑",
@@ -183,5 +195,7 @@
   "chat.dxr_mc.pix_capture.cause.manual": "用户手动终止",
   "chat.dxr_mc.pix_capture.fail.hresult": "PIX 拒绝了这次操作（HRESULT %s）。",
   "chat.dxr_mc.pix_capture.fail.recording": "PIX 已经在录制了；等它停下再按一次。",
-  "chat.dxr_mc.pix_capture.fail.missing": "这个 MCDR.dll 没有捕获入口——重新编译 native 库。"
+  "chat.dxr_mc.pix_capture.fail.missing": "这个 MCDR.dll 没有捕获入口——重新编译 native 库。",
+
+  "block.dxr_mc.sky_block": "天空方块"
 }
