@@ -1,0 +1,17 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "building",
+  "pattern": [
+    "GGG",
+    "GEG",
+    "GGG"
+  ],
+  "key": {
+    "G": "minecraft:glass",
+    "E": "minecraft:ender_eye"
+  },
+  "result": {
+    "id": "dxr_mc:sky_block",
+    "count": 1
+  }
+}

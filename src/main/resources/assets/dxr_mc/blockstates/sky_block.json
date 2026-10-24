@@ -1,0 +1,7 @@
+{
+  "variants": {
+    "": {
+      "model": "dxr_mc:block/sky_block"
+    }
+  }
+}

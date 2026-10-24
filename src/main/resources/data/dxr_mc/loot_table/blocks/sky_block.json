@@ -1,0 +1,21 @@
+{
+  "type": "minecraft:block",
+  "random_sequence": "dxr_mc:blocks/sky_block",
+  "pools": [
+    {
+      "rolls": 1,
+      "bonus_rolls": 0,
+      "conditions": [
+        {
+          "condition": "minecraft:survives_explosion"
+        }
+      ],
+      "entries": [
+        {
+          "type": "minecraft:item",
+          "name": "dxr_mc:sky_block"
+        }
+      ]
+    }
+  ]
+}
