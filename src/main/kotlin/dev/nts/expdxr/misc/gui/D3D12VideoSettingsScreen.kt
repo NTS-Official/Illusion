@@ -1,4 +1,4 @@
-﻿package dev.nts.expdxr.misc.gui
+package dev.nts.expdxr.misc.gui
 
 import dev.nts.expdxr.Illusion.Companion.MODID
 import dev.nts.expdxr.d3d12.D3D12HdrPresentation
@@ -222,7 +222,39 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
             expandedOptions.remove(option)
         }
         val expanded = collapsible && expandedOptions.contains(option)
-        return D3D12OptionWidget(x, y, width, typed, collapsible, expanded) { toggleExpand(option) }
+        return D3D12OptionWidget(x, y, width, typed, collapsible, expanded, { toggleExpand(option) }, isReadOnly(option))
+    }
+
+    /**
+     * 这一行是否只读（用户 m07432）。
+     *
+     * <p>目前只有一种情况：DLSS 上采样开着时，渲染缩放被绑到 DLSS 的输入比例
+     * （见 `DeepLearningSuperSampling.bindRenderScaleToDlss`），滑条再可拖就是自相矛盾的。
+     * DLAA 不算上采样（比例锁 100%），仍然可拖。
+     */
+    private fun isReadOnly(option: OptionInstance<*>): Boolean {
+        // 缩放滑条：DLSS 上采样已接管比例时只读（此时由挡位决定，玩家不该手拖）。
+        if (option === D3D12RenderScale.option() &&
+            DeepLearningSuperSampling.isEnabled() &&
+            !DeepLearningSuperSampling.isDlaaActive()
+        ) {
+            return true
+        }
+        // P211i（用户 m08236）：抗锯齿选了 DLAA 并生效时，DLSS 的「开关」与「挡位」只读 ——
+        // DLAA 走的就是 DLSS 特性链路，两者同时可调只会互相打架（缩放被钉在 100% 又被挡位改）。
+        // 但「模型预设」（用户 m08252）仍然可改：DLAA 有自己的模型选择，换预设不影响挡位。
+        // P211k（用户 m08293）：DLSS 上采样开着时，抗锯齿那一行只读 —— 此时时域消解由 DLSS
+        // 自己负责，再让玩家切 SMAA/TAA 只会双重处理。**但 DLAA 生效时不锁**：DLAA 本身就是
+        // 抗锯齿选项的一个取值，锁死会把玩家困在 DLAA 里出不来。
+        if (option === D3D12AntiAliasing.option() &&
+            DeepLearningSuperSampling.isEnabled() &&
+            !DeepLearningSuperSampling.isDlaaActive()
+        ) {
+            return true
+        }
+        return DeepLearningSuperSampling.isDlaaActive() &&
+            (option === DeepLearningSuperSampling.option() ||
+                option === DeepLearningSuperSampling.qualityOption())
     }
 
     /** 折叠/展开一行；只重建行，保留滚动位置（不重进 `init()`，否则页签与标题也会被重建）。 */
@@ -295,8 +327,18 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
      * 然后落盘。用户 m06864 要求“点了应用才生效”。
      */
     private fun apply() {
+        val opts = Minecraft.getInstance().options
+        val presetRow = optionRows.firstOrNull { it.first === opts.graphicsPreset() }?.second
+        val presetChanged = presetRow?.hasPendingChange() == true
         for ((_, widget) in optionRows) {
             widget.commitPending()
+        }
+        // P211j（用户 m08262）：画质预设与抗锯齿的联动必须在“应用”之后显式补一次。
+        // `OptionInstance.set` 只写取值，原版界面是靠 `Options.applyGraphicsPreset(...)` 触发
+        // `GraphicsPreset.apply` 的；我们的自绘界面绕过了那段，于是预设变了、抗锯齿不动
+        // （fast→OFF / fancy→SMAA / fabulous→TAA 的映射在 `D3D12AntiAliasing.applyFromPreset`）。
+        if (presetChanged) {
+            opts.applyGraphicsPreset(opts.graphicsPreset().get())
         }
 
         minecraft.options.save()

@@ -5,6 +5,8 @@ import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.renderpearl.api.device.GpuDevice;
+import com.mojang.blaze3d.pipeline.MainTarget;
+import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale;
 import com.mojang.renderpearl.api.textures.GpuTexture;
 import java.util.function.Supplier;
 import org.spongepowered.asm.mixin.Mixin;
@@ -48,10 +50,23 @@ public abstract class RenderTargetCreateBuffersScaleMixin {
     private GpuTexture dxr_mc$scaleBuffersTexture(
             GpuDevice device, Supplier<String> label, int usage, GpuFormat format,
             int width, int height, int depthOrLayers, int mipLevels, Operation<GpuTexture> original) {
+        // P211g（用户 m08183 的 scissor 越界崩溃）：**只缩放主世界目标**。无差别缩放会把
+        // GUI/模糊/轮廓这些“窗口尺寸”目标也缩掉，于是 GUI 拿窗口坐标开 scissor 就越界
+        // （RenderArea 1484x773 vs scissor 1492x992）。非 MainTarget 一律原样返回。
+        final boolean scaleToRenderSize = (Object) this instanceof MainTarget;
         return original.call(device, label, usage, format,
-                dxr_mc$scaleBuffersDimension(width), dxr_mc$scaleBuffersDimension(height),
+                scaleToRenderSize ? dxr_mc$scaleBuffersDimension(width) : width,
+                scaleToRenderSize ? dxr_mc$scaleBuffersDimension(height) : height,
                 depthOrLayers, mipLevels);
     }
 
-    @Unique private int dxr_mc$scaleBuffersDimension(int value) { return value; }
+    /**
+     * P211f（2026-10-24，用户 m08068）：这个包装原来直接 `return value;` —— 26.3 迁移时把缩放
+     * 逻辑丢了，于是**每一次 `RenderTarget.resize`（窗口尺寸变化、全屏切换、我们自己调的 resize）
+     * 都会把附件还原成窗口尺寸**。表现为：854x480 启动时世界层是 427x240（DLSS 真在超分），
+     * 最大化窗口后世界层变回 2560x1334 → DLSS 只能做 1:1 推理 → GPU 占满、帧数掉到 140。
+     */
+    @Unique private int dxr_mc$scaleBuffersDimension(int value) {
+        return D3D12RenderScale.scaledForAttachment(value);
+    }
 }

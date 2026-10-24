@@ -3,6 +3,7 @@ package dev.nts.expdxr.misc
 import dev.nts.expdxr.CommandBundleMode
 import dev.nts.expdxr.DlssImplementation
 import dev.nts.expdxr.HdrMode
+import dev.nts.expdxr.RtMode
 import dev.nts.expdxr.IllusionConfig
 import dev.nts.expdxr.MeshDiagnostics
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
@@ -65,6 +66,9 @@ object D3D12Settings {
         val pixCaptureFrames: Int,
         val pixDirectory: String,
         val hdrMode: Int,
+
+    /** P117：光追可见性分层（0=off 1=ao 2=ao_shadows 3=full）。 */
+    val rtMode: Int,
     )
 
     @Volatile
@@ -198,6 +202,7 @@ object D3D12Settings {
             append(s.nativeLogFile).append('|')
             append(s.pixDirectory).append('|')
             append(s.hdrMode)
+            append('|').append(s.rtMode)
         }
         if (wanted == pushed) return
         pushed = wanted
@@ -219,6 +224,8 @@ object D3D12Settings {
         MCDR_ABI.D3D12SetReflexFrameLimit(s.reflexFrameLimitUs)
         // P197：HDR 模式同理（0/1/2 = AUTO/FORCE_ON/FORCE_OFF），下次建链时生效。
         MCDR_ABI.D3D12SetHdrMode(s.hdrMode)
+        // P117：光追模式（0..3）。设备创建前就要知道，后续 G-Buffer 创建看它。
+        MCDR_ABI.D3D12SetRaytracingMode(s.rtMode)
     }
 
     private fun snapshot(): Snapshot = snapshot ?: build()
@@ -338,6 +345,7 @@ object D3D12Settings {
             pixDirectory = config("") { IllusionConfig.PIX_DIRECTORY.get() },
             // P197：0 = AUTO / 1 = FORCE_ON / 2 = FORCE_OFF（native 只认序号）。
             hdrMode = config(HdrMode.AUTO) { IllusionConfig.HDR.get() }.ordinal,
+            rtMode = config(RtMode.OFF) { IllusionConfig.RAYTRACING_MODE.get() }.ordinal,
         )
 
         if (configAvailable) {

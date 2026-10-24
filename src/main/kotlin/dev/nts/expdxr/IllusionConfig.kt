@@ -43,6 +43,24 @@ enum class HdrMode {
     FORCE_OFF,
 }
 
+/**
+ * P117：光追可见性分层总开关。OFF 时不建 G-Buffer、不进光追分支（零行为变化）。
+ * 非光追设备上即使设成别的值也会被 native 忽略，并在日志里说明原因。
+ */
+enum class RtMode {
+    /** 关闭。 */
+    OFF,
+
+    /** 只做屏幕空间/光追 AO。 */
+    AO,
+
+    /** AO + 光追阴影。 */
+    AO_SHADOWS,
+
+    /** 全量：AO + 阴影 + 反射。 */
+    FULL,
+}
+
 /** `[debug] meshDiagnostics` — one-shot isolation test for "texture write vs read-back". */
 enum class MeshDiagnostics {
     /** Off (default). */
@@ -93,6 +111,9 @@ object IllusionConfig {
 
     /** `[renderer] hdr` — native HDR (scRGB) presentation mode. */
     val HDR: ModConfigSpec.EnumValue<HdrMode>
+
+    /** P117：`[raytracing] mode` — 光追可见性分层总开关。 */
+    val RAYTRACING_MODE: ModConfigSpec.EnumValue<RtMode>
 
     /** `[renderer] sharpenAmount` — post-sharpen strength for DLAA/DLSS. */
     val SHARPEN_AMOUNT: ModConfigSpec.DoubleValue
@@ -303,12 +324,13 @@ object IllusionConfig {
         DLSS_IMPLEMENTATION = BUILDER
             .comment(
                 "NGX is the in-process DLSS path (default). STREAMLINE drives sl.dlss instead.",
-                "STREAMLINE needs the Streamline runtime next to MCDR.dll; when it is missing the",
-                "DLL falls back to NGX and says so in the log."
+                "STREAMLINE is the default: sl.dlss is the layer-based path and the only one that",
+                "gets correct per-frame resource tags. NGX stays as the fallback for machines whose",
+                "Streamline runtime is missing (the DLL then falls back and says so in the log)."
             )
             .translation("dxr_mc.configuration.dlss.implementation")
             .gameRestart()
-            .defineEnum("implementation", DlssImplementation.NGX)
+            .defineEnum("implementation", DlssImplementation.STREAMLINE)
 
         DLSS_OUTPUT_HANDOVER = BUILDER
             .comment(
@@ -328,6 +350,23 @@ object IllusionConfig {
             )
             .translation("dxr_mc.configuration.dlss.reflexFrameLimitUs")
             .defineInRange("reflexFrameLimitUs", 0, 0, 100_000)
+
+        BUILDER.pop()
+
+        BUILDER.comment(
+            "P117: ray-traced visibility layering (G-Buffer + sampler feedback).",
+            "OFF keeps the raster path untouched. AO / AO_SHADOWS / FULL progressively add",
+            "ray-traced AO, shadows and reflections on tiles that the sampler feedback says are",
+            "actually visible. Machines below D3D12 SamplerFeedbackTier 1 ignore this setting."
+        ).translation("dxr_mc.configuration.raytracing").push("raytracing")
+
+        RAYTRACING_MODE = BUILDER
+            .comment(
+                "OFF disables the whole path. AO traces ambient occlusion only, AO_SHADOWS adds",
+                "ray-traced shadows, FULL adds reflections. Takes effect on the next frame."
+            )
+            .translation("dxr_mc.configuration.raytracing.mode")
+            .defineEnum("mode", RtMode.OFF)
 
         BUILDER.pop()
 

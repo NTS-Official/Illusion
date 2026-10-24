@@ -84,6 +84,16 @@ object D3D12Temporal {
     @JvmStatic
     fun isActive(): Boolean = enabled || D3D12TAA.isSelected() || DeepLearningSuperSampling.isEnabled()
 
+    /**
+     * P207：当前没有任何“会消费 jitter”的时域消解在跑。
+     *
+     * <p>典型场景：DLSS/DLAA 被选中但插件起不来（驱动 NGX 版本旧）——评价每帧返回 0，
+     * 世界层照旧 blit，而 jitter 还在注入，画面就整幅轻微晃动。此时把 jitter 压成 0，
+     * 画面稳定（代价只是暂时没有超分，而不是抖）。
+     */
+    private fun consumerMissing(): Boolean =
+        DeepLearningSuperSampling.isEnabled() && DeepLearningSuperSampling.isStalled()
+
     /** 是否真的把 jitter 注入投影矩阵（捕获路径不受它影响），见配置 `[debug] temporalJitter`。 */
     @Volatile
     var jitterEnabled: Boolean = D3D12Settings.temporalJitter
@@ -96,6 +106,15 @@ object D3D12Temporal {
         }
 
     private var frameIndex: Long = 0L
+
+    /**
+     * P204：上一帧“关卡投影上传”所属的帧戳（[Minecraft.getFrameTimeNs]）。
+     *
+     * <p>26.3 一帧里可能多次上传关卡投影（多 pass / 多段），而 [beginFrame] 会推进 jitter。
+     * 旧实现每上传一次就推进一次 —— 同一帧内换了若干个 jitter，几何用其中一个、DLSS 拿到另一个，
+     * 表现为整幅逐帧轻微跳动，且翻 jitterOffset 符号无效（P203 实测：一帧内交替出现两组 jitter）。
+     */
+    private var uploadFrameNs: Long = Long.MIN_VALUE
 
     private var jitterX: Double = 0.0
     private var jitterY: Double = 0.0
@@ -196,6 +215,7 @@ object D3D12Temporal {
     @Synchronized
     fun reset() {
         frameIndex = 0L
+        uploadFrameNs = Long.MIN_VALUE
         // 历史代数：所有跨帧累积缓冲（TAA）据此作废。放在最前面 —— 即使后面的释放抛异常，
         // 消费者也已经知道"别再混合了"。
         historyGeneration++
@@ -255,7 +275,7 @@ object D3D12Temporal {
         ensureHalton(n)
         val index = (frameIndex % n).toInt()
         // Halton 值域 (0,1) → 平移成以 0 为中心的像素偏移 [-0.5, +0.5)。
-        if (isActive() && jitterEnabled) {
+        if (isActive() && jitterEnabled && !consumerMissing()) {
             jitterX = halton2[index] - 0.5
             jitterY = halton3[index] - 0.5
         } else {
@@ -287,10 +307,15 @@ object D3D12Temporal {
         if (pristine.size != 16) {
             return pristine
         }
-        beginFrame()
+// 同一帧只推进一次（见 [uploadFrameNs] 的注释）。
+        val stamp = Minecraft.getInstance().frameTimeNs
+        if (stamp != uploadFrameNs) {
+            uploadFrameNs = stamp
+            beginFrame()
+        }
         // P76g：优先用 CPU 渲染状态那份（权威、且实测正常）；UBO 字节实测是垃圾，只留作兜底与对照。
         projection = stateProjection?.copyOf() ?: pristine.copyOf()
-        if (!isActive() || !jitterEnabled) {
+        if (!isActive() || !jitterEnabled || consumerMissing()) {
             return pristine.copyOf()
         }
         return jitterProjection(pristine, clipJitterX(width), clipJitterY(height))
@@ -414,7 +439,7 @@ object D3D12Temporal {
         if (data.remaining() != 64) {
             return null
         }
-        val size = renderSize() ?: return null
+val size = renderSize() ?: return null
         val pristine = readFloats(data, 0, 16) ?: return null
         // 帧身份用 present 计数（见 [onFramePresented]），不再用时间窗：时间窗在低帧率下会把
         // 同一帧的第二次上传当成新帧 —— jitter 与历史在帧中途多滚一次，于是本帧光栅用的 jitter

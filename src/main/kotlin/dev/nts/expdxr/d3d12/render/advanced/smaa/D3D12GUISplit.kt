@@ -165,6 +165,22 @@ object D3D12GUISplit {
         return world.getWidth(0) == window.width && world.getHeight(0) == window.height
     }
 
+    /**
+     * P209：DLSS/DLAA 的 pInOutput 必须是**窗口尺寸**的目标，所以它不能走 [targetForFrame] 里
+     * “主目标已经等于窗口 ⇒ 不需要拆分”那条早退。这里无条件建/校正 GUI 目标（幂等）。
+     *
+     * <p>为什么要单开一个入口：实测（2026-10-24）在 DLSS 评价时刻 `targetForFrame()` 会返回 null
+     * （主目标逻辑尺寸 == 窗口 ⇒ 早退），于是每帧都记 “no window-sized output target”，DLSS 一次都
+     * 没跑。判断“需不需要拆分”和“DLSS 需不需要输出目标”是两件事，不能共用同一个早退。
+     */
+    @JvmStatic
+    fun ensureTargetForDlss(): RenderTarget? = try {
+        ensureTarget()
+    } catch (t: Throwable) {
+        degrade("ensureTargetForDlss failed: $t")
+        null
+    }
+
     private fun ensureTarget(): RenderTarget? {
         if (givenUp) {
             return null

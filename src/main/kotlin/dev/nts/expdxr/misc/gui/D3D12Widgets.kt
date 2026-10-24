@@ -124,6 +124,11 @@ class D3D12OptionWidget<T : Any>(
     /** 折叠控件是否已展开；展开时本行多占 [SLIDER_LINE] 的高度，后续行整体下移。 */
     private val expanded: Boolean = false,
     private val onToggleExpand: () -> Unit = {},
+    /**
+     * 只读行（用户 m07432）：值由别处决定时（例如 DLSS 开着时渲染缩放被绑到 DLSS 输入比例），
+     * 这一行只显示取值、不接受任何点击/拖拽，文字转灰。
+     */
+    private val readOnly: Boolean = false,
 ) : D3D12Widget(x, y, width, DEFAULT_HEIGHT + if (expanded) SLIDER_LINE else 0) {
 
     private val caption: Component = (option as OptionInstanceAccessor).`dxr_mc$caption`()
@@ -218,6 +223,12 @@ class D3D12OptionWidget<T : Any>(
     }
 
     override fun render(renderer: D3D12WidgetRenderer, mouseX: Int, mouseY: Int, delta: Float) {
+        if (readOnly) {
+            // 只读：不响应悬停、不高亮、不画滑轨/手柄，只把标题与取值转灰（用户 m07432）。
+            renderer.rect(x, y, x + width, y + height, BG)
+            renderDisabled(renderer)
+            return
+        }
         val hovered = isMouseOver(mouseX, mouseY)
         renderer.rect(x, y, x + width, y + height, if (hovered) BG_HOVERED else BG)
 
@@ -264,6 +275,20 @@ class D3D12OptionWidget<T : Any>(
         val supplier = (option as OptionInstanceAccessor).`dxr_mc$tooltipSupplier`() ?: return null
         val tooltip = supplier.apply(displayValue()) ?: return null
         return (tooltip as TooltipAccessor).`dxr_mc$message`()
+    }
+
+    /** 只读行的绘制：标题与取值都转灰，取值右对齐，标题按剩余宽度从右侧截断。 */
+    private fun renderDisabled(renderer: D3D12WidgetRenderer) {
+        val valueText = formattedValue()
+        renderer.text(
+            valueText,
+            alignRight(renderer.textWidth(valueText)),
+            centerTextY(renderer),
+            DISABLED,
+        )
+        val available = (width - renderer.textWidth(valueText) - 18).coerceAtLeast(16)
+        val shown = Minecraft.getInstance().font.plainSubstrByWidth(caption.string, available)
+        renderer.text(shown, x + 6, centerTextY(renderer), DISABLED)
     }
 
     private fun renderTitle(renderer: D3D12WidgetRenderer, hovered: Boolean) {
@@ -422,7 +447,7 @@ class D3D12OptionWidget<T : Any>(
     }
 
     override fun mouseClicked(mouseX: Double, mouseY: Double, button: Int): Boolean {
-        if (!isMouseOver(mouseX, mouseY)) {
+        if (readOnly || !isMouseOver(mouseX, mouseY)) {
             return false
         }
 
@@ -475,7 +500,7 @@ class D3D12OptionWidget<T : Any>(
 
     override fun mouseDragged(mouseX: Double, mouseY: Double, button: Int, dragX: Double, dragY: Double): Boolean {
         val valueRenderer = slider ?: return false
-        if (!dragging) {
+        if (readOnly || !dragging) {
             return false
         }
 

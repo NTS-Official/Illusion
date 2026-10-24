@@ -57,6 +57,7 @@
   "options.dlss.quality": "DLSS Quality",
   "options.dlss.quality.tooltip": "Which DLSS performance/quality level to use. Performance renders at the lowest internal resolution and upscales the most (fastest); Quality renders at the highest internal resolution (sharpest). Balanced sits in between. The level applies while DLSS is on; the slider next to it still picks the actual render resolution, so the two together decide the final cost.",
   "options.dlss.quality.performance": "Performance",
+    "options.dlss.quality.ultra_performance": "Ultra Performance",
   "options.dlss.quality.balanced": "Balanced",
   "options.dlss.quality.quality": "Quality",
   "options.dlss.preset": "DLSS Model",
@@ -139,6 +140,8 @@
   "dxr_mc.configuration.debug.pixCaptureFrames.tooltip": "How many frames one key-press capture records, read when the key is pressed. 600 frames is about ten seconds at 60 fps, which is already a large file - a capture with the memory events on runs to hundreds of megabytes.",
   "dxr_mc.configuration.renderer": "Renderer",
   "dxr_mc.configuration.dlss": "DLSS",
+  "dxr_mc.configuration.raytracing": "Ray tracing",
+  "dxr_mc.configuration.raytracing.mode": "Ray-traced visibility",
   "dxr_mc.configuration.mesh": "Mesh Shaders",
   "dxr_mc.configuration.debug.debugLayer": "Direct3D Debug Layer",
   "dxr_mc.configuration.debug.debugLayer.tooltip": "Create the device with the Direct3D 12 debug layer installed. Much slower; useful when the log reports a broken command.",
@@ -172,7 +175,6 @@
 
   "key.dxr_mc.pix_capture": "PIX Capture (start/stop)",
   "key.category.dxr_mc.debug": "DXRMC",
-  "key.dxr_mc.jitter_sign": "Jitter sign A/B (debug, F7)",
 
   "chat.dxr_mc.pix_capture.prefix": "[DXEGP/PIX Capture] ",
   "chat.dxr_mc.pix_capture.start": "Start capture '%s'...",

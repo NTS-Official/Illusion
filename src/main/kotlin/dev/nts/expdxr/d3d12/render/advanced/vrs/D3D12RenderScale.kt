@@ -56,13 +56,25 @@ object D3D12RenderScale {
     // P108y（用户 m11139 / m11147）：DLSS 模式有**自己的一档集合与自己的持久化键**
     // ------------------------------------------------------------------
 
-    /** DLSS 模式的有效集合：50..90、步进 10（用户 m11139）。 */
-    private const val DLSS_MIN_PERCENT = 50
-    private const val DLSS_MAX_PERCENT = 90
-    private const val DLSS_STEP_PERCENT = 10
+    /**
+     * DLSS 模式的有效集合：25..100、步进 1（用户 m07665）。
+     *
+     * <p>旧集合是 50..90/步进 10（用户 m11139），那时这一行还是**可拖的**滑条；现在 DLSS 开着
+     * 时它被绑到挡位、只读（[DeepLearningSuperSampling.bindRenderScaleToDlss]），只承担“显示当前
+     * 输入比例”的作用，所以放宽到 25..100 并允许 1% 的精细值 —— 四个挡位分别是 33/50/58/67，
+     * 落在旧集合里会有一半取不到。
+     */
+    private const val DLSS_MIN_PERCENT = 25
+    private const val DLSS_MAX_PERCENT = 100
+    private const val DLSS_STEP_PERCENT = 1
 
-    /** DLSS 模式的默认值（用户 m11147：打开 DLSS 时默认 70%，不再"就近吸附当前值"）。 */
-    private const val DLSS_DEFAULT_PERCENT = 70
+    /**
+     * DLSS 模式的默认值 = 58%（用户 m07702：默认用“平衡”挡位的输入比例）。
+     *
+     * <p>与 [DeepLearningSuperSampling.QUALITY_DEFAULT]（平衡）保持一致：首次打开 DLSS 时挡位与比例
+     * 天生对得上，不会出现“默认是质量、比例却是 58%”这种一启动就被绑定逻辑改掉的情况。
+     */
+    private const val DLSS_DEFAULT_PERCENT = 58
 
     /** 原版 `options.txt` 里的键名；与 `dxrMcAaMode`/`dxrMcShadingRate` 同一套管道。 */
     const val OPTIONS_KEY: String = "dxrMcRenderScale"
@@ -462,6 +474,16 @@ object D3D12RenderScale {
      * `Minecraft.schedule` 只入队，由 `Minecraft.runTick` 的 `scheduledExecutables`
      * （`runAllTasks`，在 `tick()` / `renderFrame()` 之前）执行，于是重建落在帧边界。
      */
+    /**
+     * P211d：把“主目标按当前比例重建”暴露给渲染器内部调用（DLSS 的自愈检查）。
+     *
+     * <p>与滑条回调走同一条路径（`rebuildMainTarget` → `minecraft.schedule`），因此同样落在帧边界，
+     * 不会在帧中间关掉仍在使用的深度纹理。调用方负责限频。
+     */
+    @JvmStatic
+    fun scheduledRebuild() {
+        rebuildMainTarget()
+    }
     private fun rebuildMainTarget() {
         val minecraft = try {
             Minecraft.getInstance()

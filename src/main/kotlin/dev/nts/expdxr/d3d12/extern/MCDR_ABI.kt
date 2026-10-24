@@ -130,8 +130,12 @@ object MCDR_ABI {
     private var MH_setreflexmode: MethodHandle? = null
     private var MH_setreflexframelimit: MethodHandle? = null
     private var MH_sethdrmode: MethodHandle? = null
+
+    private var MH_setraytracingmode: MethodHandle? = null
     private var MH_gethdrappliedmode: MethodHandle? = null
     private var MH_reflexavailable: MethodHandle? = null
+    /** P208：Streamline 的 DLSS 插件是否真的加载成功（见 native `mcdr_dlss_available`）。 */
+    private var MH_dlssavailable: MethodHandle? = null
 
     private var MH_createdevice: MethodHandle? = null
     private var MH_createtexture: MethodHandle? = null
@@ -994,6 +998,25 @@ object MCDR_ABI {
     }
 
     /** P122：Reflex 是否可用（1=可用；旧 DLL 没有导出时返回 0）。 */
+    /**
+     * P208：DLSS 是否**真的**可用（1=可用）。
+     *
+     * <p>与 Reflex 同一个模式：问 native。它返回 0 的唯一情形是 “Streamline 起来了、但
+     * `slIsFeatureLoaded(DLSS)` 明确说没加载”——典型原因是驱动里的 NGX 运行时比随包的
+     * `nvngx_dlss.dll` 旧（`sl.log` 里的 `NGXInitValidateSnippets`），此时 DLSS 每帧都会被跳过，
+     * 界面必须如实置灰，而不是让玩家以为开了。
+     */
+    fun D3D12DlssAvailable(): Int {
+        if (LOAD_FAILURE != null) return 0
+        val handle = MH_dlssavailable ?: return 1  // 旧 DLL 没有这个导出时按“未知=可用”处理
+        return try {
+            handle.invokeExact() as Int
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12DlssAvailable failed: ${t}")
+            1
+        }
+    }
+
     fun D3D12ReflexAvailable(): Int {
         if (LOAD_FAILURE != null) return 0
         val handle = MH_reflexavailable ?: return 0
@@ -1020,6 +1043,22 @@ object MCDR_ABI {
      * P197：HDR 模式（0 = auto / 1 = 强制开 / 2 = 强制关）。只改进程级状态，真正生效在下次
      * 创建或重建交换链时 —— 换格式必须重建链，不能原地改。旧 DLL 没有这个入口时静默跳过。
      */
+    /**
+     * P117：光追可见性分层总开关（0=off 1=ao 2=ao_shadows 3=full）。
+     *
+     * 只做状态存储：真正建 G-Buffer / 进光追分支由 native 在设备与表面就绪后自己判断。
+     * 与 HDR 一样在设备创建前推送，避免“先建后设”。
+     */
+    fun D3D12SetRaytracingMode(mode: Int) {
+        if (!isAvailable()) return
+        @Suppress("TooGenericExceptionCaught")
+        try {
+            val handle = MH_setraytracingmode ?: return
+            handle.invokeExact(mode)
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12SetRaytracingMode($mode) failed: ${t}")
+        }
+    }
     fun D3D12SetHdrMode(mode: Int) {
         if (LOAD_FAILURE != null) return
         val handle = MH_sethdrmode ?: return
@@ -3193,9 +3232,11 @@ object MCDR_ABI {
         MH_setreflexframelimit = skipOptional("mcdr_dx12SetReflexFrameLimit", fdv(MCDRLayout.I32))
         // P197：HDR 模式必须在设备/交换链创建前就可用（配置在 createDevice 前推送）。
         MH_sethdrmode = skipOptional("mcdr_dx12SetHdrMode", fdv(MCDRLayout.I32))
+        MH_setraytracingmode = skipOptional("mcdr_dx12SetRaytracingMode", fdv(MCDRLayout.I32))
         // P198：建链时实际用掉的模式，视频设置据此判断要不要提示“需要重启”。
         MH_gethdrappliedmode = skipOptional("mcdr_dx12GetHdrAppliedMode", fd(MCDRLayout.I32))
         MH_reflexavailable = skipOptional("mcdr_dx12ReflexAvailable", fd(MCDRLayout.I32))
+        MH_dlssavailable = skipOptional("mcdr_dx12DlssAvailable", fd(MCDRLayout.I32))
         MH_setdlssoutput = skipOptional("mcdr_dx12SetDlssOutput",
             fd(MCDRLayout.I32, MCDRLayout.PTR))
 

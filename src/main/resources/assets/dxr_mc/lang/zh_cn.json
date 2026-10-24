@@ -57,6 +57,7 @@
   "options.dlss.quality": "DLSS 质量预设",
   "options.dlss.quality.tooltip": "可用：性能、平衡、质量",
   "options.dlss.quality.performance": "性能",
+    "options.dlss.quality.ultra_performance": "极致性能",
   "options.dlss.quality.balanced": "平衡",
   "options.dlss.quality.quality": "质量",
   "options.dlss.preset": "DLSS 模型选择",
@@ -139,6 +140,8 @@
   "dxr_mc.configuration.debug.pixCaptureFrames.tooltip": "按热键那一下开始的一次捕获录多少帧，按下时读取。600 帧约等于 60 fps 下的十秒，文件已经很大——打开内存事件时一个捕获能到几百 MB。",
   "dxr_mc.configuration.renderer": "渲染器",
   "dxr_mc.configuration.dlss": "DLSS",
+  "dxr_mc.configuration.raytracing": "光追",
+  "dxr_mc.configuration.raytracing.mode": "光追可见性分层",
   "dxr_mc.configuration.mesh": "网格着色器",
   "dxr_mc.configuration.debug.debugLayer": "Direct3D 调试层",
   "dxr_mc.configuration.debug.debugLayer.tooltip": "创建带 Direct3D 12 调试层的设备。会明显变慢，只在日志报告命令有问题时打开。",
@@ -172,7 +175,6 @@
 
   "key.dxr_mc.pix_capture": "PIX 捕获（开始/停止）",
   "key.category.dxr_mc.debug": "DXRMC",
-  "key.dxr_mc.jitter_sign": "抖动符号 A/B（调试，F7）",
 
   "chat.dxr_mc.pix_capture.prefix": "[DXEGP/PIX 捕获] ",
   "chat.dxr_mc.pix_capture.start": "开始 PIX 捕获 '%s'……",

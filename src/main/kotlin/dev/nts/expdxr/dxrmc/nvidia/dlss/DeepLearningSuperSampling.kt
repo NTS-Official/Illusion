@@ -239,6 +239,24 @@ object DeepLearningSuperSampling {
 
     /** 上一次**真正评价成功**时的输入状态，用来判 `reset`。 */
     private var evaluatedOnce = false
+    private var dimensionLogsLeft = 6
+
+    /**
+     * P211b：本会话是否已经做过“启动期把渲染缩放绑到 DLSS 挡位”。
+     *
+     * <p>用户 m07719 报“DLSS 开、GPU 满、帧率反而低”，取证发现 `dxrMcRenderScale` 停在 100%：
+     * 那种配置下世界层与窗口同尺寸，DLSS 只能做 1:1 推理 —— NGX 的代价一分不少，超分收益为零。
+     * 挡位一旦启用就应当按挡位比例缩放，所以第一次评价时补一次绑定；之后玩家手动拖滑条不再覆盖。
+     */
+    private var startupScaleBound = false
+
+    /** P211d：上次自愈重建主目标的时间戳（限频 2s）。 */
+    private var lastScaleRebuildNs = 0L
+    private var sizeTraceFrames = 0
+
+    /** P211c 探针：本会话是否已打过入口一行。 */
+    private var applyTraceDone = false
+    private var applyTraceLevelDone = false
     private var lastRenderWidth = -1
     private var lastRenderHeight = -1
     private var lastTargetWidth = -1
@@ -285,9 +303,10 @@ object DeepLearningSuperSampling {
      *
      * 展示名走原版 lang 键 `options.dlss.quality.<name>`（中英各一份）。
      */
-    private val QUALITY_NAMES: List<String> = listOf("performance", "balanced", "quality")
+    private val QUALITY_NAMES: List<String> =
+        listOf("ultra_performance", "performance", "balanced", "quality")
 
-    /** 默认挡位 = Quality（= 2）：与本机此前 native `chooseQuality` 选出的档位一致，行为不变。 */
+    /** 默认挡位 = Balanced（= 2）：用户 m07702 要求默认 58%（= 平衡挡位的输入比例）。 */
     private const val QUALITY_DEFAULT: Int = 2
 
     /**
@@ -326,6 +345,57 @@ object DeepLearningSuperSampling {
     fun quality(): Int = QUALITY_OPTION.get()
 
     /**
+     * P211（用户 m07429）：DLSS 各挡位对应的**输入比例**。
+     *
+     * <p>这是 NVIDIA 的 canonical 缩放比：性能 50%、平衡 58%、质量 66.6%（取整 67%）、DLAA 100%。
+     * Streamline 在 `dlssBeginEvent` 里按挡位算出 optimal 输入尺寸（日志里就是
+     * `Created DLSSContext feature (1280,667)(optimal) -> (2560,1334)`），我们喂给它的缓冲必须正好
+     * 是这个尺寸 —— 比例不一致时 DLSS 会二次拉伸，且 jitter 的像素幅度按错误的宽度换算，
+     * 静止画面会残留亚像素抖动。
+     */
+    @JvmStatic
+    fun inputPercent(): Int = percentForTier(quality())
+
+    /**
+     * 挡位 → 输入百分比的唯一映射点（[inputPercent] 与 [bindRenderScaleToDlss] 共用）。
+     *
+     * <p>编号跟着 [QUALITY_NAMES] 走：0=极致性能（33%，NVIDIA 的 1/3 档）、1=性能、
+     * 2=平衡、3=质量（66.7%），4 及以后是 DLAA 的 100%。
+     */
+    private fun percentForTier(tier: Int): Int = when (tier) {
+        0 -> 33
+        1 -> 50
+        2 -> 58
+        3 -> 67
+        else -> 100
+    }
+
+    /**
+     * P211：把渲染缩放**绑到 DLSS 的输入比例**上（用户 m07429 原话：“直接把renderscale绑到dlss输入上”）。
+     *
+     * <p>只在"DLSS 上采样开着"时生效；DLAA 由 `D3D12RenderScale` 的 dlaaLock 锁在 100%，这里不动。
+     * 挡位一变或开关一开就调一次，渲染目标随之按新比例重建。
+     */
+    private fun bindRenderScaleToDlss(tier: Int = quality()) {
+        if (!OPTION.get() || dlaaActive) {
+            return
+        }
+        val percent = percentForTier(tier)
+        // 2026-10-24（用户 m07621）：这里原来只调 `setPercent`，它写的是 `D3D12RenderScale` 的内部
+        // 字段，**不碰** `OptionInstance` —— 界面上那一行读的是 `option().get()`，于是挡位变了、
+        // 实际缩放变了，行里的数字却一直不动。改成走 `option().set(...)`：它同时更新取值、触发
+        // `apply`（记状态 + 重建主渲染目标），与玩家自己拖滑条是同一条路径。
+        if (percent == D3D12RenderScale.current()) {
+            return
+        }
+        D3D12RenderScale.option().set(percent)
+        Illusion.LOGGER.info(
+            "[dxrmc] $PREFIX P211: render scale bound to the DLSS input: {}% (tier {})",
+            percent, QUALITY_NAMES[tier],
+        )
+    }
+
+    /**
      * 把挡位推给 native（`mcdr_dx12SetDlssQuality`，编号 = [QUALITY_NAMES] 下标）。
      *
      * <p>**返回值契约（用户 m11858，从 native 读出来的，别再猜）**：
@@ -355,6 +425,8 @@ object DeepLearningSuperSampling {
                 "[dxrmc] $PREFIX mcdr_dx12SetDlssQuality({}) returned {} (expected the tier back, "
                     + "or -1 when out of range)", value, status)
         }
+        // P211：挡位决定输入比例，渲染缩放跟着走（只在上采样开着时）。
+        bindRenderScaleToDlss(value)
     }
 
     /** 「本地 DLL 没有挡位导出」只报一次。 */
@@ -466,9 +538,20 @@ object DeepLearningSuperSampling {
     @JvmStatic
     fun isEnabled(): Boolean = OPTION.get() || dlaaActive
 
+    /**
+     * P207：DLSS/DLAA 被选中、却连续多帧评价失败（例如驱动里的 NGX 比随包的 `nvngx_dlss.dll` 旧，
+     * 插件根本没起来，见 `sl.log` 的 `NGXInitValidateSnippets` 报错）。
+     *
+     * <p>这种状态下**没有任何东西会消费亚像素 jitter**：世界层每帧照旧按比例 blit，
+     * jitter 却还在注入，于是整幅画面被按 ±0.5px 来回平移 —— 用户看到的“DLSS 抖动”就是这个。
+     */
+    @JvmStatic
+    fun isStalled(): Boolean = consecutiveEvaluateFailures >= 3
+
     /** True while the game really renders through DXRMC's D3D12 backend（非 D3D12 时按钮置灰）。 */
     @JvmStatic
-    fun isAvailable(): Boolean = D3D12AdapterInfo.current != null
+    fun isAvailable(): Boolean =
+        D3D12AdapterInfo.current != null && MCDR_ABI.D3D12DlssAvailable() == 1
 
     /**
      * 用户 m05600：**DLSS 开启时抗锯齿锁为 OFF 且不可调**。
@@ -552,6 +635,10 @@ object DeepLearningSuperSampling {
                 "[dxrmc] $PREFIX DLAA released: quality back to the user's own tier ({})",
                 QUALITY_NAMES[QUALITY_OPTION.get()])
             // 退出 DLAA 后 DLSS 是否该开，交回独立开关（下一帧的 reconcile 会处理锁定/还原）。
+            // P211h（用户 m08213）：DLAA 期间的 100% 会写进当前模式的记忆键，解锁后
+            // `setDlaaLock(false)` 只是把它读回来 —— 于是"关 DLAA 再开 DLSS"时缩放仍停在 100。
+            // 这里显式按当前挡位重新绑定一次（DLSS 没开时它自己会早退，交给普通模式的记忆值）。
+            bindRenderScaleToDlss()
         }
     }
 
@@ -651,6 +738,10 @@ object DeepLearningSuperSampling {
         // DLSS 开 50..90 步进 10），两种模式各自记住自己的值并各自持久化。
         // 这里用**只置标志**的静态入口，绝不去初始化 DLSS 对象（避免类初始化顺序耦合）。
         D3D12RenderScale.setDlssMode(enabled)
+        // P211：一开就把比例对齐到当前挡位的 DLSS 输入（关掉时 setDlssMode 已载回普通模式的记忆值）。
+        if (enabled) {
+            bindRenderScaleToDlss()
+        }
     }
 
     // ------------------------------------------------------------------
@@ -859,6 +950,43 @@ object DeepLearningSuperSampling {
             return
         }
         modeActive = true
+        // P211d（用户 m08068“超平坦也满占用 140fps”）：世界层必须真的按 DLSS 输入比例出图。
+        //
+        // 实测（2026-10-24）：`D3D12RenderScale.percent()` 已经是 58，但主目标的**附件**仍是
+        // 2560x1334 —— 因为 58% 是从 DLSS 模式键载入的，那条路径只写内部状态、不重建主渲染目标
+        // （`store()` 刻意不重建：`Options.load` 时 `gameRenderer` 还没有）。于是世界层按窗口尺寸
+        // 出图，DLSS 拿到 2560x1334 的输入做 1:1 推理 —— 代价照付、超分收益为零，正是掉帧的来源。
+        //
+        // 这里做自愈：只要附件尺寸与“窗口 × 当前比例”不一致，就排一次主目标重建（限频 2s，最多
+        // 每帧一次判断，零分配）。窗口刚变尺寸的那几帧本来就要重建，这条不会抢在它前面。
+        if (D3D12RenderScale.isEnabled() && !dlaaActive) {
+            val rt0 = minecraft.gameRenderer.mainRenderTarget()
+            val attach = (rt0.colorTextureView as? D3D12GpuTextureView)?.texture() as? D3D12GpuTexture
+            val wantW = D3D12RenderScale.scaled(minecraft.window.width)
+            val wantH = D3D12RenderScale.scaled(minecraft.window.height)
+            // 每 120 帧一行真实尺寸（临时取证，确认世界层确实按比例出图）。
+            if ((++sizeTraceFrames % 120) == 0) {
+                Illusion.LOGGER.info(
+                    "[dxrmc] $PREFIX P211e sizes: window={}x{} world={}x{} want={}x{} percent={} split={}",
+                    minecraft.window.width, minecraft.window.height,
+                    attach?.getWidth(0) ?: -1, attach?.getHeight(0) ?: -1, wantW, wantH,
+                    D3D12RenderScale.percent(), D3D12GUISplit.isActive(),
+                )
+            }
+            if (attach != null && (attach.getWidth(0) != wantW || attach.getHeight(0) != wantH)) {
+                val now = System.nanoTime()
+                if (now - lastScaleRebuildNs > 2_000_000_000L) {
+                    lastScaleRebuildNs = now
+                    Illusion.LOGGER.info(
+                        "[dxrmc] $PREFIX P211d world layer is {}x{} but the DLSS input scale asks for {}x{} "
+                            + "(percent={}); re-creating the main render target",
+                        attach.getWidth(0), attach.getHeight(0), wantW, wantH,
+                        D3D12RenderScale.percent(),
+                    )
+                    // P211e：自愈重建已停用 —— 实测它与窗口 resize 路径互相打架，每 2s 重建主目标一次。
+                }
+            }
+        }
         ensureDataPlane()
         // P108c：速度通道若已自我关闭，趁这一帧把闩锁清掉（限速：最多每 1 秒一次），下一帧才有运动矢量。
         retryVelocityIfLatched()
@@ -917,6 +1045,43 @@ object DeepLearningSuperSampling {
             return
         }
         modeActive = true
+        // P211d（用户 m08068“超平坦也满占用 140fps”）：世界层必须真的按 DLSS 输入比例出图。
+        //
+        // 实测（2026-10-24）：`D3D12RenderScale.percent()` 已经是 58，但主目标的**附件**仍是
+        // 2560x1334 —— 因为 58% 是从 DLSS 模式键载入的，那条路径只写内部状态、不重建主渲染目标
+        // （`store()` 刻意不重建：`Options.load` 时 `gameRenderer` 还没有）。于是世界层按窗口尺寸
+        // 出图，DLSS 拿到 2560x1334 的输入做 1:1 推理 —— 代价照付、超分收益为零，正是掉帧的来源。
+        //
+        // 这里做自愈：只要附件尺寸与“窗口 × 当前比例”不一致，就排一次主目标重建（限频 2s，最多
+        // 每帧一次判断，零分配）。窗口刚变尺寸的那几帧本来就要重建，这条不会抢在它前面。
+        if (D3D12RenderScale.isEnabled() && !dlaaActive) {
+            val rt0 = minecraft.gameRenderer.mainRenderTarget()
+            val attach = (rt0.colorTextureView as? D3D12GpuTextureView)?.texture() as? D3D12GpuTexture
+            val wantW = D3D12RenderScale.scaled(minecraft.window.width)
+            val wantH = D3D12RenderScale.scaled(minecraft.window.height)
+            // 每 120 帧一行真实尺寸（临时取证，确认世界层确实按比例出图）。
+            if ((++sizeTraceFrames % 120) == 0) {
+                Illusion.LOGGER.info(
+                    "[dxrmc] $PREFIX P211e sizes: window={}x{} world={}x{} want={}x{} percent={} split={}",
+                    minecraft.window.width, minecraft.window.height,
+                    attach?.getWidth(0) ?: -1, attach?.getHeight(0) ?: -1, wantW, wantH,
+                    D3D12RenderScale.percent(), D3D12GUISplit.isActive(),
+                )
+            }
+            if (attach != null && (attach.getWidth(0) != wantW || attach.getHeight(0) != wantH)) {
+                val now = System.nanoTime()
+                if (now - lastScaleRebuildNs > 2_000_000_000L) {
+                    lastScaleRebuildNs = now
+                    Illusion.LOGGER.info(
+                        "[dxrmc] $PREFIX P211d world layer is {}x{} but the DLSS input scale asks for {}x{} "
+                            + "(percent={}); re-creating the main render target",
+                        attach.getWidth(0), attach.getHeight(0), wantW, wantH,
+                        D3D12RenderScale.percent(),
+                    )
+                    // P211e：自愈重建已停用 —— 实测它与窗口 resize 路径互相打架，每 2s 重建主目标一次。
+                }
+            }
+        }
         ensureDataPlane()
         val encoder = D3D12Device.sharedCommandEncoder() ?: return
         snapshotDlssDepth(encoder, minecraft)
@@ -950,6 +1115,10 @@ object DeepLearningSuperSampling {
         } catch (t: Throwable) {
             noteDepthSnapshot("dx12SnapshotDlssDepth threw: $t", true)
             return
+        }
+        p206Counter++
+        if (p206Counter % 120 == 0) {
+            IllusionLogger.debugMessage("[P206] evaluate result=".format(Locale.ROOT) + result.toString())
         }
         when (result) {
             1 -> noteDepthSnapshot("captured this frame's world depth into the native D32 snapshot; "
@@ -1085,6 +1254,16 @@ object DeepLearningSuperSampling {
 
     @JvmStatic
     fun applyIfEnabled() {
+        // P211c（临时取证，用户 m08039“帧数没变化、GPU 满”）：先确认这一帧到底进没进 DLSS 闸门、
+        // 内部比例与挡位各是多少。每会话一行，确认完即删。
+        if (!applyTraceDone) {
+            applyTraceDone = true
+            Illusion.LOGGER.warn(
+                "[dxrmc] $PREFIX P211c enter: enabled={} legacy={} broken={} level={} percent={} tier={}",
+                isEnabled(), legacyBridge, broken, Minecraft.getInstance().level != null,
+                D3D12RenderScale.percent(), quality(),
+            )
+        }
         // 闸门：只看 DLSS 自己的开关（`dxrMcDlss`）。关掉时把数据面与状态复位。
         // 与抗锯齿无关：抗锯齿的模式在本类这一侧只是被锁成 OFF（用户 m05600），两件事各判各的开关。
         if (!isEnabled()) {
@@ -1102,11 +1281,57 @@ object DeepLearningSuperSampling {
         // 标题界面 / 加载界面：没有世界层，谈不上"世界层升采样"。
         val level = minecraft.level ?: return
         modeActive = true
+        // P211d（用户 m08068“超平坦也满占用 140fps”）：世界层必须真的按 DLSS 输入比例出图。
+        //
+        // 实测（2026-10-24）：`D3D12RenderScale.percent()` 已经是 58，但主目标的**附件**仍是
+        // 2560x1334 —— 因为 58% 是从 DLSS 模式键载入的，那条路径只写内部状态、不重建主渲染目标
+        // （`store()` 刻意不重建：`Options.load` 时 `gameRenderer` 还没有）。于是世界层按窗口尺寸
+        // 出图，DLSS 拿到 2560x1334 的输入做 1:1 推理 —— 代价照付、超分收益为零，正是掉帧的来源。
+        //
+        // 这里做自愈：只要附件尺寸与“窗口 × 当前比例”不一致，就排一次主目标重建（限频 2s，最多
+        // 每帧一次判断，零分配）。窗口刚变尺寸的那几帧本来就要重建，这条不会抢在它前面。
+        if (D3D12RenderScale.isEnabled() && !dlaaActive) {
+            val rt0 = minecraft.gameRenderer.mainRenderTarget()
+            val attach = (rt0.colorTextureView as? D3D12GpuTextureView)?.texture() as? D3D12GpuTexture
+            val wantW = D3D12RenderScale.scaled(minecraft.window.width)
+            val wantH = D3D12RenderScale.scaled(minecraft.window.height)
+            // 每 120 帧一行真实尺寸（临时取证，确认世界层确实按比例出图）。
+            if ((++sizeTraceFrames % 120) == 0) {
+                Illusion.LOGGER.info(
+                    "[dxrmc] $PREFIX P211e sizes: window={}x{} world={}x{} want={}x{} percent={} split={}",
+                    minecraft.window.width, minecraft.window.height,
+                    attach?.getWidth(0) ?: -1, attach?.getHeight(0) ?: -1, wantW, wantH,
+                    D3D12RenderScale.percent(), D3D12GUISplit.isActive(),
+                )
+            }
+            if (attach != null && (attach.getWidth(0) != wantW || attach.getHeight(0) != wantH)) {
+                val now = System.nanoTime()
+                if (now - lastScaleRebuildNs > 2_000_000_000L) {
+                    lastScaleRebuildNs = now
+                    Illusion.LOGGER.info(
+                        "[dxrmc] $PREFIX P211d world layer is {}x{} but the DLSS input scale asks for {}x{} "
+                            + "(percent={}); re-creating the main render target",
+                        attach.getWidth(0), attach.getHeight(0), wantW, wantH,
+                        D3D12RenderScale.percent(),
+                    )
+                    // P211e：自愈重建已停用 —— 实测它与窗口 resize 路径互相打架，每 2s 重建主目标一次。
+                }
+            }
+        }
         ensureDataPlane()
         // P108c：速度通道若已自我关闭，趁这一帧把闩锁清掉（每会话一次），下一帧才有运动矢量。
         retryVelocityIfLatched()
         if (!ensureAvailable()) {
             return
+        }
+
+        // P211b：见 [startupScaleBound] 的注释 —— 把“缩放 100%”这种退化配置救回来。只做一次，
+        // 且只在“上采样开着、非 DLAA、当前仍是 100%”时生效（玩家手动设过的比例不动）。
+        if (!startupScaleBound) {
+            startupScaleBound = true
+            if (!dlaaActive && D3D12RenderScale.percent() == 100) {
+                bindRenderScaleToDlss()
+            }
         }
 
         val renderTarget = minecraft.gameRenderer.mainRenderTarget()
@@ -1122,16 +1347,25 @@ object DeepLearningSuperSampling {
         // 拆分目标。DLAA 不需要放大，所以把 `pInOutput` 取成**主目标的颜色纹理**：native 会把它
         // 重定向到我们交接的那张 target 尺寸纹理（`s.externalOutput`，尺寸/格式都等于主目标），
         // 评价完再拷回主目标 —— 随后直接呈现，`prepareForGui` 在这条路径上本来就不做事。
-        val guiOutput = (D3D12GUISplit.targetForFrame()?.colorTextureView as? D3D12GpuTextureView)
+        val guiTarget = D3D12GUISplit.targetForFrame() ?: D3D12GUISplit.ensureTargetForDlss()
+        val guiOutput = (guiTarget?.colorTextureView as? D3D12GpuTextureView)
             ?.texture() as? D3D12GpuTexture
+        if (guiOutput == null) {
+            noteState("guiTarget=" + guiTarget + " view=" + guiTarget?.colorTextureView?.javaClass?.simpleName
+                + " dlaa=" + dlaaActive)
+        }
         val output = guiOutput ?: if (dlaaActive) {
             (minecraft.gameRenderer.mainRenderTarget().colorTextureView as? D3D12GpuTextureView)
                 ?.texture() as? D3D12GpuTexture
         } else {
             null
         } ?: return noteState(
-            "no window-sized output target (dxrMcRenderScale must not be 100% so that the world "
-                + "layer and the presented target are two different textures)")
+            "no window-sized output target: percent=" + D3D12RenderScale.percent()
+                + " scaleEnabled=" + D3D12RenderScale.isEnabled()
+                + " mainTarget=" + renderTarget.width + "x" + renderTarget.height
+                + " window=" + minecraft.window.width + "x" + minecraft.window.height
+                + " (dxrMcRenderScale must not be 100% so that the world layer and the presented "
+                + "target are two different textures)")
         val encoder = D3D12Device.sharedCommandEncoder() ?: return noteState("no shared command encoder")
 
         val renderWidth = color.getWidth(0)
@@ -1141,6 +1375,19 @@ object DeepLearningSuperSampling {
         if (renderWidth <= 0 || renderHeight <= 0 || targetWidth <= 0 || targetHeight <= 0) {
             return noteState("degenerate sizes: render ${renderWidth}x${renderHeight}, "
                 + "target ${targetWidth}x${targetHeight}")
+        }
+        // 临时取证（2026-10-24，用户 m07719“DLSS 开启后 GPU 满、帧数反而低”）：DLSS 真正拿到的
+        // 输入/输出尺寸。两者相等就说明缩放没生效、NGX 在做 1:1（白付代价），也是这次掉帧最可能的解释。
+        if (dimensionLogsLeft > 0) {
+            dimensionLogsLeft--
+            Illusion.LOGGER.info(
+                "[dxrmc] $PREFIX P212 sizes: color {}x{} target {}x{} percent={} scaleEnabled={} "
+                    + "mainTarget={}x{} window={}x{}",
+                renderWidth, renderHeight, targetWidth, targetHeight,
+                D3D12RenderScale.percent(), D3D12RenderScale.isEnabled(),
+                renderTarget.width, renderTarget.height,
+                minecraft.window.width, minecraft.window.height,
+            )
         }
 
         // P108z：把 JVM 建的 target 尺寸 UAV 纹理交给 native 当 DLSS 输出 —— **默认路径**。
@@ -1185,6 +1432,16 @@ object DeepLearningSuperSampling {
         val window = minecraft.window
         val resetReason = resetReason(level, renderWidth, renderHeight, targetWidth, targetHeight,
             scalePercent, window.width, window.height)
+        p205Counter++
+        if (p205Counter % 120 == 0) {
+            IllusionLogger.debugMessage(
+                ("[P205] render=%dx%d target=%dx%d window=%dx%d scale=%d%% reset=%s "
+                    + "jitter=(%.4f, %.4f) frameNs=%d once=%s")
+                    .format(Locale.ROOT, renderWidth, renderHeight, targetWidth, targetHeight,
+                        window.width, window.height, scalePercent, resetReason ?: "-",
+                        jitter[0], jitter[1], minecraft.frameTimeNs, evaluatedOnce.toString()),
+            )
+        }
         val packet = try {
             packet()
         } catch (t: Throwable) {
@@ -1206,6 +1463,10 @@ object DeepLearningSuperSampling {
             encoder.recordDlssEvaluate(packet)
         } catch (t: Throwable) {
             return disable("dx12EvaluateDlss threw: $t")
+        }
+        p206Counter++
+        if (p206Counter % 120 == 0) {
+            IllusionLogger.debugMessage("[P206] evaluate result=".format(Locale.ROOT) + result.toString())
         }
         when (result) {
             // 1 = 这一帧真的评价了：结果已经写进 pInOutput，本帧不能再做世界层 blit。
@@ -1447,32 +1708,22 @@ object DeepLearningSuperSampling {
                 + "the unsharpenened DLSS output")
         }
     }
-    /**
-     * P199 诊断：DLSS/DLAA 抖动符号 A/B（F7 现场循环）。
-     *
-     * <p>0 = `(-Jx, +Jy)`（P154 起的写法）、1 = `(+Jx, -Jy)`、2 = `(-Jx, -Jy)`、3 = `(+Jx, +Jy)`。
-     * 静止场景下逐档按 F7，哪一档不晃就是对的。定下来后删掉开关与按键，只留选中的那一档。
-     */
-    @Volatile
-    private var jitterSignMode: Int = 0
 
     /** P203 诊断：jitter 上报日志的节流计数。 */
     @Volatile
     private var p203Counter: Int = 0
+    private var p205Counter: Int = 0
+    private var p206Counter: Int = 0
 
-    @JvmStatic
-    fun cycleJitterSignMode(): Int {
-        jitterSignMode = (jitterSignMode + 1) and 3
-        return jitterSignMode
-    }
-
-    /** 把 Halton 抖动换算成上报给 DLSS/DLAA 的像素空间值，见 [jitterSignMode]。 */
-    private fun reportedJitter(jx: Float, jy: Float): FloatArray = when (jitterSignMode) {
-        1 -> floatArrayOf(jx, -jy)
-        2 -> floatArrayOf(-jx, -jy)
-        3 -> floatArrayOf(jx, jy)
-        else -> floatArrayOf(-jx, jy)
-    }
+    /**
+     * 把 Halton 抖动换算成上报给 DLSS/DLAA 的像素空间值。
+     *
+     * <p>**P211n（用户 m08341，实机 A/B 定案）**：`(+Jx, -Jy)` 是唯一正确的一档 —— 静止场景下
+     * 画面最清晰且完全不抖；`(-Jx, +Jy)`（P154 起的旧写法）、两轴同负、两轴同正都会持续轻晃。
+     * 此前那次“四种符号都不行”的 A/B 是在 DLSS 实际没跑起来时做的（P210 的 `kLeakArm` 还在跳过
+     * `slSetTagForFrame`），结论作废。
+     */
+    private fun reportedJitter(jx: Float, jy: Float): FloatArray = floatArrayOf(jx, -jy)
 
     private fun pushDlssConstants(renderWidth: Int, renderHeight: Int, targetWidth: Int,
         targetHeight: Int, jitterX: Float, jitterY: Float, reset: Boolean) {
@@ -1534,14 +1785,15 @@ object DeepLearningSuperSampling {
             p203Counter++
             if (p203Counter % 120 == 0) {
                 val injected = D3D12Temporal.injectedJitter()
-                IllusionLogger.warnMessage(
-                    "[P203] jitter current=({}, {}) injected=({}, {}) reported=({}, {}) mismatch={}"
+                // String.format 只认 %s/%f —— 旧写法用了 `{}`，日志里只会打出字面量 `{}`（P203 实测）。
+                IllusionLogger.debugMessage(
+                    "[P203] jitter current=(%.4f, %.4f) injected=(%.4f, %.4f) reported=(%.4f, %.4f) mismatch=%s"
                         .format(
                             Locale.ROOT,
                             jitterX, jitterY,
                             injected?.get(0) ?: Double.NaN, injected?.get(1) ?: Double.NaN,
                             slJitterX, slJitterY,
-                            D3D12Temporal.injectedJitterMismatch(),
+                            D3D12Temporal.injectedJitterMismatch().toString(),
                         ),
                 )
             }

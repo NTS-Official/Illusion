@@ -3,8 +3,8 @@ package dev.nts.expdxr.d3d12.backend
 import com.mojang.blaze3d.platform.InputConstants
 import dev.nts.expdxr.Illusion.Companion.MODID
 import dev.nts.expdxr.IllusionConfig
-import dev.nts.expdxr.misc.D3D12Settings
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
+import dev.nts.expdxr.misc.D3D12Settings
 import net.minecraft.ChatFormatting
 import net.minecraft.client.KeyMapping
 import net.minecraft.client.Minecraft
@@ -24,13 +24,13 @@ import java.util.Locale
 /**
  * PIX timing capture driven by a key press (`[debug] pixTimingCapture`, default F9).
  *
- * PIX's UI cannot write this file for us: its continuous ("counters") recording keeps everything
+ * <p>PIX's UI cannot write this file for us: its continuous ("counters") recording keeps everything
  * inside the PIX session until the user saves it, and the timing capture that PIX itself starts
  * writes to `%TEMP%` under a name it picks. A capture that has to land under the game directory,
  * with a name and a length the player chose, has to be started from inside the process -
  * PIXBeginCapture/PIXEndCapture, which the native layer calls on threads of its own.
  *
- * Hence the key binding instead of an automatic capture: the player decides when the interesting
+ * <p>Hence the key binding instead of an automatic capture: the player decides when the interesting
  * content is on screen, every press starts a fresh file, pressing again stops early, and the frame
  * budget is read from the config at the moment of the press, so changing it does not need a
  * restart. A capture is only started while `[debug] pixTimingCapture` is on, so the feature stays
@@ -49,18 +49,6 @@ internal object D3D12PixCaptureController {
         KEY_NAME,
         InputConstants.Type.KEYBOARD,
         InputConstants.KEY_F9,
-        CATEGORY,
-    )
-
-    /**
-     * P199 诊断键：循环 DLSS/DLAA 的抖动符号档位（0..3），用来现场 A/B 静止抖动。
-     *
-     * <p>临时按键 —— 符号定下来后连同 [DeepLearningSuperSampling.cycleJitterSignMode] 一起删。
-     */
-    private val JITTER_KEY = KeyMapping(
-        "key.dxr_mc.jitter_sign",
-        InputConstants.Type.KEYBOARD,
-        InputConstants.KEY_F7,
         CATEGORY,
     )
 
@@ -107,7 +95,6 @@ internal object D3D12PixCaptureController {
         modEventBus.addListener<RegisterKeyMappingsEvent> { event ->
             event.registerCategory(CATEGORY)
             event.register(KEY)
-            event.register(JITTER_KEY)
         }
         NeoForge.EVENT_BUS.addListener<ClientTickEvent.Post> { tick() }
     }
@@ -115,12 +102,6 @@ internal object D3D12PixCaptureController {
     private fun tick() {
         while (KEY.consumeClick()) {
             toggle()
-        }
-        while (JITTER_KEY.consumeClick()) {
-            val mode = dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling.cycleJitterSignMode()
-            val text = "[dxrmc] DLSS jitter sign mode=$mode"
-            LOGGER.info(text)
-            Minecraft.getInstance().player?.sendSystemMessage(Component.literal(text))
         }
         if (recording && ++frames >= frameLimit) {
             stop(StopCause.LIMIT)
@@ -208,7 +189,6 @@ internal object D3D12PixCaptureController {
             }
 
             0 -> LOGGER.warn("[dxrmc] PIX capture: stop requested but nothing was recording")
-
             else -> {
                 LOGGER.error("[dxrmc] PIX capture: stop FAILED (HRESULT 0x%08X)".format(Locale.ROOT, status))
                 postHresult(status)
@@ -297,7 +277,7 @@ internal object D3D12PixCaptureController {
      *
      * <p>The number comes from the directory, never from a counter kept in this session: only the
      * directory knows what earlier launches wrote, and reusing a number would overwrite a capture
-     * that is still wanted. Every `dxrmc-capture-*` entry counts, not just the `.wpix` — a capture
+     * that is still wanted. Every `dxrmc-capture-*` entry counts, not just the `.wpix` - a capture
      * that PIX never finished writing leaves `-wal`/`-shm` companions behind, and those belong to
      * that number too. So the next file is always one past the highest index seen on disk.
      */
