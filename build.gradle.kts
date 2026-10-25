@@ -187,9 +187,10 @@ neoForge {
             // DXRMC：把选定的环境变量显式转给 runClient 的 JVM。Loom 的 run config **不继承**
             // shell 环境（Gradle 守护进程持有它自己启动时的环境），所以 `$env:X=…` 常常到不了
             // JavaExec 子进程 —— `-P` 走 Gradle 命令行则一定生效。
-            // `-Pdxrmc.dxcDir=<空目录>` 可用来验证"三站都找不到 DXC"时的降级路径（P67）。
-            // `-Pdxrmc.dxcDisable=1` 让 native 的 DXC 探测直接返回空（三站全不查），
-            // 用来实机验证"找不到 DXC 时回退 D3DCompile、不变成砖"这条路径（P67）。
+            // `-Pdxrmc.dxcDir=<空目录>` 可用来验证"三站都找不到 DXC"这条路径（P67）。
+            // `-Pdxrmc.dxcDisable=1` 让 native 的 DXC 探测直接返回空（三站全不查）。
+            // 2026-10-25 起（P216）没有 DXC 不再回退 D3DCompile/SM 5.1：图形管线直接报错，
+            // 所以这两个旋钮现在的用途是"验证失败路径本身"。
             if (providers.gradleProperty("dxrmc.dxcDisable").isPresent) {
                 environment("MCDR_DXC_DISABLE", providers.gradleProperty("dxrmc.dxcDisable").get())
             }
@@ -406,13 +407,19 @@ sourceSets.named("main") {
 //
 //   vendorJarLibs  -- REDISTRIBUTABLE and SHIPPED: these ride inside the released
 //                     mod JAR as resources and are extracted to `dxrmc/` at startup
-//                     by MCDR_ABI.extractVendorResources(). Intel's Simplified
-//                     Software License permits binary redistribution provided the
-//                     copyright notice and terms travel with the distribution, so
-//                     `LICENSE-xess.txt` is packed alongside the binaries.
-//                     **XeSS only.** The user asked for the FSR (AMD FidelityFX)
-//                     runtimes to be absent from release builds (2026-10-20), and
-//                     NVIDIA's RTX SDKs licence forbids redistribution outright.
+//                     by MCDR_ABI.extractVendorResources(). Each entry ships its own
+//                     licence text as `LICENSE-<licenseName>.txt`:
+//                       * XeSS      -- Intel Simplified Software License (permits
+//                                      binary redistribution with the notice);
+//                       * D3D12Core -- Microsoft DirectX / Agility SDK terms;
+//                       * DXC       -- LLVM/NCSA (vcpkg `directx-dxc` copyright).
+//                     The user asked for the FSR (AMD FidelityFX) runtimes to be
+//                     absent from release builds (2026-10-20), and NVIDIA's RTX SDKs
+//                     licence forbids redistribution outright.
+//                     P216 (2026-10-25): D3D12Core.dll + dxcompiler.dll + dxil.dll are
+//                     now mandatory in the JAR -- the graphics pipeline hard-requires
+//                     SM 6.9 with no SM 5.1 fallback, and neither the Agility core nor
+//                     DXC can be assumed to exist on a player's machine.
 //
 //   vendorDevLibs  -- DEVELOPMENT ONLY, never packed. `copyVendorDlls` stages them
 //                     into `run/dxrmc/` so a dev client can exercise every vendor.
@@ -423,7 +430,15 @@ sourceSets.named("main") {
 //                     binaries are redistributable, but the release build no longer
 //                     ships them; when they are missing the FSR probe reports
 //                     itself unavailable and the renderer falls back.
-data class VendorJarLib(val dir: File, val files: List<String>, val license: File?)
+data class VendorJarLib(val dir: File, val files: List<String>, val license: File?, val licenseName: String)
+
+// P216：图形管线硬要求 SM 6.9（不再有 D3DCompile/SM 5.1 兜底），而 6.9 只有 **Agility SDK 619
+// 的 core** 才会报（inbox D3D12Core 最高 6.8）。DXC 同理：`dxcompiler.dll` 必须能编 6_9。
+// 所以这三个 DLL 从 P216 起**必须随发行包走**，否则用户机上图形管线一条都建不出来。
+// 来源是 native 的 vcpkg manifest（`MCDR\vcpkg_installed\x64-windows\`），与开发目录里那份同一版本；
+// 许可证文件分别来自 vcpkg 的 `share\<port>\copyright`（Microsoft DirectX / LLVM-NCSA）。
+val vcpkgBinDir = file("../MCDR/vcpkg_installed/x64-windows/bin")
+val vcpkgShareDir = file("../MCDR/vcpkg_installed/x64-windows/share")
 
 val vendorJarLibs = listOf(
     // XeSS 运行时仍在子模块里（上游 intel/xess 的 bin/ 自带这些 DLL，Intel 许可证允许再分发）。
@@ -431,6 +446,23 @@ val vendorJarLibs = listOf(
         dir = file("../MCDR/external/xess/bin"),
         files = listOf("libxess.dll", "libxess_fg.dll", "libxell.dll"),
         license = file("../MCDR/external/xess/LICENSE.txt"),
+        licenseName = "xess",
+    ),
+    // P216：SM 6.9 的运行时来源。`D3D12Core.dll` 必须与 MCDR.dll 同目录（native 的
+    // `applyAgilitySdk()` 会 CreateDeviceFactory + ApplyToGlobalState 把它换成进程全局 core）。
+    VendorJarLib(
+        dir = vcpkgBinDir,
+        files = listOf("D3D12Core.dll"),
+        license = File(vcpkgShareDir, "directx12-agility/copyright"),
+        licenseName = "directx12-agility",
+    ),
+    // P216：HLSL -> DXIL 的唯一编译器（D3DCompile 停在 SM 5.1，已被彻底删除）。
+    // `dxil.dll` 是 dxcompiler 的签名/校验器，必须与它同目录，缺一个 DXC 就加载失败。
+    VendorJarLib(
+        dir = vcpkgBinDir,
+        files = listOf("dxcompiler.dll", "dxil.dll"),
+        license = File(vcpkgShareDir, "directx-dxc/copyright"),
+        licenseName = "directx-dxc",
     ),
 )
 
@@ -442,15 +474,22 @@ data class VendorDevLib(val dir: File, val pattern: String)
 val vendorDevLibs = listOf(
     // DLSS 运行时在 MCDR\lib\dlss\（上游 NVIDIA/DLSS 仓库不含运行时 DLL，且不可再分发）。
     VendorDevLib(dir = file("../MCDR/lib/dlss"), pattern = "nvngx_*.dll"),
-    // FidelityFX 运行时在 MCDR\lib\fsr\（git 不记录，见 MCDR\.gitignore 的 /lib/）。
+    // FidelityFX 运行时在 MCDR\lib\fidelityfx\（git 不记录，见 MCDR\.gitignore 的 /lib/；
+    // 由 MCDR\scripts\sync-external.ps1 的第 4 步从 external\fidelityfx\Kits\FidelityFX\signedbin
+    // 同步，目录名与 lib\dlss、lib\xess、lib\streamline 保持一致，旧名 lib\fsr 已不存在）。
     // 发行 JAR 不再包含它，开发目录仍然要有，否则 dev 侧无法试 FSR。
-    VendorDevLib(dir = file("../MCDR/lib/fsr"), pattern = "amd_fidelityfx_*.dll"),
+    VendorDevLib(dir = file("../MCDR/lib/fidelityfx"), pattern = "amd_fidelityfx_*.dll"),
     // P213：Streamline 的插件与拦截面。sl.interposer 会按 `<module 目录>\sl.<feature>.dll`
     // 去找插件，所以它们必须和 MCDR.dll 并排落在 run/dxrmc/ 下；缺 sl.dlss_g.dll 时
     // DLSS-G 只会“支持但加载不了”，P213 的支持性探针就是用来抓这个的。
     VendorDevLib(dir = file("../MCDR/lib/streamline"), pattern = "sl.*.dll"),
     // Reflex 的低延迟后端（sl.reflex.dll 会去加载它）。
     VendorDevLib(dir = file("../MCDR/lib/streamline"), pattern = "NvLowLatencyVk.dll"),
+    // NVIDIA NRC（神经辐照缓存）运行期。NRC_D3D12.dll 在加载期就要 cudart64_13.dll /
+    // nvrtc64_130_0.dll / nvrtc-builtins64_134.dll（NVRTC 在 Configure 时 JIT 网络），
+    // 四个必须与 MCDR.dll 同目录。由 `MCDR\scripts\sync-external.ps1` 从
+    // external\nrc\Bin\x64 搬到 MCDR\lib\nrc\（git 不记录）。dev-only：发行版让用户自取。
+    VendorDevLib(dir = file("../MCDR/lib/nrc"), pattern = "*.dll"),
 )
 
 
@@ -477,14 +516,16 @@ val vendorDevLibs = listOf(
 // `srcDir(taskProvider)` harvests exactly what the task declares, so a
 // manifest-only declaration silently shipped a manifest with no DLLs next to it.
 //
-// Like copyNative this NEVER fails the build: `MCDR\external\` is populated by
-// hand (the SDK archives are in neither repo), and a missing one just means the
-// matching SDK reports itself unavailable at run time.
+// Like copyNative this NEVER fails the build: a missing source just means the matching
+// runtime is absent from the JAR. But note the severity changed with P216: a missing
+// `MCDR\external\` (XeSS) only disables upscaling, while a missing
+// `MCDR\vcpkg_installed\` (D3D12Core / DXC) makes the D3D12 backend unable to build a
+// single graphics pipeline -- the warning below is then a release blocker, not a notice.
 val vendorJarRoot = layout.buildDirectory.dir("generated/vendorJar")
 val vendorJarDir = vendorJarRoot.map { it.dir("vendor") }
 val stageVendorLibs = tasks.register("stageVendorLibs") {
     group = "build"
-    description = "Stages the redistributable (XeSS) SDK runtime + licence as mod JAR resources."
+    description = "Stages the redistributable SDK runtimes (XeSS, D3D12Core, DXC) + licences as mod JAR resources."
     // Captured by value below: a `doLast` lambda that reads a script-level `val`
     // captures the script instance, and the configuration cache refuses to
     // serialise that ("cannot serialize Gradle script object references").
@@ -523,7 +564,7 @@ val stageVendorLibs = tasks.register("stageVendorLibs") {
                 }
                 val lic = entry.license
                 if (lic != null && lic.isFile) {
-                    val name = "LICENSE-" + (srcDir.parentFile?.name ?: "") + ".txt"
+                    val name = "LICENSE-${entry.licenseName}.txt"
                     val dst = File(root, name)
                     if (!dst.isFile || dst.length() != lic.length()) {
                         lic.copyTo(dst, overwrite = true)
@@ -551,7 +592,8 @@ val stageVendorLibs = tasks.register("stageVendorLibs") {
                 "($staged copied, rest already current)")
             if (missing.isNotEmpty()) {
                 logger.warn("[stageVendorLibs] not staged (missing source): ${missing.joinToString(", ")}. " +
-                    "The matching SDK will report itself unavailable at run time.")
+                    "XeSS would only disable upscaling, but a missing D3D12Core/dxcompiler/dxil means " +
+                    "the D3D12 backend cannot build any graphics pipeline (SM 6.9 is mandatory, P216).")
             }
         } catch (t: Throwable) {
             logger.warn("[stageVendorLibs] skipped: $t")
