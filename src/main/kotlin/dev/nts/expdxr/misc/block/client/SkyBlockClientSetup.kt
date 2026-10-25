@@ -26,7 +26,9 @@ object SkyBlockClientSetup {
 
     fun register(modEventBus: IEventBus) {
         modEventBus.addListener<RegisterRenderPipelinesEvent> { event ->
-            event.registerPipeline(SkyBlockPipeline.PIPELINE)
+            // 可选注册：天空方块是装饰性内容，着色器/构建产物出问题时不该让整局崩掉。
+            // 必需管线的失败会抛 `Failed to load required shader programs` 直接停掉渲染线程（黑屏）。
+            event.registerOptionalPipeline(SkyBlockPipeline.PIPELINE)
         }
         modEventBus.addListener<EntityRenderersEvent.RegisterRenderers> { event ->
             event.registerBlockEntityRenderer<SkyBlockEntity, SkyBlockRenderState>(

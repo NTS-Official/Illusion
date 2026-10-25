@@ -25,6 +25,7 @@ import dev.nts.expdxr.d3d12.render.core.D3D12GpuQueryPool
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuTextureView
 import dev.nts.expdxr.d3d12.render.core.D3D12TransientMemory
 import dev.nts.expdxr.d3d12.render.shader.D3D12GpuSampler
+import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12VariableShadingRate
 import dev.nts.expdxr.misc.IllusionLogger
 import org.lwjgl.PointerBuffer
 import org.slf4j.Logger
@@ -214,8 +215,17 @@ class D3D12RenderPassBackend(
                 "Pipeline ${pipeline.javaClass.name} is not a D3D12 compiled pipeline")
         // 注：Java 里还有 `compiled == null` 分支；D3D12Device.getOrCompilePipeline 的
         // Kotlin 声明是非空返回，该分支已不可达，故此处只保留 isValid 校验。
-        // P76a 增量 2：速度改走帧末独立 pass（见 D3D12Velocity），pass 不再需要变体管线。
-        val compiled = if (this.flipY) device.getOrCompilePipeline(base.info(), true) else base
+        // P228b：**非 flipY 分支以前直接把 frontend 递进来的对象当结果用**，可前端自己的缓存里
+        // 留的是**上一次资源重载前**编译好的 `D3D12CompiledRenderPipeline` —— 重载时 vanilla 会
+        // close 掉它们（`handle` 置 0 ⇒ `isValid()==false`），于是 `setPipeline` 抛
+        // "Pipeline … is not valid"（开/关「高对比度」切换第二次必崩，且没有任何 COMPILE FAILED 日志，
+        // 因为根本没编译）。P228a 只补了 device 侧缓存，走不到这条路径上。
+        // 现在：flipY 变体、或递来的对象已失效，都回到 device 按 `info()` 重取（必要时重编）。
+        val compiled = if (this.flipY || !base.isValid()) {
+            device.getOrCompilePipeline(base.info(), this.flipY)
+        } else {
+            base
+        }
         if (!compiled.isValid()) {
             throw IllegalStateException(
                 "Pipeline ${base.info().location} is not valid (shader compilation failed)")
@@ -558,10 +568,26 @@ class D3D12RenderPassBackend(
     override fun drawIndexed(indexCount: Int, instanceCount: Int, firstIndex: Int,
         vertexOffset: Int, firstInstance: Int) {
         val profT0 = if (MCDR_ABI.PROF) System.nanoTime() else 0L
+        // P230：线管线有三角形变体 ⇒ 切过去。同一份索引（每段 4 顶点 6 索引）在 TRIANGLES
+        // 拓扑下摊成两个三角形，拼出 `LineWidth` 像素宽的带子；D3D12 的 LINELIST 恒为 1px。
+        val lineQuad = this.pipeline?.takeIf { it.hasLineQuadVariant() }
+        val lineQuadDepth = lineQuad?.let { it.info().depthStencilState != null } ?: false
+        if (lineQuad != null) {
+            if (!MCDR_ABI.D3D12SetPipeline(this.ctx, lineQuad.lineQuadPipeline(), lineQuadDepth)) {
+                throw IllegalStateException("dx12SetPipeline (line quad variant) failed")
+            }
+        }
         this.pushDescriptors()
         if (!MCDR_ABI.D3D12DrawIndexed(this.ctx, indexCount, instanceCount,
             firstIndex, vertexOffset, firstInstance)) {
             throw IllegalStateException("dx12DrawIndexed failed")
+        }
+        if (lineQuad != null) {
+            // 恢复本 pass 的常规管线，后续 draw 不受影响（描述符表随 PSO 变化需要重推）。
+            if (!MCDR_ABI.D3D12SetPipeline(this.ctx, lineQuad.handle(), lineQuadDepth)) {
+                throw IllegalStateException("dx12SetPipeline (restore after line quad) failed")
+            }
+            this.pushDescriptors()
         }
         if (profT0 != 0L) {
             gProfDrawIndexedCalls++
@@ -602,7 +628,15 @@ class D3D12RenderPassBackend(
         // 半透明能这么做的前提是 `GameRendererTransparencyMixin` 把 improved transparency
         // （Wavelet OIT）强制打开 —— OIT 顺序无关，mesh 的线程组顺序才无所谓。
         if (isTerrain(location)) {
-            if (!tryMeshletDraw(commands, drawCount)) {
+            // P232：着色率的**唯一作用域**。整批地形（meshlet 派发或 MDI）包在一次
+            // RSSetShadingRate(粗) … finally RSSetShadingRate(1X1) 之间 —— 白名单在
+            // D3D12VariableShadingRate.terrainRateFor 里，只有实心地形能变粗，cutout 的镂空
+            // 与 OIT 半透明保持 1X1。档位 OFF 时这里零 native 调用。
+            var drawn = false
+            D3D12VariableShadingRate.scope(this.ctx, location) {
+                drawn = tryMeshletDraw(commands, drawCount)
+            }
+            if (!drawn) {
                 meshTerrainMissing("$location draws=$drawCount")
             }
             return
@@ -682,6 +716,13 @@ class D3D12RenderPassBackend(
         val globalsBytes = ByteBuffer.allocate(256).order(ByteOrder.LITTLE_ENDIAN)
         globalsBytes.putInt(tables.meshletCount)
         globalsBytes.putInt(if (cullOn) 1 else 0)
+        // P233：b8 的 gVrsBand（近带 / 中带 / 保留 / 启用位）。启用位=0 时 MS 恒写 1X1，
+        // 也就是"这个批次不做逐图元降速"，与档位 OFF 等价。
+        val band = D3D12VariableShadingRate.msBand()
+        globalsBytes.putFloat(band[0])
+        globalsBytes.putFloat(band[1])
+        globalsBytes.putFloat(band[2])
+        globalsBytes.putFloat(band[3])
         globalsBytes.flip()
         val globalsSlice = this.transientMemory.uploadStaging(
             mutableListOf(globalsBytes), 256L, GpuBuffer.USAGE_COPY_SRC)

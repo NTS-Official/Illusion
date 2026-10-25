@@ -7,6 +7,7 @@ import com.mojang.renderpearl.api.textures.GpuTextureView
 import dev.nts.expdxr.Illusion
 import dev.nts.expdxr.d3d12.render.adapter.D3D12Device
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale
+import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12VariableShadingRate
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuTexture
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuTextureView
 import net.minecraft.client.Minecraft
@@ -283,6 +284,9 @@ object D3D12GUISplit {
         val destination = (gui.colorTextureView as? D3D12GpuTextureView)?.texture() as? D3D12GpuTexture
             ?: return degrade("GUI target is not a D3D12 texture")
         val encoder = D3D12Device.sharedCommandEncoder() ?: return degrade("no shared command encoder")
+        // P236：GUI 与世界上半部分共用同一条命令列表，这里做一次防御性复位 ——
+        // 即使某个异常路径跳过了 `scope()` 的 finally，文字与 UI 也不会被粗着色。
+        D3D12VariableShadingRate.hardReset(encoder.nativeCtx())
         // 世界层搬进 GUI 目标：小于 100% 是放大、大于 100% 是缩小，都是线性采样。
         // 只有 native 真的接下这一笔，最终呈现才改走 GUI 目标；没接下来就只是这一帧界面不见，
         // 界面本身依然画在自己的窗口尺寸目标里，所以不会触发 scissor 越界。
@@ -350,3 +354,4 @@ object D3D12GUISplit {
         return target?.colorTextureView ?: fallback
     }
 }
+

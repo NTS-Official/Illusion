@@ -55,6 +55,30 @@ class D3D12CompiledRenderPipeline(
     /** P217：同会话 A/B 不再换 PSO，改由 globals 的 `gCullEnabled` 放行（见 AS 生成器）。 */
     fun meshletPipeline(): Long = this.meshletPso
 
+    /**
+     * P230：线管线的 **TRIANGLES 拓扑变体** PSO（同一套着色器、同一份顶点/索引，只换
+     * `PrimitiveTopologyType`）。
+     *
+     * 为什么需要：D3D12 没有宽线（`D3D12_RASTERIZER_DESC` 无 line width），`LINELIST` 恒为
+     * 1px；而 MC 的 Vulkan 后端用管线的 `lineWidth` 画宽线。`core/rendertype_lines.vsh` 只是把
+     * 端点沿屏幕横移 `LineWidth/2`，所以在 D3D12 上退化成一细边 + 两端小横杠（转角像毛线团）。
+     * 每段的 4 个顶点配 6 个索引（`RenderSystem.sharedSequentialLines`：端帽/端帽/长边）恰好
+     * 可以摊成两个三角形、拼成一条 `LineWidth` 像素宽的带子 —— 只需换成三角形 PSO。
+     */
+    private var lineQuadPso: Long = 0L
+
+    /** 挂上三角形变体（重复挂会先释放旧的）。 */
+    fun attachLineQuadVariant(pso: Long) {
+        if (this.lineQuadPso != 0L && this.lineQuadPso != pso) {
+            MCDR_ABI.D3D12DestroyPipeline(this.lineQuadPso)
+        }
+        this.lineQuadPso = pso
+    }
+
+    fun hasLineQuadVariant(): Boolean = this.lineQuadPso != 0L
+
+    fun lineQuadPipeline(): Long = this.lineQuadPso
+
 
     fun info(): RenderPipeline {
         return this.info

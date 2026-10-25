@@ -208,6 +208,9 @@ object IllusionConfig {
     /** `[debug] selfTestMesh` — run the mesh-shader self-test (compiles HLSL with DXC). */
     val SELF_TEST_MESH: ModConfigSpec.BooleanValue
 
+    /** `[debug] selfTestCompute` — run the compute self-test (P234: root UAV + root constants). */
+    val SELF_TEST_COMPUTE: ModConfigSpec.BooleanValue
+
     /** `[debug] failDevice` — make device creation fail on purpose (P73 policy testing). */
     val FAIL_DEVICE: ModConfigSpec.BooleanValue
 
@@ -225,6 +228,21 @@ object IllusionConfig {
 
     /** `[mesh] terrainCull` — cull terrain meshlets with the amplification shader (P217). */
     val MESH_TERRAIN_CULL: ModConfigSpec.BooleanValue
+
+    /** `[vrs] terrainNearBlocks` — terrain closer than this always shades at 1X1 (P233). */
+    val VRS_TERRAIN_NEAR_BLOCKS: ModConfigSpec.DoubleValue
+
+    /** `[vrs] terrainFarBlocks` — distance where the farthest shading-rate band starts (P233). */
+    val VRS_TERRAIN_FAR_BLOCKS: ModConfigSpec.DoubleValue
+
+    /** `[vrs] sri` — generate the Tier 2 shading-rate image every frame (P235/P237). */
+    val VRS_SRI: ModConfigSpec.BooleanValue
+
+    /** `[vrs] sriEdgePermille` — depth contrast that keeps a tile at 1X1, in per-mille. */
+    val VRS_SRI_EDGE_PERMILLE: ModConfigSpec.IntValue
+
+    /** `[vrs] sriMotionPixels` — screen-space motion above which a tile stays 1X1. */
+    val VRS_SRI_MOTION_PIXELS: ModConfigSpec.IntValue
 
     init {
         BUILDER.comment(
@@ -447,6 +465,62 @@ object IllusionConfig {
         BUILDER.pop()
 
         BUILDER.comment(
+            "Distance bands for the per-primitive terrain shading rate (P233).",
+            "The mesh shader gives every terrain meshlet a shading rate taken from its distance:",
+            "closer than terrainNearBlocks stays 1X1, the band below terrainFarBlocks shades 1X2,",
+            "and everything beyond it shades 2X2.",
+            "These are read on every terrain batch, so editing them while playing applies on the",
+            "next frame; the shading-rate option itself still has to be AUTO."
+        ).translation("dxr_mc.configuration.vrs").push("vrs")
+
+        VRS_TERRAIN_NEAR_BLOCKS = BUILDER
+            .comment(
+                "Terrain closer than this keeps full 1X1 shading, in blocks.",
+                "Lowering it moves the coarser band towards the camera: more saved pixels, but the",
+                "band edge lands on geometry the player is looking at."
+            )
+            .translation("dxr_mc.configuration.vrs.terrain_near_blocks")
+            .defineInRange("terrainNearBlocks", 32.0, 0.0, 512.0)
+
+        VRS_TERRAIN_FAR_BLOCKS = BUILDER
+            .comment(
+                "Distance where the farthest band starts, in blocks.",
+                "Keep it well beyond the near band. Roughly half the view distance keeps the 2X2",
+                "edge off the horizon line, which is where it is easiest to notice."
+            )
+            .translation("dxr_mc.configuration.vrs.terrain_far_blocks")
+            .defineInRange("terrainFarBlocks", 96.0, 0.0, 2048.0)
+
+        VRS_SRI = BUILDER
+            .comment(
+                "P235/P237: generate the Tier 2 screen-space shading rate image every frame.",
+                "The image is what keeps the horizon stable: it judges every 16x16 tile from the",
+                "previous frame's depth (plus motion vectors when the velocity pass exists) and",
+                "only lets the terrain go coarser where the tile is flat. With this off, the",
+                "per-primitive distance bands above are all that decide."
+            )
+            .translation("dxr_mc.configuration.vrs.sri")
+            .define("sri", true)
+
+        VRS_SRI_EDGE_PERMILLE = BUILDER
+            .comment(
+                "Depth contrast, in per-mille, that marks a tile as an edge and keeps it 1X1.",
+                "Lower means more tiles count as edges (safer, less saving); 1000 disables it."
+            )
+            .translation("dxr_mc.configuration.vrs.sriEdgePermille")
+            .defineInRange("sriEdgePermille", 50, 0, 1000)
+
+        VRS_SRI_MOTION_PIXELS = BUILDER
+            .comment(
+                "Screen-space motion, in pixels per frame, above which a tile stays 1X1.",
+                "Only consulted when the velocity pass runs (SMAA/TAA or DLSS enabled)."
+            )
+            .translation("dxr_mc.configuration.vrs.sriMotionPixels")
+            .defineInRange("sriMotionPixels", 8, 0, 256)
+
+        BUILDER.pop()
+
+        BUILDER.comment(
             "Diagnostics that have to be decided before the renderer starts.",
             "These are read once, when the config loads; nothing here applies mid-session."
         ).translation("dxr_mc.configuration.debug").push("debug")
@@ -587,6 +661,17 @@ object IllusionConfig {
             .gameRestart()
             .define("selfTestMesh", false)
 
+        SELF_TEST_COMPUTE = BUILDER
+            .comment(
+                "Run the compute self-test (P234: compile cs_6_8, create a compute PSO, dispatch",
+                "one thread group into a storage texture and read it back).",
+                "Proves the compute path that the shading-rate image (P235) and NRC build on;",
+                "it compiles HLSL on the spot, so it does not belong on the startup critical path."
+            )
+            .translation("dxr_mc.configuration.debug.selfTestCompute")
+            .gameRestart()
+            .define("selfTestCompute", false)
+
         FAIL_DEVICE = BUILDER
             .comment(
                 "Make device creation fail on purpose.",
@@ -622,3 +707,6 @@ object IllusionConfig {
 
     val SPEC: ModConfigSpec = BUILDER.build()
 }
+
+
+

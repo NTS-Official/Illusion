@@ -57,6 +57,7 @@ object D3D12Settings {
         val temporalJitter: Boolean,
         val selfTestSurface: Boolean,
         val selfTestMesh: Boolean,
+        val selfTestCompute: Boolean,
         val failDevice: Boolean,
         val meshDiagnostics: MeshDiagnostics,
         val noCrashPopup: Boolean,
@@ -139,6 +140,9 @@ object D3D12Settings {
 
     /** Run the mesh-shader self-test. */
     val selfTestMesh: Boolean get() = snapshot().selfTestMesh
+
+    /** P234：启动时跑一次 compute 自检（cs_6_8 → compute PSO → Dispatch → 回读）。 */
+    val selfTestCompute: Boolean get() = snapshot().selfTestCompute
 
     /** Fail device creation on purpose. */
     val failDevice: Boolean get() = snapshot().failDevice
@@ -322,6 +326,8 @@ object D3D12Settings {
                 legacy("selfTestSurface") { System.getProperty("dxrmc.selfTestSurface") == "true" },
             selfTestMesh = config(false) { IllusionConfig.SELF_TEST_MESH.get() } ||
                 legacy("selfTestMesh") { System.getProperty("dxrmc.selfTestMesh") == "true" },
+            selfTestCompute = config(false) { IllusionConfig.SELF_TEST_COMPUTE.get() } ||
+                legacy("selfTestCompute") { System.getProperty("dxrmc.selfTestCompute") == "true" },
             failDevice = config(false) { IllusionConfig.FAIL_DEVICE.get() } ||
                 legacy("failDevice") { System.getProperty("dxrmc.failDevice") == "true" },
             meshDiagnostics = config(MeshDiagnostics.NONE) { IllusionConfig.MESH_DIAGNOSTICS.get() }

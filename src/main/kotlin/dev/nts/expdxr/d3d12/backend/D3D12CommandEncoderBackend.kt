@@ -38,6 +38,9 @@ import kotlin.math.roundToLong
  */
 class D3D12CommandEncoderBackend : CommandEncoderBackend {
     private val ctx: Long
+
+    /** P236：GUI 的防御性 `RSSetShadingRate` 复位要用同一条列表的上下文（只给同包的调用方）。 */
+    internal fun nativeCtx(): Long = ctx
     private val device: D3D12Device?
     private val transientMemory: D3D12TransientMemory
     // P200（内存泄露根因）：拷贝完成回调原先是**每个 encoder 一份**，而 vanilla 的
@@ -797,3 +800,4 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
         private var gProfTotalNs = 0L
     }
 }
+

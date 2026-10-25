@@ -47,6 +47,8 @@ object D3D12DebugInfo {
         lines.add("Resolution: output ${windowWidth}x${windowHeight}, rendered ${renderedWidth}x${renderedHeight}")
         lines.add("VRAM: ${info.vramMiB()} MiB dedicated / ${info.sharedMiB()} MiB shared")
         lines.add("Illusion: ${info.backendName()} (MCDR ABI v${MCDR_ABI.MCDR_ABI_VERSION}) - LUID: $luid")
+        // P237：VRS 那行已搬成独立 debug entry（[D3D12VrsDebugEntry]，F3+F6 里可单独开关），
+        // 这里不再重复 —— system_specs 组只放"没有别处可放"的显卡/显存信息。
         return lines
     }
 

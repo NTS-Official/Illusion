@@ -26,6 +26,7 @@ import dev.nts.expdxr.d3d12.extern.MCDRMeshPipelineDesc
 import dev.nts.expdxr.d3d12.extern.MCDRPipelineDesc
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.adapter.D3D12Device
+import dev.nts.expdxr.d3d12.render.core.D3D12GpuTexture
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuSurface
 import net.minecraft.client.renderer.RenderPipelines
 import net.minecraft.resources.Identifier
@@ -133,6 +134,16 @@ class D3D12Backend : GpuBackend {
                 // 打开方式：配置 `[debug] selfTestMesh = true`。
                 if (D3D12Settings.selfTestMesh) {
                     selfTestMesh(device)
+                }
+                // P234：compute 最小通路自检（cs_6_8 → compute PSO → Dispatch → 回读）。
+                // 默认关闭；打开方式：配置 `[debug] selfTestCompute = true`。
+                if (D3D12Settings.selfTestCompute) {
+                    selfTestCompute()
+                }
+                // P235：着色率图像（R8_UINT SRI）自检 —— 与 compute 共用 `[debug] selfTestCompute`。
+                // 验的是「算得出 → 写得进 → 挂得上命令列表」这三件事，不验图像内容。
+                if (D3D12Settings.selfTestCompute) {
+                    selfTestShadingRate()
                 }
                 // 诊断（[debug] meshDiagnostics = clear|pass）：把"写纹理 → 回读"做最小化隔离，
                 // 用来区分「回读通路坏了」和「render pass 没落到纹理上」。只在取证时使用。
@@ -539,6 +550,190 @@ class D3D12Backend : GpuBackend {
             } finally {
                 MCDR_ABI.D3D12DestroyCommandEncoder(ctx)
                 MCDR_ABI.ID3D12DestroyResource(texture)
+            }
+        }
+
+        /**
+         * P234：compute 最小通路自检 —— 编译 `cs_6_8` → 建 compute PSO → `Dispatch(2,2,1)` →
+         * 回读，断言"根 UAV 写入 + 根常量生效"。
+         *
+         * 着色器把 `gTag` 写进 R 通道，所以回读的 9 个像素必须都是 `(gTag, 0, 0, 255)`。这同时
+         * 证明了四件事：DXC 接受 `cs_6_8`、`CreateComputePipelineState` 建成、根签名
+         * `[0] root UAV u0` 绑到了目标纹理、`[1] root constants b0` 的值真的进了着色器。
+         *
+         * <p>这张目标纹理必须带 `USAGE_STORAGE`(32)：native 只在带该位的纹理上置
+         * `ALLOW_UNORDERED_ACCESS`，缺了它 `CreateUnorderedAccessView`/派发都会失败。
+         */
+        private fun selfTestCompute() {
+            val size = 16
+            val tag = 200
+            val usage = D3D12GpuTexture.USAGE_STORAGE or GpuTexture.USAGE_COPY_SRC
+            val texture = MCDR_ABI.ID3D12CreateTexture(usage, GpuFormat.RGBA8_UNORM.ordinal, size, size, 1, 1)
+            if (texture == 0L) {
+                throw IllegalStateException("compute self-test: dx12CreateTexture failed: ${MCDR_ABI.D3D12LastError()}")
+            }
+            try {
+                val hlsl = """
+                    RWTexture2D<float4> gOutput : register(u0);
+                    cbuffer Params : register(b0) { uint gTag; uint gPad0; uint gPad1; uint gPad2; };
+
+                    [numthreads(8, 8, 1)]
+                    void main(uint3 id : SV_DispatchThreadID) {
+                        gOutput[id.xy] = float4(gTag / 255.0, 0.0, 0.0, 1.0);
+                    }
+                """.trimIndent()
+                val dxil: ByteArray = MCDR_ABI.D3D12CompileShaderDxc(hlsl, "main", "cs_6_8")
+                    ?: throw IllegalStateException(
+                        "compute self-test: DXC compile failed for cs_6_8: ${MCDR_ABI.D3D12LastError()}")
+                val pipeline = MCDR_ABI.D3D12CreateComputePipeline(dxil)
+                if (pipeline == 0L) {
+                    throw IllegalStateException(
+                        "compute self-test: dx12CreateComputePipeline failed: ${MCDR_ABI.D3D12LastError()}")
+                }
+                try {
+                    val ctx = MCDR_ABI.D3D12CreateCommandEncoder()
+                    if (ctx == 0L) {
+                        throw IllegalStateException(
+                            "compute self-test: dx12CreateCommandEncoder failed: ${MCDR_ABI.D3D12LastError()}")
+                    }
+                    try {
+                        MCDR_ABI.D3D12BeginCommandList(ctx)
+                        if (!MCDR_ABI.D3D12DispatchCompute(ctx, pipeline, texture, intArrayOf(tag, 0, 0, 0), 2, 2, 1)) {
+                            throw IllegalStateException(
+                                "compute self-test: dx12DispatchCompute failed: ${MCDR_ABI.D3D12LastError()}")
+                        }
+                        val fence = MCDR_ABI.D3D12Submit(ctx)
+                        if (!MCDR_ABI.D3D12WaitForFence(ctx, fence, 5_000_000_000L)) {
+                            throw IllegalStateException("compute self-test: fence wait timed out (5s)")
+                        }
+                        val pixels = MCDR_ABI.D3D12ReadbackTexturePixels(texture)
+                            ?: throw IllegalStateException(
+                                "compute self-test: read-back returned nothing: ${MCDR_ABI.D3D12LastError()}")
+                        val seen = (0 until 9).map { i ->
+                            intArrayOf(pixels[i * 4], pixels[i * 4 + 1], pixels[i * 4 + 2], pixels[i * 4 + 3])
+                        }
+                        LOGGER.info("[backend] Compute self-test: dispatch ok, read-back={}", seen.joinToString(" ") { px ->
+                            "(${px[0]},${px[1]},${px[2]},${px[3]})"
+                        })
+                        val bad = seen.firstOrNull { it[0] != tag || it[1] != 0 || it[2] != 0 || it[3] != 255 }
+                        if (bad != null) {
+                            throw IllegalStateException(
+                                "compute self-test: unexpected pixel (${bad[0]},${bad[1]},${bad[2]},${bad[3]}), " +
+                                    "expected ($tag,0,0,255)")
+                        }
+                        LOGGER.info("[backend] Compute self-test PASSED (cs_6_8 + descriptor-table UAV u0 + root constants b0)")
+                    } finally {
+                        MCDR_ABI.D3D12DestroyCommandEncoder(ctx)
+                    }
+                } finally {
+                    MCDR_ABI.ID3D12DestroyResource(pipeline)
+                }
+            } finally {
+                MCDR_ABI.ID3D12DestroyResource(texture)
+            }
+        }
+
+        /**
+         * P235：着色率图像（SRI）自检 —— 建 R8_UINT 图像、两张 SRV、dispatch、绑定 SRI、读回。
+         *
+         * 这张图以后由 `D3D12ShadingRateImage` 每帧生成，这里只证明"native 通路能写它、
+         * 而且能挂到命令列表的 SRI 槽位上"。输入纹理只要求存在且能建 SRV，内容不参与断言。
+         */
+        private fun selfTestShadingRate() {
+            val tiles = 2
+            val image = MCDR_ABI.D3D12CreateShadingRateImage(tiles, tiles)
+            if (image == 0L) {
+                throw IllegalStateException(
+                    "SRI self-test: dx12CreateShadingRateImage failed: ${MCDR_ABI.D3D12LastError()}")
+            }
+            val usage = GpuTexture.USAGE_TEXTURE_BINDING or GpuTexture.USAGE_COPY_SRC
+            val inputA = MCDR_ABI.ID3D12CreateTexture(usage, GpuFormat.RGBA8_UNORM.ordinal, 32, 32, 1, 1)
+            val inputB = MCDR_ABI.ID3D12CreateTexture(usage, GpuFormat.RGBA8_UNORM.ordinal, 32, 32, 1, 1)
+            try {
+                if (inputA == 0L || inputB == 0L) {
+                    throw IllegalStateException(
+                        "SRI self-test: input texture creation failed: ${MCDR_ABI.D3D12LastError()}")
+                }
+                val viewA = MCDR_ABI.ID3D12CreateTextureView(inputA, 0, 1)
+                val viewB = MCDR_ABI.ID3D12CreateTextureView(inputB, 0, 1)
+                try {
+                    val hlsl = """
+                        Texture2D<float4> gDepth : register(t0);
+                        Texture2D<float4> gMotion : register(t1);
+                        RWTexture2D<uint> gOut : register(u0);
+                        cbuffer Params : register(b0) { uint gTilesX; uint gTilesY; uint gTile; uint gPad; };
+
+                        [numthreads(8, 8, 1)]
+                        void main(uint3 id : SV_DispatchThreadID) {
+                            if (id.x >= gTilesX || id.y >= gTilesY) return;
+                            // 读一下两张 SRV，保证它们不会被 DXC 判成未使用（否则根签名里的
+                            // 描述符表就成了摆设，自检也就证明不了绑定通路）。
+                            float probe = gDepth.Load(int3(0, 0, 0)).x + gMotion.Load(int3(0, 0, 0)).x;
+                            uint rate = (id.x == 0u && id.y == 0u) ? 5u : 0u;
+                            if (probe > 1.0e30) rate = 1u;
+                            gOut[id.xy] = rate;
+                        }
+                    """.trimIndent()
+                    val dxil = MCDR_ABI.D3D12CompileShaderDxc(hlsl, "main", "cs_6_8")
+                        ?: throw IllegalStateException(
+                            "SRI self-test: DXC compile failed for cs_6_8: ${MCDR_ABI.D3D12LastError()}")
+                    val pipeline = MCDR_ABI.D3D12CreateComputePipelineShadingRate(dxil)
+                    if (pipeline == 0L) {
+                        throw IllegalStateException(
+                            "SRI self-test: dx12CreateComputePipelineShadingRate failed: " +
+                                MCDR_ABI.D3D12LastError())
+                    }
+                    try {
+                        val ctx = MCDR_ABI.D3D12CreateCommandEncoder()
+                        if (ctx == 0L) {
+                            throw IllegalStateException(
+                                "SRI self-test: dx12CreateCommandEncoder failed: ${MCDR_ABI.D3D12LastError()}")
+                        }
+                        try {
+                            MCDR_ABI.D3D12BeginCommandList(ctx)
+                            val dispatched = MCDR_ABI.D3D12DispatchComputeShadingRate(
+                                ctx, pipeline, viewA, viewB, image, intArrayOf(tiles, tiles, 16, 0), 1, 1, 1)
+                            if (!dispatched) {
+                                throw IllegalStateException(
+                                    "SRI self-test: dx12DispatchComputeShadingRate failed: " +
+                                        MCDR_ABI.D3D12LastError())
+                            }
+                            if (!MCDR_ABI.D3D12SetShadingRateImage(ctx, image)) {
+                                throw IllegalStateException(
+                                    "SRI self-test: dx12SetShadingRateImage(bind) failed: " +
+                                        MCDR_ABI.D3D12LastError())
+                            }
+                            MCDR_ABI.D3D12SetShadingRateImage(ctx, 0L)
+                            val fence = MCDR_ABI.D3D12Submit(ctx)
+                            if (!MCDR_ABI.D3D12WaitForFence(ctx, fence, 5_000_000_000L)) {
+                                throw IllegalStateException("SRI self-test: fence wait timed out (5s)")
+                            }
+                            val px = MCDR_ABI.D3D12ReadbackTexturePixels(image)
+                                ?: throw IllegalStateException(
+                                    "SRI self-test: read-back returned nothing: ${MCDR_ABI.D3D12LastError()}")
+                            LOGGER.info(
+                                "[backend] SRI self-test: {}x{} tiles, first pixel={} raw={}",
+                                tiles, tiles, px[0], px.joinToString(","))
+                            if (px[0] != 5) {
+                                throw IllegalStateException(
+                                    "SRI self-test: tile(0,0) expected 5 (2X2), got ${px[0]}")
+                            }
+                            LOGGER.info(
+                                "[backend] SRI self-test PASSED (R8_UINT image + 2 SRV + UAV + RSSetShadingRateImage)")
+                        } finally {
+                            MCDR_ABI.D3D12DestroyCommandEncoder(ctx)
+                        }
+                    } finally {
+                        MCDR_ABI.ID3D12DestroyResource(pipeline)
+                    }
+                } finally {
+                    MCDR_ABI.ID3D12DestroyResource(viewA)
+                    MCDR_ABI.ID3D12DestroyResource(viewB)
+                }
+            } finally {
+                MCDR_ABI.ID3D12DestroyResource(inputA)
+                MCDR_ABI.ID3D12DestroyResource(inputB)
+                MCDR_ABI.ID3D12DestroyResource(image)
             }
         }
 

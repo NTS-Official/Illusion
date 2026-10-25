@@ -245,6 +245,15 @@ object D3D12Velocity {
     @Synchronized
     fun previousHandle(): Long = this.previous?.handle() ?: 0L
 
+    /**
+     * 上一帧速度纹理的 SRV 视图（P235 的着色率图像用它判"这块像素在动"）。
+     *
+     * 与 [previousHandle] 同一时刻的同一张纹理；[beginFrame] 交换乒乓之后取，就是上一帧的位移。
+     * null = 还没有历史（刚进世界/刚重开速度通道），调用方应当跳过这一帧。
+     */
+    @Synchronized
+    fun previousMotionView(): D3D12GpuTextureView? = if (this.previous == null) null else this.previousView
+
     /** 释放全部资源（关设备/退出世界/错误自检时调用）。 */
     @Synchronized
     fun reset() {

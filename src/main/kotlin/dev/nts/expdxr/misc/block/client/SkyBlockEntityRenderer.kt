@@ -54,6 +54,10 @@ class SkyBlockEntityRenderer : BlockEntityRenderer<SkyBlockEntity, SkyBlockRende
         if (state.facesToShow.isEmpty()) {
             return
         }
+        // 着色器缺失（构建产物被写坏时就是这样）：管线是按可选注册的，这里连提交都不做。
+        if (!SkyBlockPipeline.isShaderPresent()) {
+            return
+        }
         // 离屏天空还没准备好（刚进世界的第一帧、或者资源重载）：整体跳过，而不是让动态贴图抛异常。
         if (!SkyBlockCapture.isReady()) {
             return

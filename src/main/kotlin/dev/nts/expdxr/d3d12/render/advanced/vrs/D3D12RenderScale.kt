@@ -24,8 +24,9 @@ import net.minecraft.util.Mth
  * 于是世界就在这个分辨率上着色；最后的呈现 blit 用线性采样器把源纹理拉伸/压缩到 back buffer
  * （P106 之后由一次独立的 texture→texture blit 完成）。全程没有新的 pass、没有新的 native 侧配置。
  *
- * 与 VRS 的关系：[dev.nts.expdxr.misc.D3D12VRSEnumSettings] 管的是"每块像素着色几次"（区域级、按设备能力取档），
- * 这里管的是"总共渲染多少像素"（全局级）。两者叠加，画面着色成本才真正与显示分辨率脱钩。
+ * 与 VRS 的关系：[dev.nts.expdxr.misc.D3D12VRSSettings] 管的是"每块像素着色几次"（区域级、由渲染器
+ * 自动决定，P238 起只有 OFF/AUTO 两档），这里管的是"总共渲染多少像素"（全局级）。两者叠加，画面着色
+ * 成本才真正与显示分辨率脱钩。
  *
  * 已知限制（P106 之后仍在的）：界面自己按窗口 1:1 渲染（这正是 P106 的目的），
  * 所以界面**不**参与缩放；世界层由一次带线性采样的 texture→texture blit 铺满界面那张窗口尺寸的目标

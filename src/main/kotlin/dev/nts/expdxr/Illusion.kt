@@ -4,8 +4,10 @@ import com.mojang.logging.LogUtils
 import dev.nts.expdxr.Illusion.Companion.OPTIONS_KEY_PREFERRED_GRAPHICS
 import dev.nts.expdxr.misc.D3D12Settings
 import dev.nts.expdxr.d3d12.backend.D3D12GraphicsApi
+import dev.nts.expdxr.d3d12.debug.D3D12VrsDebugEntry
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.adapter.D3D12AdapterInfo
+import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12VariableShadingRate
 import dev.nts.expdxr.misc.IllusionLogger
 import dev.nts.expdxr.misc.block.SkyBlocks
 import net.neoforged.bus.api.IEventBus
@@ -34,6 +36,10 @@ class Illusion(modEventBus: IEventBus, modContainer: ModContainer) {
         modContainer.registerConfig(ModConfig.Type.CLIENT, IllusionConfig.SPEC)
         // 天空方块：方块 / 物品 / 方块实体都要在注册表冻结之前挂上。
         SkyBlocks.register(modEventBus)
+        // P237：F3 的 VRS 行是一个独立 debug entry，由 F3+F6 的 DebugOptionsScreen 开关。
+        D3D12VrsDebugEntry.register(modEventBus)
+        // 退出存档时把 VRS 诊断计数清零（属于一局的统计，不跨存档累加）。
+        D3D12VariableShadingRate.register()
         // Construct log level before initialize the logger.
         IllusionLogger.applyDefaults()
         modEventBus.addListener<ModConfigEvent.Loading> {

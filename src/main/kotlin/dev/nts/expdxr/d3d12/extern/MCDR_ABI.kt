@@ -53,6 +53,10 @@ import java.util.concurrent.atomic.AtomicInteger
     private var MH_createdlssfeature: MethodHandle? = null
     private var MH_evaluatedlss: MethodHandle? = null
     private var MH_querydlss: MethodHandle? = null
+    /** P231：scope 型着色率下发（见 [D3D12SetShadingRateNow]）。 */
+    private var MH_setshadingratenow: MethodHandle? = null
+    /** P231：着色率组合器（见 [D3D12SetShadingRateCombiners]）。 */
+    private var MH_setshadingratecombiners: MethodHandle? = null
     /** P108b：DLSS 自己的开关（不再借 `aaMode == 4`）。 */
     private var MH_setdlssenabled: MethodHandle? = null
     /** P108e：把世界层深度快照进 native 私有 D32 纹理（见 [D3D12SnapshotDlssDepth]）。 */
@@ -152,6 +156,14 @@ import java.util.concurrent.atomic.AtomicInteger
     private var MH_dispatchmesh: MethodHandle? = null
     /** P217：meshlet 版地形派发（b8 常量 + t14 顶点 / t15 段表 / t16 meshlet 表）。 */
     private var MH_meshdrawmeshlets: MethodHandle? = null
+
+    // P234：compute 最小通路（着色率图像 / NRC 的硬前置）。
+    private var MH_createcomputepipeline: MethodHandle? = null
+    private var MH_dispatchcompute: MethodHandle? = null
+    private var MH_createcomputepipelineshadingrate: MethodHandle? = null
+    private var MH_createshadingrateimage: MethodHandle? = null
+    private var MH_dispatchcomputeshadingrate: MethodHandle? = null
+    private var MH_setshadingrateimage: MethodHandle? = null
     private var MH_createsurface: MethodHandle? = null
     private var MH_surfacepresentmodes: MethodHandle? = null
     private var MH_setexclusivefullscreen: MethodHandle? = null
@@ -610,6 +622,62 @@ import java.util.concurrent.atomic.AtomicInteger
             handle.invokeExact(rate) as Int
         } catch (t: Throwable) {
             System.err.println("[backend-java] dx12SetShadingRate failed: $t")
+            Int.MIN_VALUE
+        }
+    }
+
+    /**
+     * P231: issue one `RSSetShadingRate` on `ctx`'s currently open list, right now.
+     *
+     * <p>This is the per-draw control point: [D3D12SetShadingRate] only stores the player's
+     * ceiling, while every coarse batch is bracketed by this call and a restore to `1X1`. Because
+     * the call lands in the middle of a command list, a rate here affects exactly the draws the
+     * caller wraps — not the sky, the particles or the GUI.
+     *
+     * @param rate raw `D3D12_SHADING_RATE` (`1X1=0x0 1X2=0x1 2X1=0x4 2X2=0x5 2X4=0x6 4X2=0x9
+     *     4X4=0xA`); `-1` is **not** accepted here — the caller simply does not call it.
+     * @return 1 = issued, 0 = the device cannot honour this rate (VRS tier 0, or an additional
+     *     rate without `AdditionalShadingRatesSupported`) or the list is not an
+     *     `ID3D12GraphicsCommandList5`, -1 = a rate the native layer does not know, -2 = no open
+     *     command list (the scope wrapped the wrong place), and [Int.MIN_VALUE] when the loaded
+     *     native DLL predates this export (P231: the feature then stays inert). Never throws.
+     */
+    fun D3D12SetShadingRateNow(ctx: Long, rate: Int): Int {
+        if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_setshadingratenow ?: return Int.MIN_VALUE
+        return try {
+            handle.invokeExact(ptr(ctx), rate) as Int
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12SetShadingRateNow failed: $t")
+            Int.MIN_VALUE
+        }
+    }
+
+    /**
+     * P231: set the two shading-rate combiners used by every later `RSSetShadingRate`.
+     *
+     * <p>Stage 0 combines the per-draw rate with the per-primitive rate (`SV_ShadingRate` from the
+     * mesh shader), stage 1 with the shading-rate image. Both are
+     * `D3D12_SHADING_RATE_COMBINER` values (`PASSTHROUGH=0 OVERRIDE=1 MIN=2 MAX=3 SUM=4`).
+     *
+     * <p>Deliberately left at `{PASSTHROUGH, PASSTHROUGH}` until P233 actually writes
+     * `SV_ShadingRate`: under `MIN`, a per-primitive rate of `1X1` (the default when the shader
+     * does not output the semantic) would undo every `2X2` this policy asks for.
+     *
+     * @return 1 = stored, -1 = a value outside `0..4`, [Int.MIN_VALUE] when the DLL predates this
+     *     export. Never throws.
+     */
+    fun D3D12SetShadingRateCombiners(first: Int, second: Int): Int {
+        if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_setshadingratecombiners ?: return Int.MIN_VALUE
+        return try {
+            handle.invokeExact(first, second) as Int
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12SetShadingRateCombiners failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -1642,7 +1710,115 @@ import java.util.concurrent.atomic.AtomicInteger
             throw unexpected(t)
         }
     }
+    // ==================================================================
+    // Compute (P234)
+    // ==================================================================
+    /**
+     * P234：建一条 compute 管线。
+     *
+     * 根签名是**固定**的：`[0]` root UAV（`u0`），`[1]` root constants（`b0`，8 个 dword）——
+     * 与 [D3D12DispatchCompute] 一一对应。这是着色率图像（P235）与 NRC 的最小通路；不需要
+     * compute 命令队列，DIRECT 列表上 `Dispatch()` 合法（见 `vrs_plan.md` §3.4）。
+     *
+     * @param dxil [D3D12CompileShaderDxc] 编出的 `cs_6_x` 字节码
+     * @return native 管线句柄；0 = 失败（见 [D3D12LastError]）
+     */
+    fun D3D12CreateComputePipeline(dxil: ByteArray): Long {
+        requireLoaded()
+        val handle = MH_createcomputepipeline ?: return 0L
+        Arena.ofConfined().use { arena ->
+            val src = arena.allocate(dxil.size.toLong().coerceAtLeast(1L))
+            MemorySegment.copy(dxil, 0, src, ValueLayout.JAVA_BYTE, 0, dxil.size)
+            return addr(handle.invokeExact(src, dxil.size) as MemorySegment)
+        }
+    }
+
+    /**
+     * P234：在已打开的 DIRECT 列表上派发一次 compute（`Dispatch(x, y, z)`）。
+     *
+     * `uavTexture` 必须带 `USAGE_STORAGE`(32)（native 建纹理时才有 `ALLOW_UNORDERED_ACCESS`）。
+     * native 会在进出处各做一次 `COMMON → UNORDERED_ACCESS → COMMON`，所以这张纹理可以与其他
+     * pass 共用，调用方不需要自己管状态。
+     *
+     * @param constants 写进 `b0` 的 32 位常量（0..8 个）
+     * @return true = 已派发
+     */
+    fun D3D12DispatchCompute(ctx: Long, pipeline: Long, uavTexture: Long, constants: IntArray,
+                             x: Int, y: Int, z: Int): Boolean {
+        requireLoaded()
+        val handle = MH_dispatchcompute ?: return false
+        val count = constants.size
+        require(count in 0..8) { "compute constants: 0..8 dwords, got $count" }
+        Arena.ofConfined().use { arena ->
+            val seg = if (count == 0) MemorySegment.NULL else arena.allocate(count * 4L)
+            for (i in 0 until count) {
+                seg.set(MCDRLayout.I32, i * 4L, constants[i])
+            }
+            return ok(handle.invokeExact(ptr(ctx), ptr(pipeline), ptr(uavTexture), seg, count, x, y, z) as Int)
+        }
+    }
+
     /** NUL-terminated UTF-8 copy in `arena`; callers never pass null here. */
+    /**
+     * P235：建 SRI 用的 compute PSO。根签名固定为 `[0]` 描述符表（`t0`/`t1` 两张 SRV）、
+     * `[1]` 描述符表（`u0` 一张 UAV）、`[2]` 根常量 `b0`（8 个 dword）。
+     *
+     * 为什么必须走描述符表：typed UAV / typed SRV 不能挂在 root descriptor 上，
+     * 否则 `CreateComputePipelineState` 直接 `E_INVALIDARG`（见 `known_bugs.md` P234）。
+     */
+    fun D3D12CreateComputePipelineShadingRate(dxil: ByteArray): Long {
+        requireLoaded()
+        val handle = MH_createcomputepipelineshadingrate ?: return 0L
+        Arena.ofConfined().use { arena ->
+            val src = arena.allocate(dxil.size.toLong().coerceAtLeast(1L))
+            MemorySegment.copy(dxil, 0, src, ValueLayout.JAVA_BYTE, 0, dxil.size)
+            return addr(handle.invokeExact(src, dxil.size) as MemorySegment)
+        }
+    }
+
+    /**
+     * P235：建一张 `R8_UINT` 的着色率图像。参数是 **tile 数**（宽高各自
+     * `ceil(pixel / tileSize)`），tile 边长取设备的 `ShadingRateImageTileSize`（NVIDIA 16）。
+     *
+     * @return native 句柄；0 = 失败（设备低于 VRS tier 2 时也会失败）
+     */
+    fun D3D12CreateShadingRateImage(tilesX: Int, tilesY: Int): Long {
+        requireLoaded()
+        val handle = MH_createshadingrateimage ?: return 0L
+        return addr(handle.invokeExact(tilesX, tilesY) as MemorySegment)
+    }
+
+    /**
+     * P235：用上一帧深度（`t0`）与上一帧速度（`t1`）生成一次着色率图像（`u0`）。
+     * `srvDepth` / `srvMotion` 是 [D3D12CreateTextureView] 的句柄。
+     */
+    fun D3D12DispatchComputeShadingRate(ctx: Long, pipeline: Long, srvDepth: Long, srvMotion: Long,
+                                        image: Long, constants: IntArray, x: Int, y: Int,
+                                        z: Int): Boolean {
+        requireLoaded()
+        val handle = MH_dispatchcomputeshadingrate ?: return false
+        val count = constants.size
+        require(count in 0..8) { "SRI constants: 0..8 dwords, got $count" }
+        Arena.ofConfined().use { arena ->
+            val seg = if (count == 0) MemorySegment.NULL else arena.allocate(count * 4L)
+            for (i in 0 until count) {
+                seg.set(MCDRLayout.I32, i * 4L, constants[i])
+            }
+            return ok(handle.invokeExact(ptr(ctx), ptr(pipeline), ptr(srvDepth), ptr(srvMotion),
+                ptr(image), seg, count, x, y, z) as Int)
+        }
+    }
+
+    /**
+     * P235：把图像挂到当前命令列表的 SRI 槽位（`image == 0L` 表示摘掉）。
+     * native 内部会把图像从 `COMMON` 转到 `SHADING_RATE_SOURCE`。
+     */
+    fun D3D12SetShadingRateImage(ctx: Long, image: Long): Boolean {
+        requireLoaded()
+        val handle = MH_setshadingrateimage ?: return false
+        return ok(handle.invokeExact(ptr(ctx), ptr(image)) as Int)
+    }
+
     private fun cstringUtf8(arena: Arena, s: String): MemorySegment {
         val bytes = s.toByteArray(StandardCharsets.UTF_8)
         val seg = arena.allocate(bytes.size + 1L)
@@ -2454,6 +2630,12 @@ import java.util.concurrent.atomic.AtomicInteger
         // DLAA 仍由 DLSS 特性实现、接受但降级为 OFF 并 WARN。不需要重启：native 只是记下模式，
         // 下一次 blit 生效。旧 DLL 没有这个导出，此时调用返回 MIN_VALUE。
         MH_setantialiasing = skipOptional("mcdrSetAntiAliasing", fd(MCDRLayout.I32, MCDRLayout.I32))
+        // P231：scope 型着色率下发（ctx + rate → int）。同样 skipOptional —— native 还没实现
+        // 这两条导出时只是返回 MIN_VALUE、JVM 侧静默保持"不作用域化"，MCDR_ABI_VERSION 不变。
+        MH_setshadingratenow =
+            skipOptional("mcdr_dx12SetShadingRateNow", fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.I32))
+        MH_setshadingratecombiners =
+            skipOptional("mcdr_dx12SetShadingRateCombiners", fd(MCDRLayout.I32, MCDRLayout.I32, MCDRLayout.I32))
         // P108 DLSS：Create 与 Evaluate 在 native 侧指向同一个 applyDlssToTexture，
         // 所以只想每帧评价的调用方接 Evaluate 就够；缺任一符号都不影响其它功能。
         MH_createdlssfeature = skipOptional("mcdr_dx12CreateDlssFeature", fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.PTR))
@@ -2769,6 +2951,32 @@ import java.util.concurrent.atomic.AtomicInteger
             MCDRLayout.I64,
             MCDRLayout.I32
         ))
+        // P234：compute 最小通路（固定根签名：root UAV u0 + 8 root constants b0）。
+        MH_createcomputepipeline = skip("mcdr_dx12CreateComputePipeline", fd(MCDRLayout.PTR, MCDRLayout.PTR, MCDRLayout.I32))
+        MH_dispatchcompute = skip("mcdr_dx12DispatchCompute", fd(
+            MCDRLayout.I32,
+            MCDRLayout.PTR,
+            MCDRLayout.PTR,
+            MCDRLayout.PTR,
+            MCDRLayout.PTR,
+            MCDRLayout.I32,
+            MCDRLayout.I32,
+            MCDRLayout.I32,
+            MCDRLayout.I32
+        ))
+        // P235：着色率图像（2×SRV + 1×UAV 的 compute PSO + R8_UINT 图像 + SRI 绑定）。
+        MH_createcomputepipelineshadingrate = skip("mcdr_dx12CreateComputePipelineShadingRate",
+            fd(MCDRLayout.PTR, MCDRLayout.PTR, MCDRLayout.I32))
+        MH_createshadingrateimage = skip("mcdr_dx12CreateShadingRateImage",
+            fd(MCDRLayout.PTR, MCDRLayout.I32, MCDRLayout.I32))
+        MH_dispatchcomputeshadingrate = skip("mcdr_dx12DispatchComputeShadingRate", fd(
+            MCDRLayout.I32,
+            MCDRLayout.PTR, MCDRLayout.PTR, MCDRLayout.PTR, MCDRLayout.PTR, MCDRLayout.PTR,
+            MCDRLayout.PTR,
+            MCDRLayout.I32, MCDRLayout.I32, MCDRLayout.I32, MCDRLayout.I32
+        ))
+        MH_setshadingrateimage = skip("mcdr_dx12SetShadingRateImage",
+            fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.PTR))
         MH_createsurface = skip("mcdr_dx12CreateSurface", fd(MCDRLayout.PTR, MCDRLayout.I64))
         MH_surfacepresentmodes = skip("mcdr_dx12SurfacePresentModes", fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.I32))
         MH_setexclusivefullscreen = skip("mcdr_dx12SetExclusiveFullscreen", fd(

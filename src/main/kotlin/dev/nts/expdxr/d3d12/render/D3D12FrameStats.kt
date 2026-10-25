@@ -1,22 +1,25 @@
 package dev.nts.expdxr.d3d12.render
 
 import dev.nts.expdxr.d3d12.render.adapter.D3D12AdapterInfo
+import dev.nts.expdxr.dxrmc.nvidia.dlss.DLSSFrameGeneration
 import kotlin.math.roundToInt
 
 /**
- * F3 帧率行的「rendered/output」双数值（P166，当前是帧生成的占位实现）。
+ * F3 帧率行的「rendered/output」双数值与 `(FG n.nx)` 倍率（P166 / P213，帧生成真正接上后）。
  *
- * 现在还没有帧生成，所以稳态下两个数字相等：
  * - rendered = 原版 [net.minecraft.client.Minecraft.getFps] 的计数（真正渲染出来的帧）；
  * - output   = 本类在 [dev.nts.expdxr.d3d12.render.core.D3D12GpuSurface.present] 里数到的
- *              「真正提交给交换链的帧」。
+ *              「真正提交给交换链的帧」，每帧的增量取自 native 的 `mcdr_dx12GetDlssgPresented`。
  *
- * 接上帧生成后要动两处：
- * 1. 生成帧的呈现必须经过同一个计数点。如果将来改由 native 在一次 present 里提交多帧
- *    （DLSS-G / Optical Flow 就长这样，JVM 只调用一次），计数就得搬进 native 的 present
- *    路径，而不是在 [onFramePresented] 里加 N —— 否则 output 永远等于 rendered。
- * 2. rendered 继续取原版 fps（即真实渲染帧），output 继续取本类，语义才与「帧生成让
- *    输出帧率高于渲染帧率」一致。
+ * 帧生成**关着**时整行保持原版形状（`"123 fps T: …"`）：双数值只用来体现「输出帧率高于渲染
+ * 帧率」，没有生成帧时它只会多出两个相等的数字（用户 m01219 报的就是关掉 FG 后仍显示
+ * `120/240 (FG 2.0x)`，因为 native 那时不会把每帧提交数复位到 1）。
+ *
+ * 帧生成开着时要动两点：
+ * 1. 生成帧的呈现必须经过同一个计数点 —— 目前 native 一次性提交多帧，JVM 只调用一次
+ *    present，所以增量必须取自 native（`frames` 参数），不能在本类里加 N。
+ * 2. rendered 继续取原版 fps（真实渲染帧），output 继续取本类，语义才与「帧生成让输出帧率
+ *    高于渲染帧率」一致。
  *
  * 只有 D3D12 后端计数：[fpsLine] 在 [D3D12AdapterInfo.current] 为 null（OpenGL / Vulkan）
  * 时原样返回，其他后端既不加斜杠也不显示 0。
@@ -63,14 +66,20 @@ object D3D12FrameStats {
     fun outputFps(): Int = outputFps
 
     /**
-     * 把原版那行 `"<rendered> fps T: …"` 改成 `"<rendered>/<output> fps T: …"`。
+     * 把原版那行 `"<rendered> fps T: …"` 改成 `"<rendered>/<output> fps (FG n.nx) T: …"`。
      *
-     * 非 D3D12 后端、或 output 还没有样本（进游戏第一秒、暂停时不 present）时保持原样，
-     * 不显示一个假的 0 或 0/0。
+     * 帧生成关着（或后端不是 D3D12、output 还没有样本：进游戏第一秒、暂停时不 present）时原样
+     * 返回 —— 不显示假的 0、0/0，也不显示上一次开 FG 时遗留的倍率。
      */
     @JvmStatic
     fun fpsLine(vanilla: String): String {
         if (D3D12AdapterInfo.current == null) {
+            return vanilla
+        }
+        // 用户 m01219：关掉帧生成后这里仍会显示 `120/240 (FG 2.0x)` —— native 的“每帧提交数”
+        // 那时停在旧值上。双数值只在真的有生成帧时才有意义，关着就交给原版。
+        if (!DLSSFrameGeneration.isEnabled()) {
+            smoothedMultiplier = 1.0
             return vanilla
         }
         val match = FPS_LINE.matchEntire(vanilla) ?: return vanilla
@@ -79,6 +88,7 @@ object D3D12FrameStats {
         // P213：用 output/rendered 的比值（不是单帧 presented）做平滑，避免数字闪烁。
         val instant = if (rendered > 0) output.toDouble() / rendered else 1.0
         smoothedMultiplier = smoothedMultiplier * 0.8 + instant * 0.2
+        // 刚打开 FG、Streamline 还没真正开始插帧的头几帧，比值仍是 1 —— 不显示 `(FG 1.0x)`。
         val frameGen = if (smoothedMultiplier >= 1.25) {
             val tenths = (smoothedMultiplier * 10.0).roundToInt()
             " (FG ${tenths / 10}.${tenths % 10}x)"

@@ -5,6 +5,7 @@ import com.mojang.renderpearl.api.pipeline.ColorTargetState
 import com.mojang.renderpearl.api.pipeline.DepthStencilState
 import com.mojang.renderpearl.api.pipeline.PrimitiveTopology
 import com.mojang.renderpearl.api.pipeline.RenderPipeline
+import dev.nts.expdxr.Illusion
 import dev.nts.expdxr.Illusion.Companion.MODID
 import net.minecraft.client.renderer.BindGroupLayouts
 import net.minecraft.client.renderer.RenderPipelines
@@ -45,6 +46,29 @@ object SkyBlockPipeline {
         // 变成「方块完全看不见」这种难以定位的问题（原版 end gateway 也是双面）。
         .withCull(false)
         .build()
+
+    /**
+     * 着色器源码在不在 classpath 上（`assets/dxr_mc/shaders/core/sky_block.{vsh,fsh}`）。
+     *
+     * 这条管线是按**可选**管线注册的（`RegisterRenderPipelinesEvent.registerOptionalPipeline`）：
+     * 源码或编译缺失时原版只打一条 `Failed to load optional shader programs …` 的 WARN 就继续，
+     * 不会像必需管线那样抛 `Failed to load required shader programs` 把渲染线程停掉（表现为黑屏）。
+     * 代价是缺源码时这条管线画不出来，所以两个绘制点都先问这里、缺了整体跳过 —— 方块那段时间不可见，
+     * 但游戏照常。只查 classpath，不会触发编译。
+     */
+    fun isShaderPresent(): Boolean = shaderPresent
+
+    private val shaderPresent: Boolean by lazy {
+        val path = "assets/$MODID/shaders/${SHADER_ID.path}.vsh"
+        val present = SkyBlockPipeline::class.java.classLoader?.getResource(path) != null
+        if (!present) {
+            Illusion.LOGGER.warn(
+                "[$MODID] 找不到 $path：天空方块的管线是按可选注册的，这次只跳过这个方块。" +
+                    "如果刚改过资源，先删掉 Illusion\\build\\resources\\main 再跑 processResources。"
+            )
+        }
+        present
+    }
 
     private var blockRenderType: RenderType? = null
 

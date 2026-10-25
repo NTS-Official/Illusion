@@ -245,12 +245,30 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
     private data class FlipYKey(val pipeline: RenderPipeline, val flipY: Boolean)
 
     fun getOrCompilePipeline(pipeline: RenderPipeline, flipY: Boolean): D3D12CompiledRenderPipeline {
+        // P228：缓存里可能是**已被 close 掉**的对象 —— vanilla 在资源重载（改语言/开关资源包，
+        // 例如「高对比度」）时会把 `CompiledRenderPipeline` 全部 close，而我们的缓存仍然握着同一个
+        // 实例；`D3D12CompiledRenderPipeline.isValid()` 现在是 `handle != 0`，close 之后就是 false。
+        // 旧代码直接 `computeIfAbsent` 把它原样返回 ⇒ `setPipeline` 抛
+        // "Pipeline … is not valid (shader compilation failed)"，而且**一条 COMPILE FAILED 都不会打**
+        // （因为根本没编译）。实测：开高对比度触发 ReloadableResourceManager 重载 → pipeline/gui
+        // 崩在 GuiRenderer.executeDraw（known_bugs P228）。
+        // 所以命中缓存时先验活，失效就丢掉重编。
         if (!flipY) {
-            return this.pipelineCache.computeIfAbsent(pipeline,
-                { ignored -> this.compilePipeline(pipeline, this.resolveShaderSource(pipeline), false) })
+            return this.pipelineCache.compute(pipeline) { _, cached ->
+                if (cached != null && cached.isValid()) {
+                    cached
+                } else {
+                    this.compilePipeline(pipeline, this.resolveShaderSource(pipeline), false)
+                }
+            }!!
         }
-        return this.pipelineCacheFlipY.computeIfAbsent(FlipYKey(pipeline, true),
-            { ignored -> this.compilePipeline(pipeline, this.resolveShaderSource(pipeline), true) })
+        return this.pipelineCacheFlipY.compute(FlipYKey(pipeline, true)) { _, cached ->
+            if (cached != null && cached.isValid()) {
+                cached
+            } else {
+                this.compilePipeline(pipeline, this.resolveShaderSource(pipeline), true)
+            }
+        }!!
     }
 
     /**
@@ -422,6 +440,28 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
                 pipeline, handle,
                 vertexShader, fragmentShader, compiled.vertexHlsl, compiled.fragmentHlsl
             )
+            // P230：D3D12 没有宽线。`LINELIST` 恒为 1px，而 MC 的 Vulkan 后端用管线
+            // `lineWidth` 画宽线；`rendertype_lines.vsh` 只把端点沿屏幕横移 `LineWidth/2`，
+            // 于是在我们这里是"1px 长边 + 两端小横杠"（方块选中框的转角像毛线团）。
+            // 修法：为线管线另建一条 **TRIANGLES** 拓扑的 PSO —— 每段 4 个顶点配的 6 个索引
+            // （端帽/端帽/长边，`RenderSystem.sharedSequentialLines`）正好摊成两个三角形，
+            // 拼出一条 `LineWidth` 像素宽的带子。draw 时临时切过去，见 drawIndexed。
+            val topology = pipeline.primitiveTopology
+            if (topology == com.mojang.renderpearl.api.pipeline.PrimitiveTopology.LINES ||
+                topology == com.mojang.renderpearl.api.pipeline.PrimitiveTopology.DEBUG_LINES) {
+                val quadDesc = buildNativeDesc(compiled, pipeline, flipY)
+                // 带子两面都可能朝向相机（端点横移方向由屏幕方向决定），一律禁用剔除。
+                quadDesc.topology(
+                    com.mojang.renderpearl.api.pipeline.PrimitiveTopology.TRIANGLES.ordinal,
+                    false, pipeline.polygonMode.ordinal)
+                val quadPso = MCDR_ABI.D3D12CreateGraphicsPipeline(quadDesc)
+                if (quadPso != 0L) {
+                    result.attachLineQuadVariant(quadPso)
+                    LOGGER.info("[dxrmc] P230 line quad variant for {}: pso={}", pipeName, quadPso)
+                } else {
+                    LOGGER.warn("[dxrmc] P230 line quad variant for {} failed; 线会保持 1px", pipeName)
+                }
+            }
             // P217：26.3 的地形管线全部建 meshlet 变体 —— 不透明（solid/cutout）、
             // OIT 半透明（oit_*_terrain，顺序无关，可以直接 mesh）、以及经典半透明
             // （translucent_terrain，排序依赖，暂不派发）。管线名里都带 "terrain"。

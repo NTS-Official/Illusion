@@ -36,6 +36,9 @@ object SkyBlockSpecialRenderer : NoDataSpecialModelRenderer {
         hasFoil: Boolean,
         outlineColor: Int
     ) {
+        if (!SkyBlockPipeline.isShaderPresent()) {
+            return
+        }
         if (!SkyBlockCapture.isReady()) {
             return
         }

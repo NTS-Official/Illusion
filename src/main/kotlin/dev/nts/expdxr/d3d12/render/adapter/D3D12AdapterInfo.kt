@@ -39,7 +39,16 @@ class D3D12AdapterInfo private constructor(
     val isHardware: Boolean,
     val isDetachable: Boolean,
     /** Whether D3DCore contributed [driverVersion] and [deviceType]. */
-    val d3dcore: Boolean
+    val d3dcore: Boolean,
+
+    /** VRS tier reported by `D3D12_FEATURE_DATA_D3D12_OPTIONS6` (0 = no variable rate shading). */
+    val shadingRateTier: Int = 0,
+
+    /** Shading-rate-image tile edge in pixels (0 when the device has no tier 2). */
+    val shadingRateTileSize: Int = 0,
+
+    /** Whether the device also supports 2X4 / 4X2 / 4X4 ("additional shading rates"). */
+    val additionalShadingRates: Boolean = false
 ) {
     /**
      * Vanilla-style driver string, i.e. what [com.mojang.blaze3d.systems.DeviceInfo.driverInfo]
@@ -121,7 +130,10 @@ class D3D12AdapterInfo private constructor(
                 fields["luid"] ?: "",
                 fields["is_hardware"] == "true",
                 fields["is_detachable"] == "true",
-                fields["dxcore"] == "true"
+                fields["dxcore"] == "true",
+                fields["shading_rate_tier"]?.toIntOrNull() ?: 0,
+                fields["shading_rate_image_tile_size"]?.toIntOrNull() ?: 0,
+                fields["additional_shading_rates"] == "true"
             )
         }
 
@@ -253,3 +265,4 @@ class D3D12AdapterInfo private constructor(
         }
     }
 }
+

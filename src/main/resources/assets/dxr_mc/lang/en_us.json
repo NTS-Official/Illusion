@@ -54,16 +54,9 @@
   "options.renderScale.tooltip": "P105: the size of the main render target's textures as a percentage of the window - the render resolution, decoupled from the display resolution. 100 is the exact behaviour of the build without this feature. Below 100 the world is shaded at fewer pixels and the final blit stretches the result to the window; above 100 renders more pixels and shrinks them down, the supersampling direction. Cost scales with the pixel count, so 200 is four times the shading of 100. The GUI keeps a window-sized target of its own (P106), so the layout stays correct at any value.\n\nWhile DLSS is off the slider runs 25-400 in 25% steps (default 100). While DLSS is on it runs 50-90 in 10% steps (default 70), and the two modes remember their own value separately. No restart needed.",
 
   "options.shadingRate": "Shading Rate (VRS)",
-  "options.shadingRate.tooltip": "Shading rate handed to every graphics command list (D3D12 RSSetShadingRate). OFF (the default) issues no such call at all and leaves the device at its default 1x1 - the exact behaviour of the build before VRS. 2X2 shades one pixel per 2x2 block, the usual first step when a frame is shading-bound; 1X2/2X1/2X4/4X2/4X4 additionally require AdditionalShadingRatesSupported. A device reporting VRS tier 0 refuses the request (the log says so) and stays at 1x1. No restart needed.",
-
+  "options.shadingRate.tooltip": "Automatic variable-rate shading (tier 2 groundwork). OFF (the default) issues no RSSetShadingRate at all and leaves the device at 1x1 - the exact behaviour of the build before VRS. AUTO lets the renderer decide per draw and per primitive: solid terrain is coarsened (at most 2x2) while gui, text, sky, particles and cutout/translucent geometry stay 1x1. A device reporting VRS tier 0 refuses the request (the log says so) and stays at 1x1. No restart needed.",
   "options.illusion.render.shadingRate.OFF": "Off",
-  "options.illusion.render.shadingRate.RATE_1X1": "1x1 - off (default)",
-  "options.illusion.render.shadingRate.RATE_1X2": "1x2 - coarse vertical",
-  "options.illusion.render.shadingRate.RATE_2X1": "2x1 - coarse horizontal",
-  "options.illusion.render.shadingRate.RATE_2X2": "2x2 - coarse both",
-  "options.illusion.render.shadingRate.RATE_2X4": "2x4",
-  "options.illusion.render.shadingRate.RATE_4X2": "4x2",
-  "options.illusion.render.shadingRate.RATE_4X4": "4x4 - coarsest",
+  "options.illusion.render.shadingRate.AUTO": "Auto",
 
   "options.dlss": "DLSS Upscaling",
   "options.dlss.tooltip": "Requires an NVIDIA RTX GPU and a matching driver. When on, the world layer is upscaled to the window size by DLSS; the button is greyed out when DLSS is unavailable on this machine.\n\nRender Scale must not be 100%: DLSS needs the world layer and the presented target to be two different textures.",
@@ -160,6 +153,17 @@
   "dxr_mc.configuration.raytracing": "Ray tracing",
   "dxr_mc.configuration.raytracing.mode": "Ray-traced visibility",
   "dxr_mc.configuration.mesh": "Mesh Shaders",
+  "dxr_mc.configuration.vrs": "Variable Rate Shading",
+  "dxr_mc.configuration.vrs.terrain_near_blocks": "Terrain VRS near band",
+  "dxr_mc.configuration.vrs.terrain_near_blocks.tooltip": "Terrain closer than this many blocks keeps full 1X1 shading. Lower values move the coarser band towards the camera and save more, at the risk of the band edge landing on what the player is looking at.",
+  "dxr_mc.configuration.vrs.terrain_far_blocks": "Terrain VRS far band",
+  "dxr_mc.configuration.vrs.terrain_far_blocks.tooltip": "Distance in blocks where the farthest shading-rate band starts. About half the view distance keeps the 2X2 edge off the horizon line, where it is easiest to notice.",
+  "dxr_mc.configuration.vrs.sri": "Shading Rate Image (Tier 2)",
+  "dxr_mc.configuration.vrs.sri.tooltip": "Build a screen-space shading rate image every frame from the previous frame's depth (and motion vectors when available), so tiles only get coarsened where the geometry is flat. This is what keeps the horizon from flickering; with it off only the distance bands above decide. Takes effect on the next frame, no restart.",
+  "dxr_mc.configuration.vrs.sriEdgePermille": "SRI depth edge threshold (per-mille)",
+  "dxr_mc.configuration.vrs.sriEdgePermille.tooltip": "Depth contrast across a tile that keeps it at 1x1. Lower values treat more tiles as edges: safer, less saving. 1000 disables the test.",
+  "dxr_mc.configuration.vrs.sriMotionPixels": "SRI motion threshold (pixels)",
+  "dxr_mc.configuration.vrs.sriMotionPixels.tooltip": "Screen-space motion above which a tile stays at 1x1. Only used when the velocity pass runs (SMAA, TAA or DLSS).",
   "dxr_mc.configuration.debug.debugLayer": "Direct3D Debug Layer",
   "dxr_mc.configuration.debug.debugLayer.tooltip": "Create the device with the Direct3D 12 debug layer installed. Much slower; useful when the log reports a broken command.",
   "dxr_mc.configuration.debug.profiling": "Frame Profiling",
@@ -176,6 +180,8 @@
   "dxr_mc.configuration.debug.selfTestSurface.tooltip": "Run the swapchain self-test on the real window at startup. Development check; it binds a second Present swapchain, so leave it OFF.",
   "dxr_mc.configuration.debug.selfTestMesh": "Mesh Shader Self-Test",
   "dxr_mc.configuration.debug.selfTestMesh.tooltip": "Compile an HLSL mesh shader, dispatch it and read the target back once at startup. Development check; keep OFF on a normal start.",
+  "dxr_mc.configuration.debug.selfTestCompute": "Compute Self-Test",
+  "dxr_mc.configuration.debug.selfTestCompute.tooltip": "Compile a compute shader (cs_6_8), create a compute pipeline, dispatch it into a storage texture and read it back once at startup. Proves the compute path that the shading-rate image (P235) builds on; development check, keep OFF on a normal start.",
   "dxr_mc.configuration.debug.failDevice": "Simulate Device Failure",
   "dxr_mc.configuration.debug.failDevice.tooltip": "Make backend creation fail on purpose to verify the no-fallback crash path. Development check; always leave OFF.",
   "dxr_mc.configuration.debug.meshDiagnostics": "Mesh Diagnostics",
@@ -203,3 +209,6 @@
   "chat.dxr_mc.pix_capture.fail.missing": "this MCDR.dll has no capture entry point - rebuild the native library.",
   "block.dxr_mc.sky_block": "Sky Block"
 }
+
+
+

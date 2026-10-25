@@ -169,6 +169,35 @@ void as_main(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID)
         val msPayloadParam = if (cu == null) "" else ",\n             in payload MeshPayload payload"
         val msMeshletId = if (cu == null) "gid.x" else "payload.slot[gid.x]"
 
+        // P233：逐图元着色率。距离用的是相机相对坐标，所以只在解析出 CameraBlockPos/CameraOffset
+        // 时生成（cu != null）。没有它们时 MS 不写 SV_ShadingRate，组合器的 MIN 会把粗档位压回
+        // 1X1 —— 安全失败：画面回到"VRS 未生效"，而不是把近处地形一起糊掉。
+        val vrsPrimStruct = if (cu == null) "" else
+            "struct SPIRV_Cross_Prim { uint shadingRate : SV_ShadingRate; };\n"
+        val vrsPrimParam = if (cu == null) "" else
+            ",\n             out primitives SPIRV_Cross_Prim prims[$MAX_PRIMITIVES]"
+        val vrsRate = if (cu == null) "" else """
+    // P233：按"段的盒子"而不是"meshlet 的盒子"定档。同一段里若各 meshlet 各自跨过阈值，
+    // 屏幕上一小块会同时出现 1X2 与 2X2 两种速率，TAA 夹紧后表现为细碎闪烁；改成整段同档，
+    // 边界只剩段与段之间的一圈，而且在 16 格粒度上不再随 meshlet 抖动。
+    float3 vrsBase = (float3(s.chunkX, s.chunkY, s.chunkZ) - float3(${cu.cameraBlockPos}))
+                   + ${cu.cameraOffset};
+    float3 vrsMin = vrsBase;
+    float3 vrsMax = vrsBase + float3(16.0, 16.0, 16.0);
+    // 用 AABB 的"近点"而不是中心：大块近处地形的中心可能很远，但它就在脚边。
+    float vrsDistance = max(0.0, length((vrsMin + vrsMax) * 0.5) - length((vrsMax - vrsMin) * 0.5));
+    uint primRate = 0u;  // 1X1
+    if (gVrsBand.w > 0.5) {
+        // 远带速率由 CPU 给（gVrsBand.z）：1 = 1X2，5 = 2X2。存成代码而不是再拿一个开关，
+        // 是因为"关掉 2X2"只需要把这里换成 1，Shader 结构与逐图元语义都不用动。
+        uint farRate = (uint)(gVrsBand.z + 0.5);
+        primRate = vrsDistance < gVrsBand.x ? 0u : (vrsDistance < gVrsBand.y ? 1u : farRate);
+    }
+        """
+        val vrsStore = if (cu == null) "" else
+            "        prims[vid * 2u].shadingRate = primRate;\n" +
+                "        prims[vid * 2u + 1u].shadingRate = primRate;\n"
+
         return renamed + """
 
 // ===================== P217：meshlet 包装（无索引缓冲） =====================
@@ -205,6 +234,10 @@ cbuffer MeshletGlobals : register(b8, space0) {
     uint gCullEnabled;
     uint gMeshletGlobalsPad1;
     uint gMeshletGlobalsPad2;
+    // P233：逐图元着色率的三档距离带（相机相对、单位方块）。
+    //   x = 近带外沿（d < x ⇒ 1X1），y = 中带外沿（x <= d < y ⇒ 1X2），更远 ⇒ 2X2，
+    //   w = 1 表示启用（0 时 primRate 恒 0 = 1X1，等价于不写语义）。
+    float4 gVrsBand;
 };
 
 SectionDesc loadSection(uint id) {
@@ -272,13 +305,13 @@ uint4 meshReadUInt16(uint a) {
     return uint4(w.x & 65535u, w.x >> 16, w.y & 65535u, w.y >> 16);
 }
 uint4 meshReadUInt32(uint a) { return meshVertices.Load4(a); }
-$asBlock
+$asBlock$vrsPrimStruct
 // 线程组 = 一个 meshlet：前 quadCount*4 线程各解一个顶点，前 quadCount 线程算术写出 1 个 quad 的
 // 两个三角形。没有任何索引读；带 AS 时 meshlet 号来自 payload。
 [numthreads($THREADS, 1, 1)]
 [outputtopology("triangle")]
 void ms_main(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID$msPayloadParam,
-             out vertices SPIRV_Cross_Output verts[$THREADS],
+             out vertices SPIRV_Cross_Output verts[$THREADS]$vrsPrimParam,
              out indices uint3 tris[$MAX_PRIMITIVES])
 {
     MeshletDesc m = loadMeshlet($msMeshletId);
@@ -288,7 +321,7 @@ void ms_main(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID$msPayloadParam
     uint primCount = quadCount * 2u;
     // 必须在统一控制流里调用（所有线程同一个值）。
     SetMeshOutputCounts(vertexCount, primCount);
-
+$vrsRate
     uint vid = tid.x;
     if (vid < vertexCount) {
         uint vertexIndex = s.vertexBase + m.localVertexOffset + vid;
@@ -301,7 +334,7 @@ $decode        verts[vid] = vs_main(vin);
         uint baseV = vid * 4u;
         tris[vid * 2u] = uint3(baseV, baseV + 1u, baseV + 2u);
         tris[vid * 2u + 1u] = uint3(baseV, baseV + 2u, baseV + 3u);
-    }
+$vrsStore    }
 }
 """
     }
