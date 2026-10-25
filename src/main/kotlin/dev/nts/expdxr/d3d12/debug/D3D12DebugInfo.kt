@@ -5,6 +5,7 @@ import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuTexture
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuTextureView
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
+import dev.nts.expdxr.misc.D3D12Settings
 import net.minecraft.client.Minecraft
 import net.minecraft.resources.Identifier
 
@@ -47,6 +48,19 @@ object D3D12DebugInfo {
         lines.add("VRAM: ${info.vramMiB()} MiB dedicated / ${info.sharedMiB()} MiB shared")
         lines.add("Illusion: ${info.backendName()} (MCDR ABI v${MCDR_ABI.MCDR_ABI_VERSION}) - LUID: $luid")
         return lines
+    }
+
+    /**
+     * F3「Terrain Rendering:」行的后缀。
+     *
+     * <p>只有 DXRMC 的 D3D12 后端在跑、且 `[mesh] terrain` 生效时才追加 —— 否则那行
+     * 描述的是别的后端/别的路径，加上 `mesh` 反而是假信息。
+     */
+    @JvmStatic
+    fun terrainLine(line: String): String {
+        if (!line.startsWith("Terrain Rendering: ")) return line
+        if (D3D12AdapterInfo.current == null || !D3D12Settings.meshTerrain) return line
+        return "$line with mesh (Powered by Illusion)"
     }
 
     /** 主渲染目标附件的真实像素尺寸；F3 在渲染线程上取，读不到就返回 null。 */

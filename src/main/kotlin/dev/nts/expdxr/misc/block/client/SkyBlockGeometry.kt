@@ -23,7 +23,7 @@ object SkyBlockGeometry {
 
     /** 六个方向各四个角点（原版四边形绕序）。 */
     val FACE_CORNERS: Map<Direction, List<Vector3fc>> = buildMap {
-        for (direction in Direction.values()) {
+        for (direction in Direction.entries) {
             val faceInfo = FaceInfo.fromFacing(direction)
             put(direction, List(4) { index -> faceInfo.getVertexInfo(index).select(FROM, TO) })
         }

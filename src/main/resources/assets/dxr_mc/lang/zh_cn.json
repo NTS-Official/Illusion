@@ -111,12 +111,10 @@
   "dxr_mc.configuration.renderer.taaSharpenAmount.tooltip": "TAA resolve 之后的锐化强度（0-1）。TAA 比 DLAA 软，通常需要比 DLSS 锐化更高的值。",
 
   "dxr_mc.configuration.mesh.button": "编辑",
-  "dxr_mc.configuration.mesh.tooltip": "地形网格着色器路径（用 DispatchMesh 替代 DrawIndexed）。",
+  "dxr_mc.configuration.mesh.tooltip": "地形网格着色器路径（唯一的地形光栅化路径，没有 IMR 回退）。",
   "dxr_mc.configuration.mesh.terrain": "地形网格路径",
-  "dxr_mc.configuration.mesh.terrain.tooltip": "用 DispatchMesh 驱动实体地形管线。需要支持 mesh shader tier 1 的 12_2 设备；日志会说明本次运行落在门槛的哪一侧。",
+  "dxr_mc.configuration.mesh.terrain.tooltip": "用 mesh shader 光栅化地形。需要支持 mesh shader tier 1 的 12_2 设备。关闭后地形不会被绘制；只在隔离 mesh 回归时使用。",
   "dxr_mc.configuration.mesh.terrain_cull": "在 mesh shader 之前用 amplification shader 剔除地形 meshlet",
-  "dxr_mc.configuration.mesh.terrain_cull_bounds": "从 compute 生成的表里读逐 meshlet 包围球",
-  "dxr_mc.configuration.mesh.terrain_cone": "用背面法线锥剔除整块背向相机的 meshlet",
 
   "dxr_mc.configuration.dlss.tooltip": "原生 DLL 使用哪一种放大后端。",
   "dxr_mc.configuration.dlss.implementation": "DLSS 实现",
@@ -144,6 +142,8 @@
   "dxr_mc.configuration.logging.logLevel.TRACE": "跟踪",
   "dxr_mc.configuration.logging.nativeVerbose": "原生层详细日志",
   "dxr_mc.configuration.logging.nativeVerbose.tooltip": "无视上面的日志等级设置，强制原生 DLL 输出 DEBUG 信息。",
+  "dxr_mc.configuration.logging.shutdownTrace": "退出路径进度标记",
+  "dxr_mc.configuration.logging.shutdownTrace.tooltip": "让原生层的关停进度标记（destroySurface/destroyDevice 的各阶段）在任何日志等级下都打印。它们是 INFO，不是错误——以前按 ERROR 打印，于是每次正常退出都刷屏。开启：恒定输出，退出卡死时是唯一线索；关闭：等同普通 INFO，会被默认的 ERROR 等级过滤掉。",
   "dxr_mc.configuration.debug": "调试",
   "dxr_mc.configuration.debug.button": "编辑",
   "dxr_mc.configuration.debug.tooltip": "必须在渲染器启动之前决定的诊断开关。只在配置载入时读取一次。",

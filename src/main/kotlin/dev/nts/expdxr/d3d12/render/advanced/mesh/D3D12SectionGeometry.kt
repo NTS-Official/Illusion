@@ -1,8 +1,11 @@
 package dev.nts.expdxr.d3d12.render.advanced.mesh
 
 import net.minecraft.core.SectionPos
+import dev.nts.expdxr.misc.D3D12Settings
 import org.slf4j.LoggerFactory
+import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicIntegerArray
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -27,8 +30,17 @@ object D3D12SectionGeometry {
         val indexCount: Int,
         val vertexBytes: Int,
         val indexBytes: Int,
+        /**
+         * P217：该段的 meshlet 表（方案 §二，每条 32 B）。
+         *
+         * <p>只有 `[mesh] terrain = true` 时才真正切分（默认为空表，零成本）；开启后
+         * **每次上传都切**，因为 Stage 2 的派发需要全部可见段的 meshlet，而不是采样。
+         * 未开启时只在前 [MESHLET_SHADOW_UPLOADS] 次做 shadow 统计。
+         */
+        val meshlets: List<D3D12MeshletBuilder.Meshlet> = emptyList(),
     ) {
         val triangles: Int get() = indexCount / 3
+        val meshletBytes: Int get() = meshlets.size * D3D12MeshletBuilder.MESHLET_DESC_BYTES
     }
 
     /** 一个 section 的几何快照；`generation` 每次重建递增（判断"这帧看到的是不是同一版本"）。 */
@@ -55,6 +67,18 @@ object D3D12SectionGeometry {
     private val indexBytesTotal = AtomicLong()
     private val captureNanosTotal = AtomicLong()
 
+    /**
+     * P217：meshlet 切分（shadow）。只对**前 [MESHLET_SHADOW_UPLOADS] 次**上传做切分 ——
+     * 目的是拿到真实规模（每段 meshlet 数、方向分布、单方向纯度），不是给每次上传加成本。
+     * 统计结果用 [meshletSummary] 打一行，之后进分桶/上传改造时这段会被真实产物取代。
+     */
+    private const val MESHLET_SHADOW_UPLOADS = 64
+    private val meshletUploads = AtomicLong()
+    private val meshletCount = AtomicLong()
+    private val meshletPure = AtomicLong()
+    private val meshletQuads = AtomicLong()
+    private val meshletDirections = AtomicIntegerArray(7)
+
     fun sectionCount(): Int = sections.size
 
     fun epoch(): Int = epoch
@@ -67,14 +91,40 @@ object D3D12SectionGeometry {
      */
     @JvmStatic
     fun captureUpload(sectionNode: Long, layer: String, indexCount: Int, vertexBytes: Int,
-                      indexBytes: Int, levelIdentity: Int) {
+                      indexBytes: Int, levelIdentity: Int, vertex: ByteBuffer?) {
         val started = System.nanoTime()
         if (levelIdentity != this.levelIdentity) {
             sections.clear()
             this.levelIdentity = levelIdentity
             epoch++
         }
-        val upload = LayerUpload(layer, indexCount, vertexBytes, indexBytes)
+        // P217：`[mesh] terrain` 打开时**每次上传都切** meshlet（Stage 2 的派发需要全量段表）；
+        // 未打开时只做前 [MESHLET_SHADOW_UPLOADS] 次 shadow 统计，默认路径成本为零。
+        // 切分失败 / 缓冲为空都静默跳过 —— 这段绝不能影响上传本身。
+        val shadowLimit = if (D3D12Settings.meshTerrain) Int.MAX_VALUE else MESHLET_SHADOW_UPLOADS
+        var meshlets: List<D3D12MeshletBuilder.Meshlet> = emptyList()
+        if (vertex != null && indexCount > 0 && meshletUploads.get() < shadowLimit) {
+            val built = try {
+                D3D12MeshletBuilder.build(vertex)
+            } catch (ignored: Throwable) {
+                null
+            }
+            if (built != null) {
+                meshlets = built.meshlets
+                val n = meshletUploads.incrementAndGet()
+                meshletQuads.addAndGet(built.quads.toLong())
+                meshletCount.addAndGet(built.meshletCount.toLong())
+                meshletPure.addAndGet(built.pureMeshlets.toLong())
+                for (i in 0 until 7) {
+                    meshletDirections.addAndGet(i, built.directionCounts[i])
+                }
+                if (!D3D12Settings.meshTerrain &&
+                    (n == MESHLET_SHADOW_UPLOADS.toLong() || n % 16L == 0L)) {
+                    LOGGER.warn("[dxrmc] meshlet shadow: {}", meshletSummary())
+                }
+            }
+        }
+        val upload = LayerUpload(layer, indexCount, vertexBytes, indexBytes, meshlets)
         val existing = sections[sectionNode]
         val layers = if (existing == null) {
             LinkedHashMap<String, LayerUpload>(3)
@@ -114,5 +164,22 @@ object D3D12SectionGeometry {
             "triangles=${capturedTriangles.get()} empty=${emptyUploads.get()} " +
             "vMB=${vertexBytesTotal.get() / (1024 * 1024)} iMB=${indexBytesTotal.get() / (1024 * 1024)} " +
             "avg=${"%.1f".format(avgUs)}us epoch=$epoch gen=$generation"
+    }
+
+    /**
+     * P217：meshlet shadow 统计的一行摘要。
+     *
+     * <p>`pure` = 整段只含单一朝向（或全是非轴对齐）的 meshlet 占比 —— 方案 §三 的
+     * "按朝向分桶"要把它推到接近 100%，否则 AS 的位掩码背面剔除对混合 meshlet 只能整段放行。
+     * `dirs` 是逐 Quad 的朝向分布（+X,-X,+Y,-Y,+Z,-Z,non-axis）。
+     */
+    fun meshletSummary(): String {
+        val sections = meshletUploads.get()
+        val meshlets = meshletCount.get()
+        val purePct = if (meshlets == 0L) 0.0 else meshletPure.get() * 100.0 / meshlets
+        val perSection = if (sections == 0L) 0.0 else meshlets.toDouble() / sections
+        val dirs = (0 until 7).joinToString(",") { meshletDirections.get(it).toString() }
+        return "sections=$sections meshlets=$meshlets perSection=${"%.1f".format(perSection)} " +
+            "quads=${meshletQuads.get()} pure=${"%.1f".format(purePct)}% dirs=[$dirs]"
     }
 }

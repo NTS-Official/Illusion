@@ -155,8 +155,12 @@ class D3D12IntermediaryShaderModule(
 
     /**
      * 用 spvc HLSL 后端（SPVC_BACKEND_HLSL=2）把（已 rebind 的）SPIR-V 转成
-     * HLSL，shader model 5.1（SPVC_COMPILER_OPTION_HLSL_SHADER_MODEL=51）。
-     * 原生层随后用 d3dcompiler_47 把 HLSL 编成 vs_5_1/ps_5_1 字节码。
+     * HLSL，**源码形态**固定 shader model 5.1（SPVC_COMPILER_OPTION_HLSL_SHADER_MODEL=51，
+     * SPIRV-Cross 的 HLSL 后端只有这一档）。
+     *
+     * 注意这只是**源码语法**：原生层拿到这段 HLSL 后用 DXC 编成 `vs_6_9`/`ps_6_9` 的 DXIL
+     * （2026-10-25 起硬要求 SM 6.9，`vs_5_1`/`ps_5_1` 那条 D3DCompile 路径已删除，见 P216）。
+     * 5.1 语法的源码在 6.9 profile 下仍然合法 —— 地形 VS 能被原样包进 mesh shader 也靠这一点。
      */
     @Throws(ShaderCompileException::class)
     fun toHlsl(isVertex: Boolean): String {

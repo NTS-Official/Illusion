@@ -106,6 +106,12 @@ object IllusionConfig {
     /** `[logging] nativeVerbose` — force the DLL to its DEBUG level on its own. */
     val NATIVE_VERBOSE: ModConfigSpec.BooleanValue
 
+    /**
+     * `[logging] shutdownTrace`（P184）：关停路径的 native 进度标记
+     * （`[P184] destroySurface/destroyDevice stage: …`，INFO 级）是否**无视 logLevel 恒定输出**。
+     */
+    val SHUTDOWN_TRACE: ModConfigSpec.BooleanValue
+
     /** `[logging] nativeLogFile` — also mirror the native log into this file (`""` = off). */
     val NATIVE_LOG_FILE: ModConfigSpec.ConfigValue<String>
 
@@ -214,17 +220,11 @@ object IllusionConfig {
     /** `[debug] dumpHlsl` — write each translated HLSL pair into `dxrmc/hlsl/` for inspection. */
     val DUMP_HLSL: ModConfigSpec.BooleanValue
 
-    /** `[mesh] terrain` — drive terrain through the mesh-shader path instead of indexed draws. */
+    /** `[mesh] terrain` — the only terrain rasterization path (the IMR fallback was removed). */
     val MESH_TERRAIN: ModConfigSpec.BooleanValue
 
-    /** `[mesh] terrainCull` — cull terrain meshlets with an amplification shader (P140). */
+    /** `[mesh] terrainCull` — cull terrain meshlets with the amplification shader (P217). */
     val MESH_TERRAIN_CULL: ModConfigSpec.BooleanValue
-
-    /** `[mesh] terrainCullBounds` — feed the cull shader a compute-built bounding-sphere table (P141). */
-    val MESH_TERRAIN_CULL_BOUNDS: ModConfigSpec.BooleanValue
-
-    /** `[mesh] terrainCone` — drop whole back-facing meshlets with a normal-cone test in the AS (P141 B). */
-    val MESH_TERRAIN_CONE: ModConfigSpec.BooleanValue
 
     init {
         BUILDER.comment(
@@ -249,6 +249,17 @@ object IllusionConfig {
             )
             .translation("$i18n_LOG_KEY.nativeVerbose")
             .define("nativeVerbose", false)
+
+        SHUTDOWN_TRACE = BUILDER
+            .comment(
+                "Print the native shutdown trace (destroySurface/destroyDevice stage lines) at",
+                "any log level. They are INFO lines, not errors - they used to be logged as ERROR,",
+                "so every normal exit spammed the console.",
+                "ON (default): they always show up. That is the only trail you get if quitting hangs.",
+                "OFF: they become ordinary INFO lines, so the default ERROR level hides them."
+            )
+            .translation("$i18n_LOG_KEY.shutdownTrace")
+            .define("shutdownTrace", true)
 
         NATIVE_LOG_FILE = BUILDER
             .comment(
@@ -406,62 +417,32 @@ object IllusionConfig {
         BUILDER.pop()
 
         BUILDER.comment(
-            "Terrain mesh-shader path (the mesh pipeline experiment).",
-            "OFF keeps the indexed-draw path; ON lets the backend build the mesh PSO, fill the",
-            "segment table and dispatch, then compare the frame against the indexed path."
+            "Terrain mesh-shader path (the mesh pipeline).",
+            "Terrain no longer has an indexed-draw fallback: every terrain pipeline (solid,",
+            "cutout and the OIT translucent stages) is rasterized by mesh shaders. Turning this",
+            "off leaves terrain undrawn - it is only useful for isolating a mesh regression."
         ).translation("dxr_mc.configuration.mesh").push("mesh")
 
         MESH_TERRAIN = BUILDER
             .comment(
-                "Drive the solid terrain pipeline through DispatchMesh instead of DrawIndexed.",
-                "Requires a device with mesh shaders (12_2 / tier 1); the log says which side of",
-                "the gate the run landed on. The indexed path stays live as the reference frame."
+                "Rasterize terrain with mesh shaders (the only terrain path).",
+                "Requires a device with mesh shaders (12_2 / tier 1). The original IMR fallback",
+                "has been removed on purpose: when the mesh variant cannot be built, the terrain",
+                "batch is skipped and an ERROR is logged instead of silently drawing it again."
             )
             .translation("dxr_mc.configuration.mesh.terrain")
-            .define("terrain", false)
+            .define("terrain", true)
 
         MESH_TERRAIN_CULL = BUILDER
             .comment(
-                "Cull terrain meshlets in an amplification shader before the mesh shader runs (P140).",
+                "Cull terrain meshlets in the amplification shader before the mesh shader runs.",
                 "OFF: every meshlet is dispatched. ON: each amplification-shader thread tests one",
-                "meshlet against four side view-frustum planes and only surviving meshlets reach the",
-                "mesh shader. Needs [mesh] terrain = true; ignored when the device has no mesh tier.",
-                "The first version computes the per-meshlet bounding sphere inside the shader, so it",
-                "costs one extra pass over each meshlet's vertices."
+                "meshlet against a 6-direction back-face mask and the view frustum, and only the",
+                "surviving meshlets reach the mesh shader. Needs [mesh] terrain = true; ignored",
+                "when the device has no mesh tier."
             )
             .translation("dxr_mc.configuration.mesh.terrain_cull")
             .define("terrainCull", false)
-
-        MESH_TERRAIN_CULL_BOUNDS = BUILDER
-            .comment(
-                "Let the amplification shader read per-meshlet bounding spheres from a table",
-                "instead of computing them (P141, experimental).",
-                "OFF: every amplification-shader thread walks its meshlet's vertices and builds",
-                "an AABB (boundsMode 1). ON: a compute dispatch right before the terrain pass",
-                "fills a sphere table and the shader only reads 16 B per meshlet (boundsMode 0).",
-                "Needs [mesh] terrainCull = true.",
-                "Default OFF on purpose: with the table in use (P141 continuation 4) large",
-                "batches flicker when the camera faces some directions - the table content is",
-                "not validated yet, so the shader-computed sphere stays the safe path."
-            )
-            .translation("dxr_mc.configuration.mesh.terrain_cull_bounds")
-            .define("terrainCullBounds", false)
-
-        MESH_TERRAIN_CONE = BUILDER
-            .comment(
-                "Cull whole back-facing meshlets with a normal cone built in the amplification",
-                "shader (P141 stage B, experimental).",
-                "Each thread derives the meshlet's normal cone from its triangles; when the whole",
-                "cone points away from the camera the meshlet is dropped, so its vertices are never",
-                "decoded by the mesh shader (up to 126 vertex fetches saved per culled meshlet).",
-                "Only applied to pipelines whose rasterizer state also culls back faces, and only on",
-                "the shader-computed bounding-sphere path (the table path has no vertex data).",
-                "Needs [mesh] terrainCull = true.",
-                "Default ON since P141 continuation 9: the winding sign was verified on hardware",
-                "(a wrong sign culls front faces and terrain shows gaps)."
-            )
-            .translation("dxr_mc.configuration.mesh.terrain_cone")
-            .define("terrainCone", true)
 
         BUILDER.pop()
 

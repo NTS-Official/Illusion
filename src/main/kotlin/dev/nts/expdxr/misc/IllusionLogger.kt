@@ -144,7 +144,8 @@ object IllusionLogger {
 
     /** Apply the values currently held by `config/dxr_mc-client.toml`. */
     fun applyFromConfig() {
-        applyOpt(IllusionConfig.LOG_LEVEL.get(), IllusionConfig.NATIVE_VERBOSE.get())
+        applyOpt(IllusionConfig.LOG_LEVEL.get(), IllusionConfig.NATIVE_VERBOSE.get(),
+            IllusionConfig.SHUTDOWN_TRACE.get())
     }
 
     /**
@@ -155,7 +156,11 @@ object IllusionLogger {
         applyOpt(if (ENV_VERBOSE) IllusionLogLevel.DEBUG else IllusionLogLevel.ERROR, false)
     }
 
-    fun applyOpt(level: IllusionLogLevel, nativeVerbose: Boolean) {
+    /**
+     * @param shutdownTrace P184：关停路径的 native 进度标记是否**无视 logLevel 恒定输出**
+     *   （配置 `[logging] shutdownTrace`）。默认 true —— 与 native 侧的默认值一致。
+     */
+    fun applyOpt(level: IllusionLogLevel, nativeVerbose: Boolean, shutdownTrace: Boolean = true) {
         // `D3D12_LOG_VERBOSE=1` stays an escape hatch that *wins over the config file*, so a
         // developer gets a verbose run without editing (or remembering) the toml.
         val effective = if (ENV_VERBOSE) IllusionLogLevel.DEBUG else level
@@ -165,7 +170,7 @@ object IllusionLogger {
             Configurator.setLevel(name, effective.toLog4j())
         }
         val nativeLevel = if (ENV_VERBOSE || nativeVerbose) NATIVE_DEBUG else effective.nativeLevel
-        pushNative(nativeLevel)
+        pushNative(nativeLevel, shutdownTrace)
         // Reported at INFO: a default run stays silent, while a verbose run can confirm that
         // the *config* (and not a leftover environment variable) set the level.
         val source = if (ENV_VERBOSE) "D3D12_LOG_VERBOSE" else "config/dxr_mc-client.toml"
@@ -176,7 +181,7 @@ object IllusionLogger {
         }
     }
 
-    private fun pushNative(level: Int) {
+    private fun pushNative(level: Int, shutdownTrace: Boolean) {
         try {
             // Loading the native library here (first call) is intentional and safe: it only
             // LoadLibrary's MCDR.dll and binds exports, and isAvailable() reports a missing
@@ -184,9 +189,13 @@ object IllusionLogger {
             // side expects.
             if (MCDR_ABI.isAvailable()) {
                 MCDR_ABI.D3D12SetLogLevel(level)
+                // P184：关停路径的进度标记（INFO）是否恒定输出。旧 DLL 没有这个导出时静默保持
+                // 它内置的"恒定输出"行为。
+                MCDR_ABI.D3D12SetShutdownTraceAlways(shutdownTrace)
             }
         } catch (t: Throwable) {
-            LOGGER.warn("[dxrmc] could not push the native log level {}", level, t)
+            LOGGER.warn("[dxrmc] could not push the native log settings (level {}, shutdownTrace {})",
+                level, shutdownTrace, t)
         }
     }
 

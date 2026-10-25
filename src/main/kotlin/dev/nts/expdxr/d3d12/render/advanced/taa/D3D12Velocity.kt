@@ -25,8 +25,8 @@ import org.slf4j.LoggerFactory
  * 全屏 pass 可以用主深度 + 上一帧 view-projection 直接算出**相机重投影**速度（对静态几何严格
  * 正确，这也是 TAAU 的第一块砖）。增量 1 的 MRT 代码已按裁决移除。
  *
- * 管线走 raw ABI（`MCDRPipelineDesc` 直接吃 HLSL 源码，native 侧入口固定 main；P84 起优先走
- * DXC + SM 6.x（DXIL，vs_6_8/ps_6_8），DXC 不可用/编译失败时退回 `D3DCompile(...,"main",...)` 的 SM 5.1），
+ * 管线走 raw ABI（`MCDRPipelineDesc` 直接吃 HLSL 源码，native 侧入口固定 main；P84 起走 DXC，
+ * 2026-10-25 起硬要求 SM 6.9 / DXIL，**没有** `D3DCompile(...,"main",...)` 的 SM 5.1 兜底），
  * 绑定共三项：
  *  - entry 0 = CBV（`register(b0)`，root descriptor）→ 256 B 参数块：
  *    `PrevViewProj` + `InvCurrViewProj` + `ScreenSize` + `ObjectParams`；
@@ -687,7 +687,7 @@ object D3D12Velocity {
     }
 
     // ------------------------------------------------------------------
-    // HLSL（native 侧入口固定 main；P84 起优先 DXC + SM 6.x/DXIL，退回 D3DCompile SM 5.1）
+    // HLSL（native 侧入口固定 main；P84 起走 DXC，2026-10-25 / P216 起硬要求 SM 6.9、无 5.1 兜底）
     // ------------------------------------------------------------------
 
     /**

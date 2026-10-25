@@ -35,6 +35,18 @@ class D3D12ShaderCompiler : AutoCloseable {
         this.globalDefines = ShaderDefines.builder()
             .define("gl_VertexID", "gl_VertexIndex")
             .define("gl_InstanceID", "gl_InstanceIndex")
+            // P226：本后端是 D3D12 ⇒ 深度是 **0..1 区间**（且 26.3 是 reversed-Z：近=1、远=0）。
+            // vanilla 的 `oit_common.glsl` 靠这个宏决定要不要把设备深度当成 GL 的 [-1,1]：
+            //   #ifndef RENDERPEARL_DEPTH_IS_ZERO_TO_ONE
+            //       deviceDepth = (deviceDepth - 0.5) * 2.0;
+            // 官方 `GlslCompiler.createBaseShaderOptions()` 就是在 `isZeroToOne` 为真时加这个宏，
+            // 而本类此前只加了上面两个 ⇒ OIT 三个 stage 都按 GL 又映射了一遍，`deviceToLinearDepth`
+            // 被压成"几乎常数"（zn=0.05/zf=1000 下 >1 格全部落到 ≈ +0.05），depth bin / transmittance
+            // 小波全塌到一处 —— 半透明看着发闷、层叠顺序也不对（known_bugs P226）。
+            // 旁证：`oit_depth_sample.glsl` 里 `OIT_HIGH_PRECISION_DEPTH_THRESHOLD = 10.0` 是**方块**
+            // 为单位，只有线性深度是"方块"时才有意义，而那只在 0..1 分支成立。
+            // 这个宏全树只有 `oit_common.glsl` 用到，所以影响面严格限于 OIT（不含地形/云/实体的其它路径）。
+            .define("RENDERPEARL_DEPTH_IS_ZERO_TO_ONE")
             .build()
     }
 
@@ -182,6 +194,30 @@ class D3D12ShaderCompiler : AutoCloseable {
                     + pipeline.location)
             }
         }
+        // P224：全屏 blit（`core/screenquad`）**采样 raster 目标** 时必须镜像 V。
+        //
+        // 本后端的 raster 目标第 0 行 = 画面**顶部**：主 pass 用 vanilla 的 GL clip 空间 + 正向
+        // D3D 视口光栅化，最终呈现由 native blit 补偿（`kBlitVS` 的顶点表 v 是翻的：
+        // 屏幕底 → v=1）。而 vanilla 的 `texCoord` 约定是 v=0 在底部 ⇒ 「把一张 raster 目标按
+        // texCoord 拷进另一张 raster 目标」在 GL 下是**原地拷贝**，在这里却是**上下镜像**：
+        //   * `blit_depth(_during_depth_bounds)` 写的是 **depth 附件**，随后由光栅器按**同一行**
+        //     做深度比较 ⇒ 云按镜像后的地形深度被剔除，画面表现为「云上出现上下翻转的地形空洞、
+        //     洞里露出天空」（known_bugs P224）；
+        //   * `blit_depth_bounds` / `entity_outline_blit` 属同一类颜色拷贝（此前镜像一直没被发现）。
+        // 只在非 flipY 的全屏 pass 里做：flipY pass 已经在顶点端翻过，再翻 texCoord 会抵消。
+        // lightmap 是特例（它拿 texCoord 当**数据**生成光贴图，不是采样），上面已单独处理。
+        val isScreenQuad = pipeline.shaders[ShaderType.VERTEX]?.toString() == SCREEN_QUAD_SHADER
+        if (isScreenQuad && !flipY && !pipelineLocation.contains("lightmap")
+            && SAMPLES_WITH_TEXCOORD.containsMatchIn(fragmentHlsl)) {
+            val needle = "void frag_main()\n{"
+            val repl = "$needle\n    texCoord.y = 1.0f - texCoord.y;  // P224：raster 目标行序上下颠倒"
+            if (fragmentHlsl.contains(needle)) {
+                fragmentHlsl = fragmentHlsl.replace(needle, repl)
+            } else {
+                IllusionLogger.warnMessage("[backend-java] [P224] WARN: frag_main needle not found for "
+                    + pipelineLocation)
+            }
+        }
         // Fix S2：语义名称由 toHlsl() 通过 spvc_compiler_hlsl_add_vertex_attribute_remap 注入，
         // 基准 é vertex.inputs() (SPIR-V unique inputs após rebind), não vertexInputNames (formato).
         // BUG-01 fix: usar vertex.inputs().size() garante alinhamento com spvc remap count.
@@ -198,6 +234,16 @@ class D3D12ShaderCompiler : AutoCloseable {
     }
 
     private companion object {
+        /** P224：vanilla 全屏 pass（`screenquad.vsh`，3 顶点无顶点缓冲）的着色器 location。 */
+        private const val SCREEN_QUAD_SHADER = "minecraft:core/screenquad"
+
+        /**
+         * P224：片元 HLSL 里"用 texCoord 采样纹理"的特征。只认这种形态 —— `gl_FragCoord` /
+         * `texelFetch` 的写法本身就是按像素取的（天然是原地拷贝），不能翻。
+         */
+        private val SAMPLES_WITH_TEXCOORD =
+            Regex("Sample(?:Level|Bias|Grad|Cmp(?:Level)?)?\\s*\\([^)]*\\btexCoord\\b")
+
         /**
          * P28：在 spvc 生成的顶点 HLSL 中，于每个 {@code gl_Position = ...;} 赋值后插入
          * {@code gl_Position.y = -gl_Position.y;}，把 GL bottom-up NDC 修正为 D3D12

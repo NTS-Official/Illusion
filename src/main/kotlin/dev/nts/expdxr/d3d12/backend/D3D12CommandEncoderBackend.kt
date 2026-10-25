@@ -216,11 +216,7 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
         // 挂在这里 —— vanilla 把物体变换烘进顶点，MRT 路线拿不到逐物体运动。速度改成在帧末
         // （blit 之前）由一条**独立的全屏 pass** 从主深度重投影出来，见
         // [D3D12Velocity.record] 与 [recordVelocityPass]。
-        // P141 续四：mesh 包围球 pre-pass 必须在这里跑 —— compute dispatch 不允许出现在
-        // render pass 内部（D3D12 硬限制）。此前这行在 D3D12BeginRenderPass **之后**，
-        // 于是 Dispatch 落进已开的 pass，设备照样被移除 0x887A0005，白查了一天。
-        // 排队的是上一帧记录的段表；包围球是对象空间的，延迟一帧不影响正确性。
-        D3D12MeshBoundsService.flush(this.ctx)
+        // P217：mesh 包围球 pre-pass 随旧段表路径一起删除（新的 meshlet AS 不用 CPU 包围球表）。
         MCDR_ABI.D3D12BeginRenderPass(this.ctx, colorTextures, colorMips,
             colorClearFlags, clearColors, depthTexture, depthMip,
             depthClearFlag, depthClearValue, x, y, w, h)

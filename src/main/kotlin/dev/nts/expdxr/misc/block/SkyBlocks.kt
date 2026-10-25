@@ -22,24 +22,17 @@ import net.neoforged.neoforge.registries.DeferredRegister
  * 也不会像石头那样在自己周围引入额外的面剔除。
  */
 object SkyBlocks {
-    private val BLOCKS: DeferredRegister.Blocks = DeferredRegister.createBlocks(MODID)
-    private val ITEMS: DeferredRegister.Items = DeferredRegister.createItems(MODID)
-    private val BLOCK_ENTITIES: DeferredRegister<BlockEntityType<*>> =
-        DeferredRegister.create(BuiltInRegistries.BLOCK_ENTITY_TYPE, MODID)
+    private val BLOCKS = DeferredRegister.createBlocks(MODID)
+    private val ITEMS = DeferredRegister.createItems(MODID)
+    private val BLOCK_ENTITIES = DeferredRegister.create(BuiltInRegistries.BLOCK_ENTITY_TYPE, MODID)
 
-    private val SKY_BLOCK_PROPERTIES: Supplier<BlockBehaviour.Properties> =
-        Supplier { BlockBehaviour.Properties.ofFullCopy(Blocks.GLASS).noOcclusion() }
+    private val SKY_BLOCK_PROPERTIES = Supplier { BlockBehaviour.Properties.ofFullCopy(Blocks.GLASS).noOcclusion() }
 
-    val SKY_BLOCK: DeferredBlock<SkyBlock> =
-        BLOCKS.registerBlock("sky_block", ::SkyBlock, SKY_BLOCK_PROPERTIES)
+    val SKY_BLOCK = BLOCKS.registerBlock("sky_block", ::SkyBlock, SKY_BLOCK_PROPERTIES)
 
-    val SKY_BLOCK_ITEM: DeferredItem<BlockItem> = ITEMS.registerSimpleBlockItem(SKY_BLOCK)
+    val SKY_BLOCK_ITEM = ITEMS.registerSimpleBlockItem(SKY_BLOCK)
 
-    val SKY_BLOCK_ENTITY: DeferredHolder<BlockEntityType<*>, BlockEntityType<SkyBlockEntity>> =
-        BLOCK_ENTITIES.register(
-            "sky_block",
-            Supplier { BlockEntityType(::SkyBlockEntity, SKY_BLOCK.get()) }
-        )
+    val SKY_BLOCK_ENTITY = BLOCK_ENTITIES.register("sky_block", Supplier { BlockEntityType(::SkyBlockEntity, SKY_BLOCK.get()) })
 
     /**
      * 注册到 mod 事件总线。

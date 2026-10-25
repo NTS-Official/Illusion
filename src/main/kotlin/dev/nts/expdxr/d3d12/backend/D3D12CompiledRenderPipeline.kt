@@ -30,69 +30,31 @@ class D3D12CompiledRenderPipeline(
     private var cachedBindings: List<D3D12BindGroupEntry>? = null
 
     /**
-     * P137：mesh 变体 PSO（`Dx12Pipeline*`，0 = 没有变体）。
+     * P217：meshlet 版地形的 PSO（`D3D12MeshletShader` 生成的 MS + 同一条 PS）。
      *
-     * <p>同一个 `Dx12Pipeline` 对象里只换了 `withDepth/withoutDepth` 指向的 PSO，根签名与
-     * 绑定点布局和地形管线一致（多出 b8/t14/t15/t16 三个尾参），所以 `D3D12SetPipeline`
-     * 传的就是它；`D3D12PushDescriptors` 照旧推地形那套绑定。所有权在本对象，`close()` 释放。
+     * 每线程组 = 16 quad 的 meshlet、索引算术展开；根签名 = 地形布局 + b8/t14/t15/t16。
      */
-    var meshPso: Long = 0L
+    var meshletPso: Long = 0L
         private set
 
-    /** P137：mesh HLSL 解顶点时用的步长（`VertexFormat.vertexSize`）。 */
-    var meshVertexStride: Int = 0
-        private set
-
-    /**
-     * P138：这个 mesh 变体的 PS 是否按段读淡入系数（VS→PS 插值）。
-     *
-     * <p>true 时整批段（包括正在做「区块淡入」的）一次派发即可；false 表示补丁没打上，
-     * 派发侧必须继续把淡入未完成的段交给 IMR 逐段画（P137b 的旧路径）。
-     */
-    var meshPerSectionVisibility: Boolean = false
-        private set
-
-    /**
-     * P140：这个 mesh 变体是否带 amplification shader（meshlet 剔除）。
-     *
-     * <p>true 时根签名多出 t17 + b9，派发必须走 `D3D12MeshDrawSegmentsCulled`：组数按
-     * `ceil(组数/128)` 算，`DispatchMesh` 的实参由 AS 自己决定。
-     */
-    var meshMeshletCull: Boolean = false
-        private set
-
-    /** 挂上 mesh 变体（重复挂会先释放旧的）。*/
-    fun attachMeshVariant(pso: Long, vertexStride: Int, perSectionVisibility: Boolean,
-                          meshletCull: Boolean = false) {
-        if (this.meshPso != 0L && this.meshPso != pso) {
-            MCDR_ABI.D3D12DestroyPipeline(this.meshPso)
+    /** 挂上 meshlet 变体（重复挂会先释放旧的）。`asActive` = 该 PSO 带 AS 剔除。 */
+    fun attachMeshletVariant(pso: Long, asActive: Boolean) {
+        if (this.meshletPso != 0L && this.meshletPso != pso) {
+            MCDR_ABI.D3D12DestroyPipeline(this.meshletPso)
         }
-        this.meshPso = pso
-        this.meshVertexStride = vertexStride
-        this.meshPerSectionVisibility = perSectionVisibility
-        this.meshMeshletCull = meshletCull
+        this.meshletPso = pso
+        this.meshletAs = asActive
     }
 
-    /**
-     * P141：生成 meshlet 包围球的 compute 管线（`bounds_main`），只在 [meshMeshletCull] 时有值。
-     *
-     * <p>与 [meshPso] 一样属于本对象，`close()` 释放；根签名随 PSO 一起由 native 持有引用，
-     * 这里只留 PSO 句柄（native 侧 `Dx12Pipeline` 自己 AddRef 了那份签名）。
-     */
-    var boundsPipeline: Long = 0L
+    fun hasMeshletVariant(): Boolean = this.meshletPso != 0L
+
+    /** P217：meshlet 变体是否带 amplification shader（派发组数按 ceil(meshlet/32) 折算）。 */
+    var meshletAs: Boolean = false
         private set
 
-    /** 挂上包围球 compute 管线（重复挂会先释放旧的）。*/
-    fun attachBoundsPipeline(pipeline: Long) {
-        if (this.boundsPipeline != 0L && this.boundsPipeline != pipeline) {
-            MCDR_ABI.D3D12DestroyPipeline(this.boundsPipeline)
-        }
-        this.boundsPipeline = pipeline
-    }
+    /** P217：同会话 A/B 不再换 PSO，改由 globals 的 `gCullEnabled` 放行（见 AS 生成器）。 */
+    fun meshletPipeline(): Long = this.meshletPso
 
-    fun hasMeshVariant(): Boolean {
-        return this.meshPso != 0L
-    }
 
     fun info(): RenderPipeline {
         return this.info
@@ -175,13 +137,9 @@ class D3D12CompiledRenderPipeline(
     }
 
     override fun close() {
-        if (this.boundsPipeline != 0L) {
-            MCDR_ABI.D3D12DestroyPipeline(this.boundsPipeline)
-            this.boundsPipeline = 0L
-        }
-        if (this.meshPso != 0L) {
-            MCDR_ABI.D3D12DestroyPipeline(this.meshPso)
-            this.meshPso = 0L
+        if (this.meshletPso != 0L) {
+            MCDR_ABI.D3D12DestroyPipeline(this.meshletPso)
+            this.meshletPso = 0L
         }
         // P184：先取走再归零 —— 26.3 的 FrontendGpuDevice.close() 会走
         // PipelineBuilder.close() 逐条 close，本项目的缓存/桥接路径也可能再 close 一次；

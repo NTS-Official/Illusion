@@ -111,12 +111,10 @@
   "dxr_mc.configuration.renderer.taaSharpenAmount.tooltip": "Post-sharpen strength (0-1) applied after the TAA resolve. TAA is softer than DLAA, so it normally wants a higher value than dlss sharpen.",
 
   "dxr_mc.configuration.mesh.button": "Edit",
-  "dxr_mc.configuration.mesh.tooltip": "The terrain mesh-shader path (DispatchMesh instead of DrawIndexed).",
+  "dxr_mc.configuration.mesh.tooltip": "The terrain mesh-shader path (the only terrain rasterization path; no IMR fallback).",
   "dxr_mc.configuration.mesh.terrain": "Terrain Mesh Path",
-  "dxr_mc.configuration.mesh.terrain.tooltip": "Drive the solid terrain pipeline through DispatchMesh. Needs a 12_2 device with mesh shader tier 1; the log says which side of the gate the run landed on.",
+  "dxr_mc.configuration.mesh.terrain.tooltip": "Rasterize terrain with mesh shaders. Needs a 12_2 device with mesh shader tier 1. Turning it off leaves terrain undrawn; it is only useful for isolating a mesh regression.",
   "dxr_mc.configuration.mesh.terrain_cull": "Cull terrain meshlets with an amplification shader",
-  "dxr_mc.configuration.mesh.terrain_cull_bounds": "Read per-meshlet bounding spheres from a compute table",
-  "dxr_mc.configuration.mesh.terrain_cone": "Cull whole back-facing meshlets with a normal cone",
 
   "dxr_mc.configuration.dlss.tooltip": "Which upscaler backend the native DLL drives.",
   "dxr_mc.configuration.dlss.implementation": "DLSS Implementation",
@@ -144,6 +142,8 @@
   "dxr_mc.configuration.logging.logLevel.TRACE": "Trace",
   "dxr_mc.configuration.logging.nativeVerbose": "Native Verbose Logging",
   "dxr_mc.configuration.logging.nativeVerbose.tooltip": "Force the native DLL to DEBUG regardless of the log level above. Kept separate because the DLL is by far the loudest writer, and raising only it (without turning the renderer logs back on) is the common case.",
+  "dxr_mc.configuration.logging.shutdownTrace": "Shutdown Trace",
+  "dxr_mc.configuration.logging.shutdownTrace.tooltip": "Keep the native shutdown trace (the destroySurface/destroyDevice stage lines) visible at any log level. They are INFO lines, not errors - they used to be logged as ERROR, so every normal exit spammed the console. ON: they always show up, which is the only trail if quitting hangs. OFF: they become ordinary INFO lines and the default ERROR level hides them.",
   "dxr_mc.configuration.debug": "Debug",
   "dxr_mc.configuration.debug.button": "Edit",
   "dxr_mc.configuration.debug.tooltip": "Diagnostics that have to be decided before the renderer starts. Read once, when the config loads.",

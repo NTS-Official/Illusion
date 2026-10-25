@@ -17,9 +17,7 @@ import dev.nts.expdxr.CommandBundleMode
 import dev.nts.expdxr.misc.D3D12Settings
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.adapter.D3D12Device
-import dev.nts.expdxr.d3d12.render.advanced.mesh.D3D12MeshSectionSnapshot
-import dev.nts.expdxr.d3d12.render.advanced.mesh.D3D12MeshVertexDecode
-import dev.nts.expdxr.d3d12.render.advanced.mesh.D3D12TerrainBatchClassifier
+import dev.nts.expdxr.d3d12.render.advanced.mesh.D3D12MeshDrawCapture
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12Temporal
 import dev.nts.expdxr.d3d12.render.core.D3D12AsyncContext
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuBuffer
@@ -40,8 +38,6 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.function.Supplier
 
-/** P137：mesh 段表一个组条目的字节数（8 个 u32，见 `D3D12MeshVertexDecode` 的 `MeshSegment`）。 */
-private const val SEGMENT_BYTES = 32
 
 /**
  * P141 续八：地形批次里唯一逐 draw 变化的 uniform 名。
@@ -51,53 +47,22 @@ private const val SEGMENT_BYTES = 32
  */
 private const val CHUNK_SECTION_UNIFORM = "ChunkSection"
 
-/**
- * P139：一次 `DispatchMesh` / 一条 `ExecuteIndirect` 命令覆盖的组数上限。
- * b8 是 root CBV，基址必须 256 字节对齐；1024 组 × 32 B = 32 KB，正对齐。
- */
-private const val MESH_GROUPS_PER_BATCH = 1024
-
-/** P139：`DISPATCH_MESH` 的每条间接命令 = 3 个 u32（ThreadGroupCountX/Y/Z）。 */
-private const val MESH_INDIRECT_ARG_BYTES = 12
 
 /**
- * P140：AS 剔除用的视锥侧面数量。
- *
- * 只取左右上下四个侧面：近/远平面的符号依赖投影是 GL（z∈[-1,1]）还是 D3D（z∈[0,1]）约定，
- * 而侧平面的公式两者一致，所以先用这 4 个是最稳的起点。
+ * P217：mesh 跳过理由的去重必须**跨帧**（每个 pass 每帧都会新建一份 backend，挂实例字段
+ * 等于每帧重新打一遍）。这个集合只服务日志，不参与任何渲染逻辑。
  */
-private const val MESH_CULL_PLANES = 4
-
-/** P141：每个 meshlet 的包围球 = 16 B（`float3 center` + `float radius`）。 */
-private const val MESHLET_BOUNDS_BYTES = 16L
-
-/**
- * P141：让 `createBuffer` 建出可写 UAV 的缓冲（native 侧新增的 usage 位）。
- *
- * <p>与 `GpuBuffer` 的既有位（1..256）不冲突；native 里对应
- * `desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS`，并且这类缓冲**不参与池复用**
- * （池键只有堆类型+容量，复用会串标志）。
- */
-private const val MESHLET_BOUNDS_USAGE = 1024
-
-/**
- * P137：`ChunkVisibility` 到这个值就算淡入完成（原版是 `elapsed/fadeDuration`，走完正好 1.0）。
- * 取 0.9999 是为了容忍浮点误差：只要差一点点，`mix()` 就会把颜色拉向雾色。
- */
-private const val VISIBILITY_READY = 0.9999f
-
-/**
- * P141：`P137 mesh dispatch` 的日志节流必须**跨帧**，所以放在文件级而不是 backend 字段上。
- *
- * <p>backend 每个 pass 每帧都会新建一份（`D3D12CommandEncoderBackend.createRenderPass`），
- * 节流判据挂在实例字段上就等于每帧从 0 起算、每帧都满足 `<= 3` 而打两行：实测一次 6 分钟
- * 的会话打出 37886 行 `mesh dispatch` + 18942 行 `mesh dispatch skipped`，既淹掉 P3 profiler
- * 又白烧 CPU（本次要测的就是 CPU）。这两个计数只服务"打字"，不参与任何渲染逻辑。
- */
-private var gMeshLogBatches = 0L
-
-/** 同上：跳过理由去重也必须是"一次运行一次"，而不是"一帧一次"。 */
 private val gMeshSkipLogReasons: MutableSet<String> = HashSet()
+/** P217：meshlet 派发日志的全局限流（每个 pass 都会新建 backend，实例计数会被重置）。 */
+private var gMeshletLogNanos = 0L
+/** P217：地形批次因 mesh 数据缺失而未绘制的去重日志（不再回退 IMR）。 */
+private val gMeshTerrainMissingLog: MutableSet<String> = HashSet()
+/** P217：上一次 AS 剔除开关状态（同会话 A/B 切换时打一条诊断）。 */
+private var gMeshletLastCull: Boolean? = null
+/** P217：按图层的派发计数（日志限流是全局的，只印一条会看不到 TRANSLUCENT）。 */
+private var gMeshletSolid = 0L
+private var gMeshletCutout = 0L
+private var gMeshletTranslucent = 0L
 
 /**
  * D3D12 render pass backend（P6 core 全链路）。
@@ -118,33 +83,22 @@ class D3D12RenderPassBackend(
     /** P31：是否使用 shader Y-flip 变体管线（GUI 离屏 pass，由 CommandEncoder 根据 texture usage 判断）。 */
     private val flipY: Boolean,
     /**
-     * P137：本 encoder 的瞬态上传区 —— mesh 段派发每帧要上传段表（32 B/组）与逐段
-     * `ChunkSection`（96 B/段），只有 `uploadStaging` 能拿到 COPY_SRC 缓冲与 256 对齐偏移。
+     * P217：本 encoder 的瞬态上传区 —— meshlet 派发每帧要上传段表、meshlet 表与小常量，
+     * 只有 `uploadStaging` 能拿到 COPY_SRC 缓冲与 256 对齐偏移。
      */
     private val transientMemory: D3D12TransientMemory,
 ) : RenderPassBackend {
     private var pushedDebugGroups = 0
 
-    /** P137：mesh 派发是否启用（配置项优先，环境变量只作已弃用的逃生口）。 */
+    /** P217：mesh 派发是否启用（唯一入口是 `[mesh] terrain` 配置项）。 */
     private val meshDispatchEnabled: Boolean
-        get() = (D3D12Settings.meshTerrain || System.getenv("MCDR_MESH_TERRAIN") == "1") && !meshToggledOff()
-    private var meshBatches = 0L
-    private var meshGroups = 0L
-    /** P139：indirect 派发成功次数（用来确认这条路真被走到，而不是静默回退 direct）。 */
-    private var meshIndirectDispatches = 0L
-    /** P139：设备建不出 `DISPATCH_MESH` 命令签名时置位，之后不再尝试 indirect。 */
-    private var meshIndirectBroken = false
+        get() = D3D12Settings.meshTerrain
 
-    /**
-     * P138 诊断开关：`run/dxrmc/mesh_off` 存在时把 mesh 派发让回 IMR。
-     *
-     * <p>只为"同一帧、同一时刻"的 A/B 对比存在（改配置要重启，太阳位置就变了，
-     * 逐像素对比会被光照变化污染）。排查完就删掉，不作为功能入口。
-     */
-    private fun meshToggledOff(): Boolean {
-        return java.nio.file.Files.exists(
-            java.nio.file.Path.of(System.getProperty("user.dir"), "dxrmc", "mesh_off"))
-    }
+    /** P217：最近一次 slot0 顶点切片的字节偏移（MDI 每段的 `baseVertex` 相对它）。 */
+    private var lastVertexSliceOffset = -1L
+
+    /** P217：最近一次 slot0 顶点切片的缓冲（meshlet 派发要把它当 t14 的 RAW SRV 绑定）。 */
+    private var lastVertexBuffer: GpuBuffer? = null
 
     private var pipeline: D3D12CompiledRenderPipeline? = null
     private var anyDescriptorDirty = false
@@ -512,6 +466,11 @@ class D3D12RenderPassBackend(
             (buffer as D3D12GpuBuffer).handle(), vertexBuffer.offset(), stride)) {
             throw IllegalStateException("dx12SetVertexBuffer failed")
         }
+        if (slot == 0) {
+            // P217：MDI 批次里每个段的 `baseVertex` 都相对这块切片，Stage 2 建段表要用。
+            this.lastVertexSliceOffset = vertexBuffer.offset()
+            this.lastVertexBuffer = buffer
+        }
     }
 
     override fun setIndexBuffer(indexBuffer: GpuBuffer, indexType: IndexType) {
@@ -638,11 +597,134 @@ class D3D12RenderPassBackend(
     }
 
     override fun drawIndexedIndirect(commands: GpuBufferSlice, drawCount: Int) {
+        val location = this.pipeline?.info()?.location?.toString() ?: ""
+        // P217：地形**全部**（不透明 + OIT 半透明）只走 meshlet，没有 IMR 回退。
+        // 半透明能这么做的前提是 `GameRendererTransparencyMixin` 把 improved transparency
+        // （Wavelet OIT）强制打开 —— OIT 顺序无关，mesh 的线程组顺序才无所谓。
+        if (isTerrain(location)) {
+            if (!tryMeshletDraw(commands, drawCount)) {
+                meshTerrainMissing("$location draws=$drawCount")
+            }
+            return
+        }
         this.pushDescriptors()
         if (!MCDR_ABI.D3D12DrawIndexedIndirect(this.ctx,
             (commands.buffer() as D3D12GpuBuffer).handle(), commands.offset(), drawCount)) {
             throw IllegalStateException("dx12DrawIndexedIndirect failed")
         }
+    }
+
+    /** P217：管线名 → 上传注册表里的图层 key（`ChunkSectionLayer.name()`）。 */
+    private fun meshletLayerFor(location: String): String? = when {
+        location.contains("solid_terrain") -> "SOLID"
+        location.contains("cutout_terrain") -> "CUTOUT"
+        location.contains("translucent") || location.contains("oit_") -> "TRANSLUCENT"
+        else -> null
+    }
+
+    /** P217：地形管线（含 OIT 三段）；shadow 不属于本路径。 */
+    private fun isTerrain(location: String): Boolean =
+        location.contains("terrain") && !location.contains("shadow")
+
+    /** P217：地形批次的 mesh 派发失败时只记一次 —— 已去除 IMR 回退，不会再画一遍原版路径。 */
+    private fun meshTerrainMissing(reason: String) {
+        if (gMeshTerrainMissingLog.add(reason)) {
+            LOGGER.error("[dxrmc] P217 terrain batch not drawn (mesh path unavailable): {}", reason)
+        }
+    }
+
+    /** P217：`tryMeshletDraw` 的静默前置失败也要留证（去重，一次运行每理由一条）。 */
+    private fun meshletSkip(reason: String): Boolean {
+        if (gMeshSkipLogReasons.add("meshlet:" + reason)) {
+            LOGGER.info("[dxrmc] P217 meshlet skipped: {}", reason)
+        }
+        return false
+    }
+
+    /**
+     * P217：meshlet 版地形派发 —— 一次 `DispatchMesh(meshletCount)` 覆盖整批 MDI 段。
+     *
+     * <p>返回 false 表示这批不归 mesh 管（调用方按"地形无回退"处理）。所有前置失败都会记一条
+     * 去重日志 —— 现在没有 IMR 回退，静默跳过等于画面缺块，必须能定位。
+     */
+    private fun tryMeshletDraw(commands: GpuBufferSlice, drawCount: Int): Boolean {
+        if (!meshDispatchEnabled) return meshletSkip("mesh dispatch disabled")
+        val compiled = this.pipeline ?: return meshletSkip("no pipeline bound")
+        if (!compiled.hasMeshletVariant()) {
+            return meshletSkip("pipeline has no meshlet variant (${compiled.info().location})")
+        }
+        // 带 AS 的旧段表变体用的是 4-range 根签名（多一个 t17），新 MS 只写 3 个 range，不能混用。
+        val batch = D3D12MeshDrawCapture.batch(commands.offset())
+            ?: return meshletSkip("no captured MDI list for offset ${commands.offset()}")
+        if (batch.drawCount != drawCount) {
+            return meshletSkip("drawCount mismatch captured=${batch.drawCount} call=$drawCount")
+        }
+        val layer = meshletLayerFor(compiled.info().location.toString())
+            ?: return meshletSkip("unknown terrain layer ${compiled.info().location}")
+        val vertexBuffer = this.lastVertexBuffer ?: return meshletSkip("no slot0 vertex buffer")
+        if (this.lastVertexSliceOffset < 0L) return meshletSkip("vertex slice offset unset")
+        val tables = D3D12MeshDrawCapture.buildTables(batch, layer, this.lastVertexSliceOffset)
+            ?: return meshletSkip("meshlet tables incomplete (layer=$layer draws=${batch.drawCount})")
+
+        // P217 同会话 A/B：`run/dxrmc/meshlet_no_as` 存在时把 b8 的 `gCullEnabled` 置 0 ——
+        // 同一个 PSO、同一次派发，AS 全放行；像素差异只可能来自剔除本身。
+        val cullOn = !java.nio.file.Files.exists(
+            java.nio.file.Path.of(System.getProperty("user.dir"), "dxrmc", "meshlet_no_as"))
+        if (gMeshletLastCull != cullOn) {
+            gMeshletLastCull = cullOn
+            LOGGER.info("[dxrmc] P217 AS cull toggle: cull={} meshletAs={}", cullOn, compiled.meshletAs)
+        }
+
+        val sectionsSlice = this.transientMemory.uploadStaging(
+            mutableListOf(ByteBuffer.wrap(tables.sections)), 256L, GpuBuffer.USAGE_COPY_SRC)
+        val meshletsSlice = this.transientMemory.uploadStaging(
+            mutableListOf(ByteBuffer.wrap(tables.meshlets)), 256L, GpuBuffer.USAGE_COPY_SRC)
+        val globalsBytes = ByteBuffer.allocate(256).order(ByteOrder.LITTLE_ENDIAN)
+        globalsBytes.putInt(tables.meshletCount)
+        globalsBytes.putInt(if (cullOn) 1 else 0)
+        globalsBytes.flip()
+        val globalsSlice = this.transientMemory.uploadStaging(
+            mutableListOf(globalsBytes), 256L, GpuBuffer.USAGE_COPY_SRC)
+        val sectionsHandle = (sectionsSlice.buffer() as? D3D12GpuBuffer)?.handle() ?: return false
+        val meshletsHandle = (meshletsSlice.buffer() as? D3D12GpuBuffer)?.handle() ?: return false
+        val globalsHandle = (globalsSlice.buffer() as? D3D12GpuBuffer)?.handle() ?: return false
+        if (globalsSlice.offset() % 256L != 0L) {
+            return meshletSkip("meshlet globals offset ${globalsSlice.offset()} is not 256-aligned")
+        }
+
+        val useDepth = this.hasDepth && compiled.info().depthStencilState != null
+        if (!MCDR_ABI.D3D12SetPipeline(this.ctx, compiled.meshletPipeline(), useDepth)) {
+            return meshletSkip("bind meshlet PSO failed: ${MCDR_ABI.D3D12LastError()}")
+        }
+        // 先换 PSO 再 pushDescriptors：native 的 SetGraphicsRootSignature 会清掉已绑的根描述符表。
+        this.anyDescriptorDirty = true
+        this.pushDescriptors()
+        val dispatched = MCDR_ABI.D3D12MeshDrawMeshlets(this.ctx,
+            (vertexBuffer as D3D12GpuBuffer).handle(), this.lastVertexSliceOffset,
+            sectionsHandle, sectionsSlice.offset(), sectionsSlice.length(),
+            meshletsHandle, meshletsSlice.offset(), meshletsSlice.length(),
+            globalsHandle, globalsSlice.offset(),
+            // 带 AS 时 meshlet 数放在 b8 常量里，派发的是 AS 线程组数（每组 32 个 meshlet）。
+            if (compiled.meshletAs) (tables.meshletCount + 31) / 32 else tables.meshletCount)
+        val failure = if (dispatched) null else MCDR_ABI.D3D12LastError()
+        // 恢复 IMR PSO：本 pass 后续的 draw 仍复用这条管线。
+        MCDR_ABI.D3D12SetPipeline(this.ctx, compiled.handle(), useDepth)
+        this.anyDescriptorDirty = true
+        if (failure != null) {
+            return meshletSkip("meshlet dispatch failed: $failure")
+        }
+        when (layer) {
+            "SOLID" -> gMeshletSolid++
+            "CUTOUT" -> gMeshletCutout++
+            "TRANSLUCENT" -> gMeshletTranslucent++
+        }
+        if (System.nanoTime() - gMeshletLogNanos > 2_000_000_000L) {
+            gMeshletLogNanos = System.nanoTime()
+            LOGGER.info("[dxrmc] P217 meshlet dispatch: draws={} meshlets={} layer={} " +
+                "totals[solid={} cutout={} translucent={}]",
+                drawCount, tables.meshletCount, layer, gMeshletSolid, gMeshletCutout, gMeshletTranslucent)
+        }
+        return true
     }
 
     @Suppress("UNCHECKED_CAST")
@@ -1109,39 +1191,8 @@ class D3D12RenderPassBackend(
         }
         val profT0 = if (MCDR_ABI.PROF) System.nanoTime() else 0L
         val batch = materialize(draws)
-        // P126（mesh Step 3 预检）：地形批次摊平 + 分流结论；此处只记录，不改变绘制路径。
-        val probePipeline = this.pipeline
-        if (probePipeline is D3D12CompiledRenderPipeline) {
-            val probeInfo = probePipeline.info()
-            val probeLocation = probeInfo.location.toString()
-            if (D3D12TerrainBatchClassifier.isTerrain(probeLocation)) {
-                val flat = D3D12TerrainBatchClassifier.flatten(probeInfo, batch, defaultIndexBuffer, defaultIndexType)
-                val verdict = D3D12TerrainBatchClassifier.classify(flat)
-                D3D12TerrainBatchClassifier.note(flat, verdict)
-                if (verdict == D3D12TerrainBatchClassifier.Verdict.TERRAIN_MESH_CANDIDATE &&
-                    D3D12TerrainBatchClassifier.shouldPlanSegments()) {
-                    D3D12TerrainBatchClassifier.noteSegments(
-                        flat.location, D3D12TerrainBatchClassifier.segments(batch))
-                }
-            }
-        }
-        // P137：地形批次走 mesh 派发（一条材质一批 → 一次 DispatchMesh）。条件不满足
-        // 就落到下面的并行/串行 IMR 路径，行为与之前完全一致。
-        // 返回值三态：null = 这批根本不归 mesh 管；空列表 = 已全部派发；非空 = 这些 draw
-        // 还要补一遍 IMR（正在做「区块淡入」的段，原因见 tryMeshDrawMultipleIndexed）。
-        val deferred = this.tryMeshDrawMultipleIndexed(batch, defaultIndexBuffer, defaultIndexType,
-            dynamicUniforms, uniformArgument)
-        if (deferred != null) {
-            if (deferred.isNotEmpty()) {
-                this.drawSerially(deferred, defaultIndexBuffer, defaultIndexType, uniformArgument)
-            }
-            if (profT0 != 0L) {
-                gProfMultiBatches++
-                gProfMultiDraws += batch.size
-                gProfMultiPathNs += System.nanoTime() - profT0
-            }
-            return
-        }
+        // P217：地形不再走这里 —— 26.3 的 MDI 地形用的是 drawIndexedIndirect，由它统一接管。
+        // 这条路径只剩非地形管线（水/粒子/实体等），保持并行/串行 IMR。
         // P33：批量足够大时走并行 bundle 录制（worker pool）；任何条件不满足或录制失败
         // 都回退到下面的串行路径，保证功能等价。
         val parallel = this.tryParallelDrawMultipleIndexed(batch, defaultIndexBuffer,
@@ -1175,457 +1226,6 @@ class D3D12RenderPassBackend(
         }
     }
 
-    /** P137：记录一次 mesh 跳过理由（同一理由只打一次）。 */
-    private fun meshSkip(reason: String) {
-        if (gMeshSkipLogReasons.add(reason)) {
-            LOGGER.info("[dxrmc] P137 mesh dispatch skipped: {}", reason)
-        }
-    }
-
-    /** P137：[meshSkip] 的"顺手 return null"版本，让前置条件检查保持一行。 */
-    private fun <T : Any> meshSkipFor(reason: String): List<RenderPass.Draw<T>>? {
-        meshSkip(reason)
-        return null
-    }
-
-    /**
-     * P137：段快照里的 `ChunkVisibility`（`chunksection.glsl`：`mat4 ModelViewMat` 占 0..63，
-     * 然后 `float ChunkVisibility` 落在 64）。手写小端位运算，避免每段每帧新建 ByteBuffer。
-     *
-     * <p>[offset] 是段在整批段数据里的起始字节偏移（一段 96 B）。
-     */
-    private fun sectionVisibilityAt(section: ByteArray, offset: Int): Float {
-        val base = offset + 64
-        return Float.fromBits((section[base].toInt() and 0xFF) or
-            ((section[base + 1].toInt() and 0xFF) shl 8) or
-            ((section[base + 2].toInt() and 0xFF) shl 16) or
-            ((section[base + 3].toInt() and 0xFF) shl 24))
-    }
-
-    /**
-     * P137：把一整批地形段交给一次 mesh 派发（`DispatchMesh(组数)`）。
-     *
-     * 返回 **null** = 这批不归 mesh 管（调用点回退 IMR，画面不受影响）；返回列表 = 已经用
-     * mesh 派发过，列表里的 draw 还要调用点补一次 IMR 绘制。前置条件：
-     * - 本管线有 mesh 变体（目前只有 `solid_terrain` 建了）；
-     * - 这批 draw 共用同一个 IB、索引类型、VB 与顶点槽 0；
-     * - 每段都带 `ChunkSection` uniform，其 96 B 已由字节快照捕获
-     *   （[D3D12MeshSectionSnapshot]，CPU 写入侧抄的，不做 GPU 回读）；
-     * - 除 `ChunkSection` 外的 uniform 逐段完全一致（否则不是同一材质的一批）。
-     *
-     * **正在淡入的段不进 mesh 批次**：原版 `terrain.fsh` 是
-     * `color = mix(FogColor * vec4(1,1,1,color.a), color, ChunkVisibility)`，`ChunkVisibility`
-     * 在**像素着色器**里从 `ChunkSection` UBO（offset 64）读 —— 就是
-     * `SectionRenderDispatcher.getVisibility(now)` 给的 0..1 淡入系数（设置里的「区块淡入」）。
-     * VS 已被我们改成按段读 t16，但 **PS 仍是原版那份**，它的 `ChunkSection` 是逐 draw 的
-     * root CBV，一次 mesh 派发只绑一次：让淡入中的段混进来，整批地形都会按那一个系数向
-     * FogColor 混（表现就是"整片地形又渐渐出现一次"，只在新区块上传后的 0.75 s 内发生，
-     * 所以只有走动时才看得到）。这些段交回 IMR 逐段画。
-     *
-     * 段表按每 [D3D12MeshVertexDecode.MAX_INDICES_PER_GROUP] 个索引一组切片：mesh shader
-     * 的线程组上限是 128，且 D3D12 每组上限 256 顶点 / 256 图元，一个 1536 索引的段发不出去。
-     *
-     * 派发顺序有讲究：**先换 mesh PSO 再 [pushDescriptors]** —— native 的
-     * `SetGraphicsRootSignature` 会清掉已绑定的根描述符表。派发完必须恢复 IMR PSO：
-     * vanilla 只在切换管线时才调 `setPipeline`，本 pass 后续复用同一管线的 draw
-     * 不能落在 mesh PSO 上。
-     */
-    private fun <T : Any> tryMeshDrawMultipleIndexed(
-        batch: List<RenderPass.Draw<T>>,
-        defaultIndexBuffer: GpuBuffer?,
-        defaultIndexType: IndexType?,
-        dynamicUniforms: Collection<String>,
-        uniformArgument: T,
-    ): List<RenderPass.Draw<T>>? {
-        val compiled = this.pipeline
-            ?: return this.meshSkipFor("no compiled pipeline")
-        if (!compiled.hasMeshVariant()) return this.meshSkipFor("pipeline has no mesh variant")
-        if (!this.meshDispatchEnabled) return this.meshSkipFor("mesh dispatch disabled")
-        if (batch.isEmpty()) return this.meshSkipFor("empty batch")
-        if (!dynamicUniforms.contains("ChunkSection")) return this.meshSkipFor("no ChunkSection uniform")
-
-        var indexBuffer: GpuBuffer? = null
-        var indexType: IndexType? = null
-        var vertexBuffer: GpuBuffer? = null
-        for (draw in batch) {
-            if (draw.slot() != 0) return this.meshSkipFor("vertex slot ${draw.slot()} != 0")
-            val ib = draw.indexBuffer() ?: defaultIndexBuffer ?: return this.meshSkipFor("no index buffer")
-            val itype = draw.indexType() ?: defaultIndexType ?: return this.meshSkipFor("no index type")
-            val vb = draw.vertexBuffer()
-            if (indexBuffer == null) {
-                indexBuffer = ib
-                indexType = itype
-                vertexBuffer = vb
-            } else if (indexBuffer !== ib || indexType != itype || vertexBuffer !== vb) {
-                return this.meshSkipFor("draws do not share one vertex/index buffer")
-            }
-            val count = draw.indexCount()
-            if (count <= 0 || count % 3 != 0) {
-                return this.meshSkipFor("index count $count is not a whole triangle count")
-            }
-        }
-        val ib = indexBuffer ?: return this.meshSkipFor("no index buffer")
-        val itype = indexType ?: return this.meshSkipFor("no index type")
-        val vb = vertexBuffer ?: return this.meshSkipFor("no vertex buffer")
-        val vbHandle = (vb as? D3D12GpuBuffer)?.handle() ?: return this.meshSkipFor("vertex buffer is not D3D12")
-        val ibHandle = (ib as? D3D12GpuBuffer)?.handle() ?: return this.meshSkipFor("index buffer is not D3D12")
-        val indexStride = if (itype == IndexType.INT) 4 else 2
-
-        // 逐段跑 uniform 消费者（与串行路径一致的副作用：填 this.uniforms），抓 96 B 快照，
-        // 同时把"还在做区块淡入"的段挑出去交给 IMR —— 它们的 ChunkVisibility 是逐 draw 的
-        // PS 常量，混进 mesh 批次会把整批地形一起混向 FogColor。
-        val sectionBytes = D3D12MeshSectionSnapshot.SECTION_BYTES
-        val readyDraws = ArrayList<RenderPass.Draw<T>>(batch.size)
-        // P141 续八：整批 96 B 直接在**一块** ByteArray 里按 draw 顺序落位（不再每段一个 ByteArray），
-        // 淡入中的段不占用槽位，所以块内是紧凑的。
-        val sectionBlock = ByteArray(batch.size * sectionBytes)
-        var readyCount = 0
-        // 派发时只需要第一段的切片（根 CBV 复位用），原先为此维护了一个 ArrayList，
-        // 每帧 2000 次 add 只为取 [0]。
-        var firstReadySlice: GpuBufferSlice? = null
-        val deferred = ArrayList<RenderPass.Draw<T>>()
-        var material: List<String>? = null
-        for (draw in batch) {
-            val consumer = draw.uniformUploaderConsumer()
-            if (consumer == null) {
-                meshSkip("draw has no uniform uploader")
-                return null
-            }
-            consumer.accept(uniformArgument, this.uniformUploader)
-            val sectionSlice = this.chunkSectionSlice
-            if (sectionSlice == null) {
-                meshSkip("ChunkSection uniform not set")
-                return null
-            }
-            val sectionBuffer = (sectionSlice.buffer() as? D3D12GpuBuffer)?.handle()
-            if (sectionBuffer == null) {
-                meshSkip("section buffer is not D3D12")
-                return null
-            }
-            // P141：不传 minStamp。vanilla 的 DynamicUniformStorage 在内容不变时会短路（不重新
-            // map 写入），静态帧因此拿不到"新"快照；以前靠 lastGood 跨帧兜底，但那会把别处的
-            // 96 B 当成这一段的（重复层/错位）。现在直接取该 offset 最近一次写入的字节：ring
-            // 每帧会复用同一 offset，最近一次写入就是当前内容。
-            val sectionOffset = readyCount * sectionBytes
-            if (!D3D12MeshSectionSnapshot.lookupInto(
-                    sectionBuffer, sectionSlice.offset(), sectionBlock, sectionOffset)) {
-                meshSkip("no fresh 96 B section snapshot at offset ${sectionSlice.offset()}")
-                return null
-            }
-            // P141 续八：材质签名只在"除 ChunkSection 外的 uniform 变过"时重算。原先每个 draw
-            // 都新建 ArrayList + 拼 N 个字符串 + 排序，1231 draw/帧就是 1231 次，实测占
-            // batchPath 的大头（p219）。
-            if (material == null || this.materialDirty) {
-                val signature = this.materialSignature()
-                this.materialDirty = false
-                if (material == null) {
-                    material = signature
-                } else if (material != signature) {
-                    meshSkip("uniforms differ between draws")
-                    return null
-                }
-            }
-            if (!compiled.meshPerSectionVisibility &&
-                sectionVisibilityAt(sectionBlock, sectionOffset) < VISIBILITY_READY) {
-                deferred.add(draw)
-            } else {
-                readyDraws.add(draw)
-                if (firstReadySlice == null) {
-                    firstReadySlice = sectionSlice
-                }
-                readyCount++
-            }
-        }
-        // 整批都在淡入：这批一条也不用 mesh 派发，交给调用点按 IMR 画。
-        if (readyDraws.isEmpty()) return null
-
-        // 段表：32 B/组，每组 = 一个 ≤MAX_INDICES_PER_GROUP 索引的切片。
-        val perGroup = D3D12MeshVertexDecode.MAX_INDICES_PER_GROUP
-        var groupCount = 0
-        for (draw in readyDraws) {
-            groupCount += (draw.indexCount() + perGroup - 1) / perGroup
-        }
-        if (groupCount <= 0) {
-            meshSkip("no groups")
-            return null
-        }
-        // 段表按 1024 组（32 KB）整批补齐：native 每批按批组数校验段表范围，最后一批不足
-        // 1024 组时若缓冲正好截断会在 b8 上越界（实测 "meshDispatch: segments range
-        // overflow (groups=1024 offset=622592 size=653824)"）。补上的组 indexCount=0，
-        // AS 侧 `local < meshletCount` 与 MS 的 SetMeshOutputCounts(0,0) 都不会产出图元。
-        //
-        // P141 续八：一次分配补齐后的大小，ByteBuffer 原地填前 groupCount 组（ByteArray 本身
-        // 清零，补位天然是 0）。原先 allocate → flip → get 到 ByteArray → 再 copyOf 补齐，
-        // 一批 23552 组时每帧要额外搬 ~750 KB。
-        val paddedGroups = (groupCount + MESH_GROUPS_PER_BATCH - 1) / MESH_GROUPS_PER_BATCH *
-            MESH_GROUPS_PER_BATCH
-        val segmentUpload = ByteArray(paddedGroups * SEGMENT_BYTES)
-        val segmentTable = ByteBuffer.wrap(segmentUpload).order(ByteOrder.LITTLE_ENDIAN)
-        var sectionIndex = 0
-        for (draw in readyDraws) {
-            var remaining = draw.indexCount()
-            var firstIndex = draw.firstIndex()
-            while (remaining > 0) {
-                val count = minOf(remaining, perGroup)
-                segmentTable.putInt(firstIndex)
-                    .putInt(count)
-                    .putInt(draw.baseVertex())
-                    .putInt(sectionIndex)
-                    .putInt(indexStride)
-                    .putInt(0).putInt(0).putInt(0)
-                firstIndex += count
-                remaining -= count
-            }
-            sectionIndex++
-        }
-        val sections = if (readyCount == batch.size) sectionBlock else
-            sectionBlock.copyOf(readyCount * sectionBytes)
-        if (System.getenv("MCDR_MESH_DUMP") == "1" && this.meshBatches <= 3) {
-            dumpMeshBatch(sections, readyCount, segmentUpload)
-        }
-
-        val sectionsSlice = this.transientMemory.uploadStaging(
-            mutableListOf(ByteBuffer.wrap(sections)), 256L, GpuBuffer.USAGE_COPY_SRC)
-        val segmentsSlice = this.transientMemory.uploadStaging(
-            mutableListOf(ByteBuffer.wrap(segmentUpload)), 256L, GpuBuffer.USAGE_COPY_SRC)
-        val sectionsHandle = (sectionsSlice.buffer() as? D3D12GpuBuffer)?.handle()
-            ?: return this.meshSkipFor("section upload is not D3D12")
-        val segmentsHandle = (segmentsSlice.buffer() as? D3D12GpuBuffer)?.handle()
-            ?: return this.meshSkipFor("segment upload is not D3D12")
-        // 段表走 root CBV，D3D12 要求 256 B 对齐。
-        if (segmentsSlice.offset() % 256L != 0L) {
-            return this.meshSkipFor("segment table offset ${segmentsSlice.offset()} is not 256-aligned")
-        }
-
-        // 派发期间 PS 读的是绑在根 CBV 上的那一份 ChunkSection，必须是**已淡入完成**的段，
-        // 否则整批又被 `mix(FogColor, color, ChunkVisibility)` 拉向雾色。
-        val boundSection = firstReadySlice
-        if (boundSection == null) {
-            return this.meshSkipFor("no ready section slice")
-        }
-        this.setUniformByName("ChunkSection", boundSection)
-        val useDepth = this.hasDepth && compiled.info().depthStencilState != null
-        if (!MCDR_ABI.D3D12SetPipeline(this.ctx, compiled.meshPso, useDepth)) {
-            return this.meshSkipFor("bind mesh PSO failed: ${MCDR_ABI.D3D12LastError()}")
-        }
-        this.anyDescriptorDirty = true
-        this.pushDescriptors()
-        val dispatched = if (compiled.meshMeshletCull) {
-            dispatchMeshSegmentsCulled(
-                compiled, vbHandle, ibHandle,
-                sectionsHandle, sectionsSlice.offset(), sectionsSlice.length(),
-                segmentsHandle, segmentsSlice.offset(), groupCount, paddedGroups,
-                segmentUpload,
-            )
-        } else {
-            dispatchMeshSegments(
-                vbHandle, ibHandle,
-                sectionsHandle, sectionsSlice.offset(), sectionsSlice.length(),
-                segmentsHandle, segmentsSlice.offset(), groupCount,
-            )
-        }
-        val failure = if (dispatched) null else MCDR_ABI.D3D12LastError()
-        // 恢复 IMR PSO：本 pass 后续的 draw 仍复用这条管线。
-        MCDR_ABI.D3D12SetPipeline(this.ctx, compiled.handle(), useDepth)
-        this.anyDescriptorDirty = true
-        if (failure != null) return this.meshSkipFor("native dispatch failed: $failure")
-        D3D12MeshSectionSnapshot.markDispatched()
-        this.meshBatches++
-        this.meshGroups += groupCount
-        gMeshLogBatches++
-        if (gMeshLogBatches <= 3L || gMeshLogBatches % 600L == 0L) {
-            LOGGER.info("[dxrmc] P137 mesh dispatch: batch={} draws={} groups={} sections={}B " +
-                "segments={}B vbStride={} idxStride={} deferred={} indirect={}",
-                gMeshLogBatches, readyDraws.size, groupCount, sections.size, segmentUpload.size,
-                compiled.meshVertexStride, indexStride, deferred.size, this.meshIndirectDispatches)
-        }
-        return deferred
-    }
-
-    /**
-     * P139：真正把段表交给 GPU —— 优先走 indirect（`ExecuteIndirect` + `DISPATCH_MESH`）。
-     *
-     * <p>indirect 这条路本身不比 direct 省事（args 还是 CPU 每帧填的），它存在的意义是
-     * **为 GPU 侧剔除留好管道**：把 args 与压缩后的段表换成 GPU 写出来的缓冲之后，同一个
-     * 调用点就能按 GPU 的判定整段跳过，而不需要 CPU 读回。设备建不出命令签名（非 12_2
-     * 或驱动不给）时静默退回 direct，画面不变。
-     *
-     * @return true = 已派发；false = 失败（调用方按跳过处理，不要重复补画）。
-     */
-    private fun dispatchMeshSegments(
-        vertexBuffer: Long,
-        indexBuffer: Long,
-        sections: Long,
-        sectionsOffset: Long,
-        sectionsLength: Long,
-        segments: Long,
-        segmentsOffset: Long,
-        groupCount: Int,
-    ): Boolean {
-        if (!this.meshIndirectBroken) {
-            val batches = (groupCount + MESH_GROUPS_PER_BATCH - 1) / MESH_GROUPS_PER_BATCH
-            val args = ByteBuffer.allocate(batches * MESH_INDIRECT_ARG_BYTES).order(ByteOrder.LITTLE_ENDIAN)
-            var left = groupCount
-            while (left > 0) {
-                val batch = minOf(MESH_GROUPS_PER_BATCH, left)
-                args.putInt(batch).putInt(1).putInt(1)
-                left -= batch
-            }
-            args.flip()
-            val argsSlice = this.transientMemory.uploadStaging(
-                mutableListOf(args), 16L, GpuBuffer.USAGE_COPY_SRC)
-            val argsHandle = (argsSlice.buffer() as? D3D12GpuBuffer)?.handle() ?: 0L
-            if (argsHandle != 0L) {
-                var ok = true
-                var first = 0
-                var argOffset = argsSlice.offset()
-                while (ok && first < groupCount) {
-                    val batch = minOf(MESH_GROUPS_PER_BATCH, groupCount - first)
-                    ok = MCDR_ABI.D3D12MeshDrawSegmentsIndirect(
-                        this.ctx,
-                        vertexBuffer, 0L,
-                        indexBuffer, 0L,
-                        sections, sectionsOffset, sectionsLength,
-                        // b8 基址必须 256 对齐：段表起点 256 对齐 + 每批 32 KB。
-                        segments, segmentsOffset + first.toLong() * SEGMENT_BYTES,
-                        argsHandle, argOffset, 1,
-                    )
-                    if (!ok) {
-                        val reason = MCDR_ABI.D3D12LastError()
-                        if (first == 0) {
-                            // 一条命令都没发出去，可以安全地整批退回 direct。
-                            this.meshIndirectBroken = true
-                            if (this.meshBatches < 8L) {
-                                LOGGER.info("[dxrmc] P139 mesh indirect unavailable, using direct: {}", reason)
-                            }
-                            break
-                        }
-                        // 已经发出去一部分：不能再补 direct（会重复绘制），本帧少这一块。
-                        LOGGER.warn("[dxrmc] P139 mesh indirect failed at group {} of {}: {}",
-                            first, groupCount, reason)
-                        return false
-                    }
-                    first += batch
-                    argOffset += MESH_INDIRECT_ARG_BYTES
-                }
-                if (ok) {
-                    this.meshIndirectDispatches++
-                    return true
-                }
-            }
-        }
-        return MCDR_ABI.D3D12MeshDrawSegments(
-            this.ctx,
-            vertexBuffer, 0L,
-            indexBuffer, 0L,
-            sections, sectionsOffset, sectionsLength,
-            segments, segmentsOffset, groupCount,
-        )
-    }
-
-    /**
-     * P140：把整批 meshlet 交给带 amplification shader 的 mesh PSO。
-     *
-     * <p>与 [dispatchMeshSegments] 的区别只有两处：组数按 `ceil(组数/128)` 给（每个 AS 线程组
-     * 看 128 个 meshlet，`DispatchMesh` 的实参由 AS 自己填），以及多传一组视锥平面。包围球表
-     * 传 0 —— 第一版由 AS 自己从 t14 顶点流算，省掉 CPU 侧的区块几何数据来源（P140 记过原因）。
-     *
-     * @return true = 已派发；false = 失败（调用方按跳过处理）。
-     */
-    private fun dispatchMeshSegmentsCulled(
-        compiled: D3D12CompiledRenderPipeline,
-        vertexBuffer: Long,
-        indexBuffer: Long,
-        sections: Long,
-        sectionsOffset: Long,
-        sectionsLength: Long,
-        segments: Long,
-        segmentsOffset: Long,
-        groupCount: Int,
-        paddedGroups: Int,
-        segmentBytes: ByteArray,
-    ): Boolean {
-        // P141：包围球由 pre-pass 的 `bounds_main` compute 生成（compute 不能出现在 render pass
-        // 里），因此这里走"延迟一帧"：本批段表签名与上一帧生成时一致 ⇒ 直接读缓存表
-        // （boundsMode = 0，AS 只读 16 B/组）；不一致 ⇒ 本帧让 AS 自算（boundsMode = 1），并把
-        // 段表排进下一帧 `createRenderPass` 之前的 pre-pass。包围球是对象空间的、与相机无关，
-        // 延迟一帧只在"几何被重建"的那一帧不精确。
-        //
-        // 续五：表按内容签名分区域（[D3D12MeshBoundsCache.SLOT_COUNT] 个），一个批占一个区域，
-        // 同帧的多个批各用各的表；不再"单槽 last-wins"。没就绪的批排进下一帧 pre-pass，本帧
-        // 该批走 AS 自算（boundsMode = 1）。
-        val useBoundsTable = D3D12Settings.meshTerrainCullBounds
-        val tableOffset = if (useBoundsTable) {
-            D3D12MeshBoundsService.acquire(
-                this.device, this.transientMemory, compiled.boundsPipeline,
-                vertexBuffer, indexBuffer, segmentBytes, paddedGroups,
-                segmentSignature(segmentBytes, groupCount * SEGMENT_BYTES))
-        } else -1L
-        val boundsHandle = if (tableOffset >= 0L) D3D12MeshBoundsCache.current()?.handle() ?: 0L else 0L
-        // 视锥平面由 AS 从 Projection cbuffer 现算（P140），CPU 只把 b9 的 28 个 dword 里的
-        // 前 24 个留空 —— 它们现在是占位槽，native 仍照旧写进去。
-        Arena.ofConfined().use { arena ->
-            val segment = arena.allocate(MESH_CULL_PLANES.toLong() * 16L)
-            return MCDR_ABI.D3D12MeshDrawSegmentsCulled(
-                this.ctx,
-                vertexBuffer, 0L,
-                indexBuffer, 0L,
-                sections, sectionsOffset, sectionsLength,
-                segments, segmentsOffset,
-                boundsHandle, if (boundsHandle != 0L) tableOffset else 0L,
-                segment, MESH_CULL_PLANES, groupCount,
-            )
-        }
-    }
-
-    /** P138 诊断：把首批派发的段表与 96 B/段数据落盘（`MCDR_MESH_DUMP=1` 时才写）。 */
-    private fun dumpMeshBatch(sections: ByteArray, sectionCount: Int, segmentBytes: ByteArray) {
-        runCatching {
-            val dir = java.nio.file.Path.of(System.getProperty("user.dir"), "dxrmc", "dump")
-            java.nio.file.Files.createDirectories(dir)
-            java.nio.file.Files.write(dir.resolve("sections.bin"), sections)
-            java.nio.file.Files.write(dir.resolve("segments.bin"), segmentBytes)
-            val table = java.nio.ByteBuffer.wrap(segmentBytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-            val lines = StringBuilder()
-            while (table.remaining() >= SEGMENT_BYTES) {
-                val firstIndex = table.getInt()
-                val indexCount = table.getInt()
-                val baseVertex = table.getInt()
-                val sectionIndex = table.getInt()
-                table.getInt(); table.getInt(); table.getInt(); table.getInt()
-                if (indexCount == 0) {
-                    // 补齐到 1024 组的空组，不是真正的段。
-                    continue
-                }
-                if (sectionIndex >= sectionCount) {
-                    lines.append("sec=$sectionIndex fi=$firstIndex n=$indexCount bv=$baseVertex\n")
-                    continue
-                }
-                // 一段 96 B：pos 在 80/84/88，ChunkVisibility 在 64（小端）。
-                val base = sectionIndex * D3D12MeshSectionSnapshot.SECTION_BYTES
-                val buffer = java.nio.ByteBuffer.wrap(sections).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                val x = buffer.getInt(base + 80); val y = buffer.getInt(base + 84)
-                val z = buffer.getInt(base + 88)
-                val visibility = buffer.getFloat(base + 64)
-                lines.append("sec=$sectionIndex pos=($x,$y,$z) vis=$visibility ")
-                    .append("fi=$firstIndex n=$indexCount bv=$baseVertex\n")
-            }
-            java.nio.file.Files.writeString(dir.resolve("draws.txt"), lines.toString())
-        }.onFailure { LOGGER.warn("[dxrmc] P138 dump failed: {}", it.message) }
-    }
-
-    /** P137：除 `ChunkSection` 外所有 uniform 的身份签名；用于判定"同一材质的一批段"。 */
-    private fun materialSignature(): List<String> {
-        val out = ArrayList<String>(this.uniforms.size)
-        for ((name, slice) in this.uniforms) {
-            if (name == "ChunkSection") continue
-            val handle = (slice.buffer() as? D3D12GpuBuffer)?.handle() ?: 0L
-            out.add("$name@$handle+${slice.offset()}")
-        }
-        out.sort()
-        return out
-    }
-
     override fun draw(vertexCount: Int, instanceCount: Int, firstVertex: Int, firstInstance: Int) {
         this.pushDescriptors()
         if (!MCDR_ABI.D3D12Draw(this.ctx, vertexCount, instanceCount, firstVertex, firstInstance)) {
@@ -1655,214 +1255,3 @@ class D3D12RenderPassBackend(
     }
 }
 
-/**
- * P141：meshlet 包围球的跨 pass 缓冲（UAV，`bounds_main` 写、AS 以 boundsMode=0 读）。
- *
- * <p>按 [SLOT_COUNT] 个区域切开，一个批占一个区域，区域由 [D3D12MeshBoundsService] 分配。
- * 缓冲一次按 [SLOT_GROUPS]×[SLOT_COUNT] 建满、之后**不再重建** —— 续五实测"容量增长时
- * close 重建"既会把内容清零（读表的批整片被剔，表现为闪）、又可能在命令列表还在飞的时候
- * 释放资源。宁可常驻 2 MiB。
- *
- * <p>挂在文件级而不是 `D3D12RenderPassBackend` 上：一个 encoder 每帧会建好几份 backend
- * （每个 pass 一份），按实例缓存等于每帧重建一块 UAV 缓冲。
- */
-private object D3D12MeshBoundsCache {
-    /** 区域数：solid / cutout 各可能有多批，4 个够用。 */
-    const val SLOT_COUNT = 4
-
-    /** 每个区域能放多少组（32768 组 ≈ 4.1M 索引）；超出这个量的批走 AS 自算。 */
-    const val SLOT_GROUPS = 32768
-
-    private var buffer: D3D12GpuBuffer? = null
-
-    /**
-     * 缓冲的"代"：`release()` 之后自增。建表时记下当时的代，读表前比对 —— 换代过的缓冲
-     * 里没有可用的表。
-     */
-    var generation: Long = 0L
-        private set
-
-    /** 当前缓冲（`release()` 之后为 null）。 */
-    fun current(): D3D12GpuBuffer? = this.buffer
-
-    @Synchronized
-    fun ensure(device: D3D12Device?): D3D12GpuBuffer? {
-        if (device == null) return null
-        this.buffer?.let { return it }
-        val bytes = SLOT_GROUPS.toLong() * SLOT_COUNT * MESHLET_BOUNDS_BYTES
-        val created = device.createBuffer(Supplier { "dxrmc meshlet bounds" },
-            MESHLET_BOUNDS_USAGE, bytes) as? D3D12GpuBuffer ?: return null
-        this.buffer = created
-        this.generation++
-        return created
-    }
-
-    @Synchronized
-    fun release() {
-        this.buffer?.close()
-        this.buffer = null
-        this.generation++
-    }
-
-    /** 第 [slot] 号区域在缓冲里的字节偏移。 */
-    fun slotOffset(slot: Int): Long = slot.toLong() * SLOT_GROUPS * MESHLET_BOUNDS_BYTES
-}
-
-
-/** P141：meshlet 包围球表的分配与 pre-pass 派发（延迟一帧）。encoder 也要调 flush，故为 internal。 */
-internal object D3D12MeshBoundsService {
-    private class Pending(
-        val device: D3D12Device?,
-        val transientMemory: D3D12TransientMemory,
-        val boundsPipeline: Long,
-        val vertexBuffer: Long,
-        val indexBuffer: Long,
-        val segmentBytes: ByteArray,
-        val groups: Int,
-        val signature: Long,
-        val slot: Int,
-    )
-
-    /**
-     * 一个区域的状态：`signature == 0` ⇒ 空闲；`generation < 0` ⇒ 已排进 pre-pass、还没算完；
-     * 否则就是"这一代缓冲里、这批数据"的表。
-     */
-    private class Slot {
-        var signature: Long = 0L
-        var groups: Int = 0
-        var generation: Long = 0L
-        var stamp: Long = 0L
-    }
-
-    private val slots = Array(D3D12MeshBoundsCache.SLOT_COUNT) { Slot() }
-    private val pending = ArrayList<Pending>(D3D12MeshBoundsCache.SLOT_COUNT)
-    private var tick = 0L
-    private var loggedOversize = false
-    private var loggedFail = false
-
-    /**
-     * 取这批的表：已就绪 ⇒ 返回它在缓冲里的字节偏移；没就绪 ⇒ 排进下一帧 pre-pass 并返回 -1
-     * （本帧该批走 AS 自算，boundsMode = 1）。一个批只占一个区域，同帧的多个批互不覆盖。
-     */
-    fun acquire(device: D3D12Device?, transientMemory: D3D12TransientMemory, boundsPipeline: Long,
-                vertexBuffer: Long, indexBuffer: Long, segmentBytes: ByteArray,
-                groups: Int, signature: Long): Long {
-        if (device == null || boundsPipeline == 0L || groups <= 0 || signature == 0L) return -1L
-        if (groups > D3D12MeshBoundsCache.SLOT_GROUPS) {
-            if (!this.loggedOversize) {
-                this.loggedOversize = true
-                IllusionLogger.warnMessage(
-                    "[dxrmc] P141 bounds table skipped: groups=$groups > ${D3D12MeshBoundsCache.SLOT_GROUPS}" +
-                        " (falling back to the amplification shader)")
-            }
-            return -1L
-        }
-        D3D12MeshBoundsCache.ensure(device) ?: return -1L
-        this.tick++
-        val generation = D3D12MeshBoundsCache.generation
-        var free = -1
-        var victim = -1
-        for (i in this.slots.indices) {
-            val slot = this.slots[i]
-            if (slot.signature == 0L) {
-                if (free < 0) free = i
-                continue
-            }
-            if (slot.generation < 0L) {
-                // 已经排进 pre-pass 了：同一批就别重复排队。
-                if (slot.signature == signature) return -1L
-                continue
-            }
-            if (slot.generation != generation) {
-                // 缓冲换代（release）⇒ 表作废，区域回收。
-                slot.signature = 0L
-                if (free < 0) free = i
-                continue
-            }
-            if (slot.signature == signature && slot.groups == groups) {
-                slot.stamp = this.tick
-                return D3D12MeshBoundsCache.slotOffset(i)
-            }
-            if (victim < 0 || slot.stamp < this.slots[victim].stamp) victim = i
-        }
-        val index = if (free >= 0) free else victim
-        if (index < 0) return -1L
-        val slot = this.slots[index]
-        slot.signature = signature
-        slot.groups = groups
-        slot.generation = -1L
-        slot.stamp = this.tick
-        this.pending.add(Pending(device, transientMemory, boundsPipeline, vertexBuffer, indexBuffer,
-            segmentBytes, groups, signature, index))
-        return -1L
-    }
-
-    /** 在 `BeginRenderPass` 之前把上一帧排队的表交给 `bounds_main` compute。 */
-    fun flush(ctx: Long): Boolean {
-        if (this.pending.isEmpty()) return false
-        val work = ArrayList(this.pending)
-        this.pending.clear()
-        val bounds = D3D12MeshBoundsCache.ensure(work.first().device) ?: return false
-        val generation = D3D12MeshBoundsCache.generation
-        var built = 0
-        for (item in work) {
-            if (buildOne(ctx, item, bounds)) {
-                val slot = this.slots[item.slot]
-                slot.generation = generation
-                slot.stamp = this.tick
-                built++
-            } else {
-                // 建不出来 ⇒ 区域还回空闲池，这批下一帧会重新排队（本帧仍走 AS 自算）。
-                this.slots[item.slot].signature = 0L
-                if (!this.loggedFail) {
-                    this.loggedFail = true
-                    IllusionLogger.warnMessage(
-                        "[dxrmc] P141 bounds table build FAILED: slot=${item.slot} groups=${item.groups} " +
-                            "err=${MCDR_ABI.D3D12LastError()}")
-                }
-            }
-        }
-        return built > 0
-    }
-
-    private fun buildOne(ctx: Long, work: Pending, bounds: D3D12GpuBuffer): Boolean {
-        val slice = try {
-            work.transientMemory.uploadStaging(
-                mutableListOf(java.nio.ByteBuffer.wrap(work.segmentBytes)), 256L, GpuBuffer.USAGE_COPY_SRC)
-        } catch (t: Throwable) {
-            return false
-        }
-        val segments = (slice.buffer() as? D3D12GpuBuffer) ?: return false
-        val boundsOffset = D3D12MeshBoundsCache.slotOffset(work.slot)
-        // 段表一次可以有好几千项（`paddedGroups` 向上补到 1024 的整数倍），而 `bounds_main`
-        // 的 b8 是静态数组、一次 dispatch 只覆盖 MAX_BOUNDS_GROUPS 项：按块推进
-        // segmentsOffset / boundsOffset 依次派发，一块都不能漏（漏掉的组读到全 0 ⇒ 球心在
-        // 世界原点、半径 0 ⇒ 整片地形在特定朝向被剔掉，P141 续五的症状）。
-        var base = 0
-        while (base < work.groups) {
-            val groups = minOf(D3D12MeshVertexDecode.MAX_BOUNDS_GROUPS, work.groups - base)
-            val ok = MCDR_ABI.D3D12MeshBuildBounds(
-                ctx, work.boundsPipeline, work.vertexBuffer, 0L, work.indexBuffer, 0L,
-                segments.handle(), slice.offset() + base.toLong() * SEGMENT_BYTES,
-                bounds.handle(), boundsOffset + base.toLong() * MESHLET_BOUNDS_BYTES, groups)
-            if (!ok) return false
-            base += groups
-        }
-        return true
-    }
-}
-
-/**
- * FNV-1a 64：段表字节的内容签名（同签名 ⇒ 同一批组，包围球可以复用）。
- *
- * [length] 只覆盖**真实组数**那么多字节：段表按 1024 组补齐，补位全 0，把它们也算进去
- * 只是白扫（一批 23000 多组时是 750 KB/帧）。
- */
-private fun segmentSignature(bytes: ByteArray, length: Int = bytes.size): Long {
-    var h = -0x340d631b7bdddcdbL
-    for (i in 0 until length) {
-        h = h xor (bytes[i].toLong() and 0xFFL)
-        h *= 0x100000001b3L
-    }
-    return h
-}

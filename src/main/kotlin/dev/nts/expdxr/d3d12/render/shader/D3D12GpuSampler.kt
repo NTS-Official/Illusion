@@ -19,14 +19,23 @@ class D3D12GpuSampler(
     private val magFilter: FilterMode,
     private val maxAnisotropy: Int,
     private val maxLod: OptionalDouble,
+    /** P220：只在超分（DLSS/DLAA）时非 0；0 走原采样器路径。 */
+    mipLodBias: Float = 0f,
 ) : GpuSampler {
     private val handle: Long
     private var closed = false
 
     init {
         val lod = maxLod.orElse(16.0).toFloat()
-        this.handle = MCDR_ABI.ID3D12CreateSampler(addressModeU.ordinal, addressModeV.ordinal,
-            minFilter.ordinal, magFilter.ordinal, maxAnisotropy, lod)
+        val biased = if (mipLodBias != 0f) {
+            MCDR_ABI.ID3D12CreateSamplerWithMipBias(addressModeU.ordinal, addressModeV.ordinal,
+                minFilter.ordinal, magFilter.ordinal, maxAnisotropy, lod, mipLodBias)
+        } else {
+            0L
+        }
+        this.handle = if (biased != 0L) biased else MCDR_ABI.ID3D12CreateSampler(
+            addressModeU.ordinal, addressModeV.ordinal, minFilter.ordinal, magFilter.ordinal,
+            maxAnisotropy, lod)
         if (this.handle == 0L) {
             throw IllegalStateException("dx12CreateSampler returned a null handle")
         }

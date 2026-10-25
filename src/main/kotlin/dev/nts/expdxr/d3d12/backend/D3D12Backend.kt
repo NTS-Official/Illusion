@@ -118,8 +118,12 @@ class D3D12Backend : GpuBackend {
             // [dlss] frameGeneration 这类“只在启动时读一次”的开关永远到不了 native。
             D3D12Settings.pushToNative()
 
-            // P124：mesh 能力与原因的唯一下发点（UI 置灰、路径分流都读它）。
-            D3D12MeshShader.isSupported()
+            // P124/P217：mesh 能力与原因的唯一下发点。地形已无 IMR 回退，所以能力不足
+            // 必须留下一条玩家可见的 ERROR，而不是让地形静默消失。
+            if (!D3D12MeshShader.isSupported() && D3D12Settings.meshTerrain) {
+                LOGGER.error("[dxrmc] mesh shaders are unavailable but terrain has no IMR fallback: "
+                    + "terrain batches will be skipped (see the mesh support reason above)")
+            }
             try {
                 selfTestJavaResources(device)
                 selfTestCommandLayer(device)
@@ -294,8 +298,9 @@ class D3D12Backend : GpuBackend {
         // -----------------------------------------------------------------------
         // P4: pipeline self-test — 内嵌官方启动期 critical shader 的 GLSL 原文
         // （提取自 assets/minecraft/shaders/core/），编译官方真实 RenderPipeline
-        // 全链路：GLSL -> shaderc SPIR-V -> spvc 反射/rebind -> HLSL SM5.1 ->
-        // d3dcompiler DXBC -> root signature + 双 PSO。
+        // 全链路：GLSL -> shaderc SPIR-V -> spvc 反射/rebind -> HLSL 5.1 源码 ->
+        // DXC(DXIL, SM 6.9) -> root signature + 双 PSO。（2026-10-25 / P216：不再走
+        // d3dcompiler 的 DXBC 5.1，DXC 是唯一路径。）
         // -----------------------------------------------------------------------
 
         private val CORE_GUI_VSH = """
@@ -565,8 +570,9 @@ class D3D12Backend : GpuBackend {
                 float4 main(PsIn input) : SV_Target { return input.color; }
             """.trimIndent()
 
-            // ms_6_6：本机已实测可用（能力行 dxc=yes(ms_6_8)、meshSmoke=ok，见 known_bugs.md）。
+            // ms_6_6：本机已实测可用（能力行 dxc=yes(ms_6_9)、meshSmoke=ok，见 known_bugs.md）。
             // 备选 ms_6_5；`ms_6_2` 不存在（mesh shader 自 SM 6.5 才有）。PS 用 ps_6_0 即可。
+            // 注意 ms_6_6 不是"回退"：它只是 mesh 的最低可用档，图形管线那边硬要求 6_9（P216）。
             val meshDxil: ByteArray = MCDR_ABI.D3D12CompileShaderDxc(meshHlsl, "main", "ms_6_6")
                 ?: throw IllegalStateException(
                     "mesh self-test: DXC compile failed for ms_6_6: ${MCDR_ABI.D3D12LastError()}")

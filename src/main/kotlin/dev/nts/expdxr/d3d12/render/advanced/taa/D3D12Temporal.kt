@@ -91,8 +91,20 @@ object D3D12Temporal {
      * 世界层照旧 blit，而 jitter 还在注入，画面就整幅轻微晃动。此时把 jitter 压成 0，
      * 画面稳定（代价只是暂时没有超分，而不是抖）。
      */
-    private fun consumerMissing(): Boolean =
-        DeepLearningSuperSampling.isEnabled() && DeepLearningSuperSampling.isStalled()
+    /**
+     * P217 修补：**真正会消费亚像素 jitter** 的时域消解是否存在。
+     *
+     * <p>`[debug] temporalChain` 只是"把时间性链路点亮"的开发开关；SMAA / OFF 下没有任何消费者
+     * 会补偿这份偏移，此时再注入 jitter 只会让整幅画面逐帧轻微抖动。用户 2026-10-25 实测：
+     * 关掉时间性超分/抗锯齿（`dxrMcAaMode = 1` = SMAA、DLSS 关）后原版画面抖动，配置里
+     * `[debug] temporalChain = true` —— 正是这条闸门没检查消费者。
+     *
+     * <p>现在 jitter 只在这两种情况下注入：选了 TAA（含 DLAA），或 DLSS 开着且没有停滞。
+     * 速度场 / 历史滚动仍由 [isActive] 控制，不受影响。
+     */
+    private fun hasJitterConsumer(): Boolean =
+        D3D12TAA.isSelected() ||
+            (DeepLearningSuperSampling.isEnabled() && !DeepLearningSuperSampling.isStalled())
 
     /** 是否真的把 jitter 注入投影矩阵（捕获路径不受它影响），见配置 `[debug] temporalJitter`。 */
     @Volatile
@@ -275,7 +287,8 @@ object D3D12Temporal {
         ensureHalton(n)
         val index = (frameIndex % n).toInt()
         // Halton 值域 (0,1) → 平移成以 0 为中心的像素偏移 [-0.5, +0.5)。
-        if (isActive() && jitterEnabled && !consumerMissing()) {
+        // P217：没有消费者（SMAA/OFF）时 jitter 必须为 0，否则整幅画面会逐帧轻微抖动。
+        if (hasJitterConsumer() && jitterEnabled) {
             jitterX = halton2[index] - 0.5
             jitterY = halton3[index] - 0.5
         } else {
@@ -315,7 +328,8 @@ object D3D12Temporal {
         }
         // P76g：优先用 CPU 渲染状态那份（权威、且实测正常）；UBO 字节实测是垃圾，只留作兜底与对照。
         projection = stateProjection?.copyOf() ?: pristine.copyOf()
-        if (!isActive() || !jitterEnabled || consumerMissing()) {
+        // P217：只有真正的时域消费者才注入 jitter（SMAA/OFF 下必须保持未抖动）。
+        if (!hasJitterConsumer() || !jitterEnabled) {
             return pristine.copyOf()
         }
         return jitterProjection(pristine, clipJitterX(width), clipJitterY(height))

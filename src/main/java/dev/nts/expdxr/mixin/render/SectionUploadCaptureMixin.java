@@ -44,6 +44,7 @@ public abstract class SectionUploadCaptureMixin {
                 mesh.isEmpty(layer) ? 0 : mesh.getSectionDraw(layer).indexCount(),
                 vertexBuffer == null ? 0 : vertexBuffer.remaining(),
                 indexBuffer == null ? 0 : indexBuffer.remaining(),
-                level == null ? 0 : System.identityHashCode(level));
+                level == null ? 0 : System.identityHashCode(level),
+                vertexBuffer);
     }
 }
