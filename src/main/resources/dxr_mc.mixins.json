@@ -19,6 +19,7 @@
     "options.OptionsScreenVideoMixin",
     "render.GameRendererPreloadUiShaderMixin",
     "render.FrontendGpuDeviceCompilePipelineMixin",
+    "render.ShaderManagerRequiredFailureMixin",
     "render.MainTargetRenderScaleMixin",
     "render.RenderTargetCreateBuffersScaleMixin",
     "render.LevelRendererWorldTargetsScaleMixin",
