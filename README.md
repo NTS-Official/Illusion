@@ -1,13 +1,17 @@
 <div align="center">
 
 <img src="assets/logo_flat_white.jpg">
-
+<br>
 <img src="https://img.shields.io/github/actions/workflow/status/NTS-Official/Illusion/build.yml?style=for-the-badge">
-<img src="https://img.shields.io/badge/Powered%20by%20Kotlin-Java%20FFM%20API-orange?style=for-the-badge&logo=kotlin">
+<br>
+<img src="https://img.shields.io/badge/Kotlin%202.4-Java%20FFM%20API-orange?style=for-the-badge&logo=kotlin">
 <img src="https://img.shields.io/badge/DirectX%2012-grey?style=for-the-badge&logo=cplusplus&label=C%2B%2B23&labelColor=blue">
-<img src="https://img.shields.io/badge/Powered%20by%20Streamline-green?style=for-the-badge&logo=nvidia&labelColor=grey">
-<img src="https://img.shields.io/badge/Powered%20by%20Fidelity%20FX-grey?style=for-the-badge&logo=amd&labelColor=red">
-<img src="https://img.shields.io/badge/Powered%20by%20XeSS-grey?style=for-the-badge&logo=intel&labelColor=blue">
+<br>
+<img src="https://img.shields.io/badge/Streamline%202.14-green?style=for-the-badge&logo=nvidia&labelColor=grey">
+<img src="https://img.shields.io/badge/FSR%20Redstone%202.3-grey?style=for-the-badge&logo=amd&labelColor=red">
+<img src="https://img.shields.io/badge/XeSS%203-grey?style=for-the-badge&logo=intel&labelColor=blue">
+<br>
+<img src="https://img.shields.io/badge/NRC,%20NRD%20&%20SharC-green?style=for-the-badge&logo=nvidia&labelColor=grey">
 
 </div>
 
