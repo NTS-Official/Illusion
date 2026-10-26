@@ -12,6 +12,8 @@
     "options.OptionsAntiAliasingMixin",
     "options.OptionsRenderOptionsMixin",
     "options.OptionsGraphicsPresetMixin",
+    "core.WindowAdoptCreatedMixin",
+    "core.MinecraftCloseEarlyWindowMixin",
     "render.DebugEntrySystemSpecsMixin",
     "render.DebugEntryFpsMixin",
     "render.DebugEntryTerrainLineMixin",
