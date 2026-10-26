@@ -2,10 +2,16 @@ package dev.nts.expdxr.mixin.render;
 
 import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12TAA;
-import dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling;
+import dev.nts.expdxr.dxrmc.sr.dlss.DeepLearningSuperSampling;
+import dev.nts.expdxr.d3d12.render.core.D3D12GpuTextureView;
+import dev.nts.expdxr.dxrmc.sr.D3D12SrMask;
+import net.minecraft.client.renderer.LevelTargetBundle;
+import com.mojang.blaze3d.pipeline.RenderTarget;
 import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.chunk.ChunkSectionsToRender;
 import net.minecraft.client.renderer.feature.FeatureRenderDispatcher;
+import org.spongepowered.asm.mixin.Final;
+import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -66,6 +72,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(LevelRenderer.class)
 public class LevelRendererMainPassDepthMixin {
+    /** P276：OIT 的透射率缓冲（`LevelTargetBundle.transmittance`，RGBA16F），掩码的来源。 */
+    @Shadow @Final private LevelTargetBundle targets;
+
     /**
      * {@code addMainPass} 的 pass 体（javac 合成方法 {@code lambda$addMainPass$0}）的 RETURN。
      *
@@ -81,5 +90,35 @@ public class LevelRendererMainPassDepthMixin {
         D3D12TAA.captureTemporalData();
         DeepLearningSuperSampling.captureMotionVectors();
         DeepLearningSuperSampling.captureDepthSnapshot();
+        // P276：这一刻 OIT 已经合成完，透射率缓冲正是本帧的值。取不到就传 null（掩码这条路会自己跳过）。
+        dxr_mc$captureTransmittance();
+    }
+
+    private void dxr_mc$captureTransmittance() {
+        // P276b：transmittance 列表里装的是吸收率小波系数（2 张 RGBA16F），全部交给产生器，
+        // 由 HLSL 里那段 `oit_sample.glsl:sampleAbsorbance` 的移植去还原整列透射率。
+        LevelTargetBundle bundle = this.targets;
+        if (bundle == null) {
+            return;
+        }
+        var handles = bundle.transmittance;
+        if (handles == null || handles.isEmpty()) {
+            return;
+        }
+        var views = new java.util.ArrayList<D3D12GpuTextureView>(handles.size());
+        for (var handle : handles) {
+            try {
+                RenderTarget target = handle.get();
+                if (target != null && target.getColorTextureView() instanceof D3D12GpuTextureView view) {
+                    views.add(view);
+                }
+            } catch (Throwable ignored) {
+                // 单个目标取不到不影响其余附件。
+            }
+        }
+        if (views.isEmpty()) {
+            return;
+        }
+        D3D12SrMask.captureTransmittance(views.toArray(new D3D12GpuTextureView[0]));
     }
 }

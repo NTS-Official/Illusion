@@ -313,7 +313,8 @@ object D3D12GUISplit {
         dlssFlagLogs += 1
         Illusion.LOGGER.info(
             "[dxrmc] P106: prepareForGui read worldLayerAlreadyInTarget={} (worldLayerDoneThisFrame was "
-                + "set by the DLSS evaluate path this frame; false means the world layer is blitted the old way)",
+                + "set by the super-resolution evaluate path this frame; false means the world layer is "
+                + "blitted the old way)",
             worldLayerAlreadyInTarget)
     }
 

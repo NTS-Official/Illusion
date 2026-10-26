@@ -5,6 +5,7 @@ import dev.nts.expdxr.DlssFrameGeneration
 import dev.nts.expdxr.DlssImplementation
 import dev.nts.expdxr.HdrMode
 import dev.nts.expdxr.RtMode
+import dev.nts.expdxr.SrBackend
 import dev.nts.expdxr.IllusionConfig
 import dev.nts.expdxr.MeshDiagnostics
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
@@ -45,6 +46,9 @@ object D3D12Settings {
         val taaSharpenAmount: Float,
         val dlssImplementation: DlssImplementation,
         val dlssOutputHandover: Boolean,
+        val srBackend: SrBackend,
+        val srSharpness: Float,
+    val srMask: Boolean,
         val reflexFrameLimitUs: Int,
         val meshTerrain: Boolean,
         val meshTerrainCull: Boolean,
@@ -66,6 +70,11 @@ object D3D12Settings {
         val pixCaptureFrames: Int,
         val pixDirectory: String,
         val hdrMode: Int,
+
+        /** P251：是否允许 ALLOW_TEARING 交换链 / 是否强制建在自建呈现子窗口上。 */
+        val allowTearing: Boolean,
+        val presentChildWindow: Boolean,
+
 
     /** P213：帧生成（0=off 1=on 2=dynamic）与每帧生成张数。 */
     val dlssgMode: Int,
@@ -106,6 +115,13 @@ object D3D12Settings {
 
     /** The JVM owns DLSS's output texture. */
     val dlssOutputHandover: Boolean get() = snapshot().dlssOutputHandover
+
+    /** `[sr] backend` - P282: which super-resolution backend the abstraction layer drives. */
+    val srBackend: SrBackend get() = snapshot().srBackend
+
+    /** `[sr] sharpness` - sharpening strength handed to the backend itself (0 = off). */
+    val srSharpness: Float get() = snapshot().srSharpness
+    val srMask: Boolean get() = snapshot().srMask
     /** `[dlss] reflexFrameLimitUs` — Reflex 自己的限帧器（微秒/帧，0 = 关）。 */
     val reflexFrameLimitUs: Int get() = snapshot().reflexFrameLimitUs
     /** `[mesh] terrain` — 地形走 mesh 管线（已无 IMR 回退，这是唯一的地形光栅化路径）。 */
@@ -156,6 +172,7 @@ object D3D12Settings {
     /** Mirror the native log into this file (empty = console only). */
     val nativeLogFile: String get() = snapshot().nativeLogFile
 
+
     /**
      * Have the game drive a PIX timing capture itself (`[debug] pixTimingCapture`).
      *
@@ -199,6 +216,8 @@ object D3D12Settings {
             append(s.pixDirectory).append('|')
             append(s.hdrMode)
             append('|').append(s.rtMode)
+            append('|').append(s.allowTearing)
+            append('|').append(s.presentChildWindow)
         }
         if (wanted == pushed) return
         pushed = wanted
@@ -220,6 +239,8 @@ object D3D12Settings {
         MCDR_ABI.D3D12SetReflexFrameLimit(s.reflexFrameLimitUs)
         // P197：HDR 模式同理（0/1/2 = AUTO/FORCE_ON/FORCE_OFF），下次建链时生效。
         MCDR_ABI.D3D12SetHdrMode(s.hdrMode)
+        // P251：交换链建链选项（下一次建链生效）。
+        MCDR_ABI.D3D12SetSwapchainOptions(s.allowTearing, s.presentChildWindow)
         // P117：光追模式（0..3）。设备创建前就要知道，后续 G-Buffer 创建看它。
         MCDR_ABI.D3D12SetRaytracingMode(s.rtMode)
         // P213：帧生成。选项在渲染线程的下一次 present 生效（Reflex 必须开着）。
@@ -346,10 +367,17 @@ object D3D12Settings {
             pixDirectory = config("") { IllusionConfig.PIX_DIRECTORY.get() },
             // P197：0 = AUTO / 1 = FORCE_ON / 2 = FORCE_OFF（native 只认序号）。
             hdrMode = config(HdrMode.AUTO) { IllusionConfig.HDR.get() }.ordinal,
+            // P251：交换链建链选项（下一次建链生效）。
+            allowTearing = config(true) { IllusionConfig.ALLOW_TEARING.get() },
+            presentChildWindow = config(false) { IllusionConfig.PRESENT_CHILD_WINDOW.get() },
             rtMode = config(RtMode.OFF) { IllusionConfig.RAYTRACING_MODE.get() }.ordinal,
             // P213：0 = OFF / 1 = ON / 2 = DYNAMIC（native 只认序号）。
             dlssgMode = config(DlssFrameGeneration.OFF) { IllusionConfig.DLSS_FRAME_GENERATION.get() }.ordinal,
             dlssgFrames = config(1) { IllusionConfig.DLSS_FRAME_GENERATION_FRAMES.get() },
+            // P282: super-resolution backend and sharpness (read here so the cache path is shared).
+            srBackend = config(SrBackend.DLSS) { IllusionConfig.SR_BACKEND.get() },
+            srSharpness = config(0.0) { IllusionConfig.SR_SHARPNESS.get() }.toFloat(),
+        srMask = config(false) { IllusionConfig.SR_MASK.get() },
         )
 
         if (configAvailable) {

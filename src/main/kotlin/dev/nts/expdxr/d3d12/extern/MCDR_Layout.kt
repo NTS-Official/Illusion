@@ -301,6 +301,79 @@ object MCDRLayout {
         // P120：投影矩阵本身（列主序、无 jitter）。`cameraViewToClip` 要的是这张，不是 VP。
         MemoryLayout.sequenceLayout(16L, F32).withName("projection")
     ).withName("mcdr_dlss_constants")
+
+    // P271：超分抽象层的两张新表（C 侧见 mcdr_abi.h 的 P271 段）。
+    // 字段顺序/名字必须与 typedef 逐字一致：MCDR_ABI.verifyABI() 拿 describe() 与 native
+    // abi_meta.cpp 的 layoutTable() 双向比对，任一侧多/少/错位一个字段都会在设备创建前 abort。
+    // `note` 在 C 里是 `char note[28]`，这里必须同样表示成 28 个字节的**有名字段**，
+    // 不能拆成 28 个 I8（那样 describe() 会给出 note[0].. 之类对不上的名字）。
+    @JvmField
+    val SR_CAPS: MemoryLayout = MemoryLayout.structLayout(
+        I32.withName("backend"),
+        I32.withName("available"),
+        I32.withName("coupledDenoise"),
+        I32.withName("needsExposure"),
+        I32.withName("takesMasks"),
+        I32.withName("externalHeap"),
+        I32.withName("jitterPhaseCount"),
+        I32.withName("minRenderWidth"),
+        I32.withName("minRenderHeight"),
+        I32.withName("maxRenderWidth"),
+        I32.withName("maxRenderHeight"),
+        I32.withName("nativeAA"),
+        // C 里这一格叫 reserved（必须为 0）；留着是为了将来加 flags 时不改 sizeof。
+        I32.withName("reserved"),
+        MemoryLayout.sequenceLayout(28L, I8).withName("note")
+    ).withName("mcdr_sr_caps")
+
+    // 每帧载荷（C sizeof = 136 / align = 8）。六个 void* 落在 72..119，正好 8 字节对齐，
+    // 所以这里**没有**隐式填充；末尾两个 int32 把总长补到 128。
+    // 各字段的写偏移常量在 P272 落地时补——这一轮 JVM 只读 caps、只查询，不写 dispatch。
+    @JvmField
+    val SR_DISPATCH: MemoryLayout = MemoryLayout.structLayout(
+        I32.withName("renderWidth"),
+        I32.withName("renderHeight"),
+        I32.withName("displayWidth"),
+        I32.withName("displayHeight"),
+        F32.withName("jitterOffsetX"),
+        F32.withName("jitterOffsetY"),
+        F32.withName("motionVectorScaleX"),
+        F32.withName("motionVectorScaleY"),
+        F32.withName("preExposure"),
+        F32.withName("frameTimeDeltaMs"),
+        F32.withName("cameraNear"),
+        F32.withName("cameraFar"),
+        F32.withName("cameraVerticalFov"),
+        F32.withName("sharpness"),
+        I32.withName("reset"),
+        I32.withName("hdrInput"),
+        I32.withName("backend"),
+        I32.withName("flags"),
+        PTR.withName("pColorInput"),
+        PTR.withName("pColorOutput"),
+        PTR.withName("pDepth"),
+        PTR.withName("pMotionVectors"),
+        PTR.withName("pReactiveMask"),
+        PTR.withName("pExposure"),
+        I32.withName("depthFormatOrdinal"),
+        F32.withName("cameraAspectRatio"),
+        F32.withName("viewSpaceToMetersFactor"),
+        I32.withName("_pad2")
+    ).withName("mcdr_sr_dispatch")
+
+    /** `mcdr_sr_caps` 的字段偏移（P271）。 */
+    @JvmField val SR_CAPS_BACKEND: Long = offset(SR_CAPS, "backend")
+    @JvmField val SR_CAPS_AVAILABLE: Long = offset(SR_CAPS, "available")
+    @JvmField val SR_CAPS_COUPLED_DENOISE: Long = offset(SR_CAPS, "coupledDenoise")
+    @JvmField val SR_CAPS_NEEDS_EXPOSURE: Long = offset(SR_CAPS, "needsExposure")
+    @JvmField val SR_CAPS_TAKES_MASKS: Long = offset(SR_CAPS, "takesMasks")
+    @JvmField val SR_CAPS_EXTERNAL_HEAP: Long = offset(SR_CAPS, "externalHeap")
+    @JvmField val SR_CAPS_JITTER_PHASE_COUNT: Long = offset(SR_CAPS, "jitterPhaseCount")
+    @JvmField val SR_CAPS_MAX_RENDER_WIDTH: Long = offset(SR_CAPS, "maxRenderWidth")
+    @JvmField val SR_CAPS_MAX_RENDER_HEIGHT: Long = offset(SR_CAPS, "maxRenderHeight")
+    @JvmField val SR_CAPS_NATIVE_AA: Long = offset(SR_CAPS, "nativeAA")
+    @JvmField val SR_CAPS_NOTE: Long = offset(SR_CAPS, "note")
+
     private val EXPECTED_C_SIZES: Array<Array<Any>> = arrayOf(
     // ------------------------------------------------------------------
         arrayOf<Any>("mcdr_binding_slot",         BINDING_SLOT,        40L),
@@ -313,6 +386,9 @@ object MCDRLayout {
         arrayOf<Any>("mcdr_mesh_pipeline_desc",   MESH_PIPELINE_DESC,  96L),
         arrayOf<Any>("mcdr_dlss_input",          DLSS_INPUT,        112L),
         arrayOf<Any>("mcdr_dlss_constants",      DLSS_CONSTANTS,    312L),
+        // P271：SR 抽象层。两个数字都是 MSVC x64 实际 sizeof（改结构时两边一起改）。
+        arrayOf<Any>("mcdr_sr_caps",             SR_CAPS,            80L),
+        arrayOf<Any>("mcdr_sr_dispatch",         SR_DISPATCH,       136L),
         arrayOf<Any>("mcdr_abi_field",            ABI_FIELD,           24L),
     )
 
@@ -345,6 +421,11 @@ object MCDRLayout {
         STRUCTS["mcdr_pipeline_desc"] = PIPELINE_DESC
         STRUCTS["mcdr_mesh_pipeline_desc"] = MESH_PIPELINE_DESC
         STRUCTS["mcdr_dlss_input"] = DLSS_INPUT
+        // P271：SR 的两张表必须登记，否则 describe() 不会枚举它们，verify() 也就比对不到
+        // ——而 native 的 layoutTable() 里有它们的字段，漏登记会让 verify() 报
+        // "reported by native but absent from the Java mirror" 并 abort。
+        STRUCTS["mcdr_sr_caps"] = SR_CAPS
+        STRUCTS["mcdr_sr_dispatch"] = SR_DISPATCH
     }
 
     /** Named top-level members of every mirrored struct, as `"Struct.field" -> {offset, size}`. */

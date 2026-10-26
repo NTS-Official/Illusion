@@ -50,7 +50,21 @@ object D3D12ShadingRateImage {
     /** 运动矢量阈值（像素）：超过它即判为"正在动"，不让它变粗。 */
     private const val MOTION_PIXELS: Int = 8
 
-    private var image: Long = 0L
+    /**
+     * 着色率图像（两张 ping-pong）。
+     *
+     * <p>时间钳制（§8.6 末行）要把"上一帧的 SRI"当 `t2` 读回来，而 compute 不能同时读写同一张
+     * 纹理 —— 所以每帧写 A 读 B、下一帧写 B 读 A，各带一张 SRV 视图（`t2` 只能是视图句柄）。
+     */
+    private val images: LongArray = LongArray(2)
+    private val views: LongArray = LongArray(2)
+
+    /** 本帧要写入的图像下标；[lastWritten] 是上一帧写完的那张（= 本帧的 `t2`，也是要绑的那张）。 */
+    private var writeIndex: Int = 0
+    private var lastWritten: Int = -1
+
+    /** 上一帧的 SRI 是否还有效（强制 1X1 的那帧会把它清掉，否则下一帧会 `min(x, 0)` 再糊一帧）。 */
+    private var historyValid: Boolean = false
     private var pipeline: Long = 0L
     private var depthTex: Long = 0L
     private var depthView: Long = 0L
@@ -150,16 +164,21 @@ object D3D12ShadingRateImage {
             MCDR_ABI.D3D12BeginCommandList(encoderCtx)
             MCDR_ABI.D3D12CopyTextureToTexture(encoderCtx, depth.handle(), depthTex,
                 0, 0, 0, 0, 0, 0, w, h)
+            val clampBit = if (historyValid && temporalClampEnabled()) 2 else 0
             val dispatched = MCDR_ABI.D3D12DispatchComputeShadingRate(encoderCtx, pipeline,
-                depthView, motionHandle, image,
+                depthView, motionHandle, views[1 - writeIndex], images[writeIndex],
                 intArrayOf(tilesX, tilesY, TILE, edgePermille(), w, h, motionPixels,
-                    if (forceFine) 1 else 0),
+                    (if (forceFine) 1 else 0) or clampBit),
                 (tilesX + 7) / 8, (tilesY + 7) / 8, 1)
             if (!dispatched) {
                 fail("dx12DispatchComputeShadingRate failed: " + MCDR_ABI.D3D12LastError())
                 return
             }
             MCDR_ABI.D3D12Submit(encoderCtx)
+            // 写完交换：下一帧的 t2 就是这一张；强制 1X1 的那帧写的是全 0，历史必须作废。
+            lastWritten = writeIndex
+            writeIndex = 1 - writeIndex
+            historyValid = !forceFine
             ready = true
             frames++
             if (forceFine) {
@@ -185,6 +204,9 @@ object D3D12ShadingRateImage {
     fun requestForceFine(reason: String) {
         forceFine = true
         hasLastCamera = false
+        // 上一帧的历史马上就不作数了：下一帧写全 0，再下一帧若还拿这张当 t2，就会把整屏
+        // `min(rate, 0)` 压成 1X1 —— 白糊两帧。所以在这里就作废历史。
+        historyValid = false
         note("$reason; the next generated image is all 1X1")
     }
 
@@ -234,10 +256,11 @@ object D3D12ShadingRateImage {
     @JvmStatic
     @Synchronized
     fun bind(ctx: Long): Boolean {
-        if (!ready || image == 0L) {
+        val img = if (lastWritten >= 0) images[lastWritten] else 0L
+        if (!ready || img == 0L) {
             return false
         }
-        val bound = MCDR_ABI.D3D12SetShadingRateImage(ctx, image)
+        val bound = MCDR_ABI.D3D12SetShadingRateImage(ctx, img)
         if (!bound) {
             note("dx12SetShadingRateImage(bind) refused: " + MCDR_ABI.D3D12LastError())
         }
@@ -248,7 +271,7 @@ object D3D12ShadingRateImage {
     @JvmStatic
     @Synchronized
     fun unbind(ctx: Long) {
-        if (image != 0L) {
+        if (lastWritten >= 0 && images[lastWritten] != 0L) {
             MCDR_ABI.D3D12SetShadingRateImage(ctx, 0L)
         }
     }
@@ -262,6 +285,9 @@ object D3D12ShadingRateImage {
         frames = 0L
         hasLastCamera = false
         forceFine = false
+        historyValid = false
+        lastWritten = -1
+        writeIndex = 0
     }
 
     /**
@@ -278,39 +304,52 @@ object D3D12ShadingRateImage {
     private fun ensureResources(w: Int, h: Int): Boolean {
         val tx = (w + TILE - 1) / TILE
         val ty = (h + TILE - 1) / TILE
-        if (image != 0L && tx == tilesX && ty == tilesY) {
+        if (images[0] != 0L && tx == tilesX && ty == tilesY) {
             return true
         }
-        // 只重建跟尺寸绑定的那张图与快照：PSO 与编码器跟分辨率无关，重编译一次 DXIL 没必要。
+        // 只重建跟尺寸绑定的那两张图与快照：PSO 与编码器跟分辨率无关，重编译一次 DXIL 没必要。
         releaseImage()
-        val img = MCDR_ABI.D3D12CreateShadingRateImage(tx, ty)
-        if (img == 0L) {
-            fail("dx12CreateShadingRateImage($tx,$ty) failed: " + MCDR_ABI.D3D12LastError())
-            return false
+        for (i in 0..1) {
+            val img = MCDR_ABI.D3D12CreateShadingRateImage(tx, ty)
+            if (img == 0L) {
+                fail("dx12CreateShadingRateImage($tx,$ty) failed: " + MCDR_ABI.D3D12LastError())
+                return false
+            }
+            // t2 只能绑视图句柄，所以每张图各建一张 SRV（usage 38 里的 TEXTURE_BINDING 就是给它用的）。
+            val view = MCDR_ABI.ID3D12CreateTextureView(img, 0, 1)
+            if (view == 0L) {
+                MCDR_ABI.ID3D12DestroyResource(img)
+                fail("shading rate image view creation failed: " + MCDR_ABI.D3D12LastError())
+                return false
+            }
+            images[i] = img
+            views[i] = view
         }
         // 快照必须与主深度**同格式**（D32_FLOAT）：native 的 CopyTextureToTexture 不做格式转换，
         // 实测 `R32_FLOAT` 目标会直接报 "format mismatch"。深度格式的 SRV 在 HLSL 侧照样声明成
         // `Texture2D<float>` + `Load`，语义就是我们需要的线性深度。
         val tex = MCDR_ABI.ID3D12CreateTexture(DEPTH_USAGE, GpuFormat.D32_FLOAT.ordinal, w, h, 1, 1)
         if (tex == 0L) {
-            MCDR_ABI.ID3D12DestroyResource(img)
+            releaseImage()
             fail("depth snapshot texture creation failed: " + MCDR_ABI.D3D12LastError())
             return false
         }
         val view = MCDR_ABI.ID3D12CreateTextureView(tex, 0, 1)
         if (view == 0L) {
             MCDR_ABI.ID3D12DestroyResource(tex)
-            MCDR_ABI.ID3D12DestroyResource(img)
+            releaseImage()
             fail("depth snapshot view creation failed: " + MCDR_ABI.D3D12LastError())
             return false
         }
-        image = img
         depthTex = tex
         depthView = view
         tilesX = tx
         tilesY = ty
         pixelW = w
         pixelH = h
+        writeIndex = 0
+        lastWritten = -1
+        historyValid = false
         return true
     }
 
@@ -321,6 +360,9 @@ object D3D12ShadingRateImage {
         val hlsl = """
             Texture2D<float> gDepth : register(t0);
             Texture2D<float2> gMotion : register(t1);
+            // t2 = 上一帧的着色率图像（P236 时间钳制）：两帧之间只允许变细、不允许变粗，
+            // 否则边缘 1X1/2X2 的来回跳会表现成轮廓"呼吸"。
+            Texture2D<uint> gPrev : register(t2);
             RWTexture2D<uint> gOut : register(u0);
             cbuffer Params : register(b0) {
                 uint gTilesX; uint gTilesY; uint gTile; uint gEdgePermille;
@@ -367,6 +409,11 @@ object D3D12ShadingRateImage {
                     return;
                 }
                 if (extreme || edge || moving) rate = 0u;
+                // gPad bit1 = 时间钳制（§8.6 末行）：枚举值即面积序，min 就是"取更细那档"。
+                // 首帧 / 强制 1X1 之后历史无效，调用方会把这一位关掉。
+                if ((gPad & 2u) != 0u) {
+                    rate = min(rate, gPrev.Load(int3(id.xy, 0)));
+                }
                 gOut[id.xy] = rate;
             }
         """.trimIndent()
@@ -398,7 +445,7 @@ object D3D12ShadingRateImage {
         return true
     }
 
-    /** 只放跟分辨率绑定的资源（图像 + 深度快照），PSO 与编码器留着。 */
+    /** 只放跟分辨率绑定的资源（两张图像 + 深度快照），PSO 与编码器留着。 */
     private fun releaseImage() {
         if (depthView != 0L) {
             MCDR_ABI.ID3D12DestroyResource(depthView)
@@ -408,10 +455,19 @@ object D3D12ShadingRateImage {
             MCDR_ABI.ID3D12DestroyResource(depthTex)
             depthTex = 0L
         }
-        if (image != 0L) {
-            MCDR_ABI.ID3D12DestroyResource(image)
-            image = 0L
+        for (i in 0..1) {
+            if (views[i] != 0L) {
+                MCDR_ABI.ID3D12DestroyResource(views[i])
+                views[i] = 0L
+            }
+            if (images[i] != 0L) {
+                MCDR_ABI.ID3D12DestroyResource(images[i])
+                images[i] = 0L
+            }
         }
+        lastWritten = -1
+        writeIndex = 0
+        historyValid = false
         tilesX = 0
         tilesY = 0
     }
@@ -454,6 +510,16 @@ object D3D12ShadingRateImage {
         if (!IllusionConfig.SPEC.isLoaded) return MOTION_PIXELS
         return IllusionConfig.VRS_SRI_MOTION_PIXELS.get().coerceIn(0, 256)
     }
+
+    /** `[vrs] sriTemporalClamp` —— 每帧现读，关掉之后等于回到 P235 的无历史行为。 */
+    private fun temporalClampEnabled(): Boolean {
+        if (!IllusionConfig.SPEC.isLoaded) return true
+        return IllusionConfig.VRS_SRI_TEMPORAL_CLAMP.get()
+    }
+
+    /** F3 诊断用：这一帧的钳制位到底有没有生效（配置开 + 历史有效）。 */
+    @JvmStatic
+    fun temporalClampActive(): Boolean = temporalClampEnabled() && historyValid
 
     private fun fail(message: String) {
         failed = true

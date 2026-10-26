@@ -86,7 +86,7 @@ object D3D12AntiAliasing {
     // ------------------------------------------------------------------
 
     /**
-     * DLSS 是否正占着这个选项（由 [dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling] 推过来）。
+     * DLSS 是否正占着这个选项（由 [dev.nts.expdxr.dxrmc.sr.dlss.DeepLearningSuperSampling] 推过来）。
      *
      * 这里**故意不 import** DLSS：依赖只能单向。DLSS 打开时把 AA 锁成 [OFF]，本类据此
      * ①拒掉预设/回推对取值的改写、②让界面把按钮置灰。

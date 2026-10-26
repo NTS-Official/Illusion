@@ -234,6 +234,19 @@ object D3D12Velocity {
     fun currentHandle(): Long = this.current?.handle() ?: 0L
 
     /**
+     * P282 诊断：一行说清"速度通道为什么没给出纹理"。
+     *
+     * 现象是超分门面每帧都读到 handle=0，而 `record()` 里哪个闸门挡住的从外面看不出来 ——
+     * 这条只由门面按秒限流打点，不进正常路径。
+     */
+    @Synchronized
+    fun debugState(): String {
+        return "frame=$frameIndex recorded=$recordedFrame current=${current != null}" +
+            " previous=${previous != null} abandoned=$abandonedSteps latch=$disabledReason" +
+            " active=${isActive()} enabled=$enabled temporal=${D3D12Temporal.isActive()}"
+    }
+
+    /**
      * 本帧速度纹理的 SRV 视图（P77 TAA resolve 用），null = 还没有可用数据。
      *
      * 与 [currentHandle] 同一时刻的同一张纹理：本帧速度 pass 录完之后取，就是本帧的位移。

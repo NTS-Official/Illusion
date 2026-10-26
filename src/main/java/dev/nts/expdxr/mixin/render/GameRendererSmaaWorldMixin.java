@@ -1,10 +1,11 @@
 package dev.nts.expdxr.mixin.render;
 
+import dev.nts.expdxr.d3d12.extern.MCDR_ABI;
 import dev.nts.expdxr.d3d12.render.advanced.smaa.D3D12GUISplit;
 import dev.nts.expdxr.d3d12.render.advanced.smaa.D3D12SMAAWorld;
 import dev.nts.expdxr.d3d12.render.advanced.taa.D3D12TAA;
-import dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling;
-import net.minecraft.client.DeltaTracker;
+import dev.nts.expdxr.dxrmc.sr.dlss.DeepLearningSuperSampling;
+import dev.nts.expdxr.dxrmc.sr.SuperResolution;
 import net.minecraft.client.renderer.GameRenderer;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -29,9 +30,11 @@ public class GameRendererSmaaWorldMixin {
         // P77：TAA 与 SMAA 是同一个选项的两个取值，互斥；排在 SMAA 旁边，谁被选中谁动手。
         D3D12TAA.applyIfEnabled();
         D3D12SMAAWorld.applyIfEnabled();
-        // P108d：DLSS 的 Evaluate 挂在这里 —— 只有这一刻主目标的**颜色**里才有本帧的世界层。
-        // 排在 SMAA 之后：先在世界分辨率上做 AA，再让 DLSS 把结果升采样进 GUI 目标。
-        DeepLearningSuperSampling.applyIfEnabled();
+        // P108d + P282：超分的 Evaluate 挂在这里 —— 只有这一刻主目标的**颜色**里才有本帧的世界层。
+        // 排在 SMAA 之后：先在世界分辨率上做 AA，再让后端把结果升采样进 GUI 目标。
+        // 门面按 `[sr] backend` 分流：DLSS 原样委托给 DeepLearningSuperSampling，FSR / XeSS 走
+        // mcdr_dx12SrEvaluate。
+        SuperResolution.applyIfEnabled();
         // P117：世界层已画完 —— eSimulationEnd + eRenderSubmitStart。
         DeepLearningSuperSampling.pclRenderSubmitStart();
         // P106：世界层（含 SMAA / DLSS 结果）随后被搬进 GUI 自己的窗口尺寸目标 —— 顺序不能反。
@@ -65,6 +68,12 @@ public class GameRendererSmaaWorldMixin {
                      shift = At.Shift.BEFORE),
             remap = false)
     private void dxr_mc$dlssBeforeDepthClear(CallbackInfo ci) {
+        // P282：这两件都是 DLSS 自家记账（抗锯齿锁、Reflex 的 PCL 打点）。选了 FSR / XeSS 时
+        // 不该再让 DLSS 去推自己的开关 —— 那会每帧付一次 NGX 可用性探测，还会和 `[sr] backend`
+        // 打架（两套"谁在超分"的结论不一致）。
+        if (SuperResolution.backendId() != MCDR_ABI.SR_BACKEND_DLSS) {
+            return;
+        }
         DeepLearningSuperSampling.reconcileAntiAliasingEveryFrame();
         // Reflex PCL stats
         DeepLearningSuperSampling.pclFrameBegin();

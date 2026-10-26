@@ -691,8 +691,11 @@ class D3D12Backend : GpuBackend {
                         }
                         try {
                             MCDR_ABI.D3D12BeginCommandList(ctx)
+                            // 自检只有一张图像：把深度视图当作"上一帧"传进去，并把 flags 的
+                            // bit1（时间钳制）留 0，这样读回的就是这一趟 compute 写的值。
                             val dispatched = MCDR_ABI.D3D12DispatchComputeShadingRate(
-                                ctx, pipeline, viewA, viewB, image, intArrayOf(tiles, tiles, 16, 0), 1, 1, 1)
+                                ctx, pipeline, viewA, viewB, viewA, image,
+                                intArrayOf(tiles, tiles, 16, 0), 1, 1, 1)
                             if (!dispatched) {
                                 throw IllegalStateException(
                                     "SRI self-test: dx12DispatchComputeShadingRate failed: " +

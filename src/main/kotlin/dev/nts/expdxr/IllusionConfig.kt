@@ -38,6 +38,27 @@ enum class DlssFrameGeneration {
 }
 
 /**
+ * `[sr] backend` — 超分抽象层选哪一家（P271 的 `mcdr_sr_caps.backend`）。
+ *
+ * <p>DLSS 是默认值：它把活原样交给 `DeepLearningSuperSampling`，行为与 P282 之前完全一致。
+ * FSR / XESS 走新的 `mcdr_dx12Sr*` 通路（`SuperResolution` 自己打包 `mcdr_sr_dispatch`）。
+ * NONE 表示三项都不跑。
+ */
+enum class SrBackend(val id: Int) {
+    /** 不超分（与"关掉 DLSS"等价）。 */
+    NONE(0),
+
+    /** NVIDIA DLSS / DLAA，走既有 `DeepLearningSuperSampling` 实现。 */
+    DLSS(1),
+
+    /** AMD FidelityFX Super Resolution（`d3d12_fsr.cpp`，P277）。 */
+    FSR(2),
+
+    /** Intel XeSS（`d3d12_xess.cpp`，P278）。 */
+    XESS(3),
+}
+
+/**
  * `[renderer] hdr` — native HDR (scRGB) presentation.
  *
  * AUTO follows the display's advanced-colour state (the same DXGI output query Windows
@@ -130,6 +151,22 @@ object IllusionConfig {
     /** `[renderer] hdr` — native HDR (scRGB) presentation mode. */
     val HDR: ModConfigSpec.EnumValue<HdrMode>
 
+    /**
+     * `[renderer] allowTearing` — 是否允许建 `FLIP_DISCARD + ALLOW_TEARING` 的交换链。
+     *
+     * <p>关掉后链只能进 DWM 合成翻页：某些覆盖率工具（RTSS / Afterburner 的 OSD）只在
+     * 合成翻页下画得出来，independent flip 下会整块消失。下一次建链时生效。
+     */
+    val ALLOW_TEARING: ModConfigSpec.BooleanValue
+
+    /**
+     * `[renderer] presentChildWindow` — 把交换链建在自建呈现子窗口上（P196 之前的行为）。
+     *
+     * <p>默认建在 SDL 顶层窗口上（独占全屏需要）。子窗口永远是 DWM 合成翻页，遇到
+     * 覆盖层/OBS 抓不到画面的问题时可以打开对照。下一次建链时生效。
+     */
+    val PRESENT_CHILD_WINDOW: ModConfigSpec.BooleanValue
+
     /** P117：`[raytracing] mode` — 光追可见性分层总开关。 */
     val RAYTRACING_MODE: ModConfigSpec.EnumValue<RtMode>
 
@@ -150,6 +187,12 @@ object IllusionConfig {
 
     /** `[dlss] frameGeneration` — DLSS frame generation (DLSS-G). */
     val DLSS_FRAME_GENERATION: ModConfigSpec.EnumValue<DlssFrameGeneration>
+    /** `[sr] backend` — P282：超分抽象层选哪一家。改完下一帧生效（不重启游戏）。 */
+    val SR_BACKEND: ModConfigSpec.EnumValue<SrBackend>
+
+    /** `[sr] sharpness` — 后端自带的锐化强度（0 = 关）。FSR / XeSS 直接吃这个值。 */
+    val SR_SHARPNESS: ModConfigSpec.DoubleValue
+    val SR_MASK: ModConfigSpec.BooleanValue
 
     /** `[dlss] frameGenerationFrames` — generated frames per rendered frame (1-5). */
     val DLSS_FRAME_GENERATION_FRAMES: ModConfigSpec.IntValue
@@ -243,6 +286,12 @@ object IllusionConfig {
 
     /** `[vrs] sriMotionPixels` — screen-space motion above which a tile stays 1X1. */
     val VRS_SRI_MOTION_PIXELS: ModConfigSpec.IntValue
+
+    /**
+     * `[vrs] sriTemporalClamp` — never let a tile get coarser than it was in the previous
+     * frame's shading-rate image (P236). Costs one extra ping-pong image.
+     */
+    val VRS_SRI_TEMPORAL_CLAMP: ModConfigSpec.BooleanValue
 
     init {
         BUILDER.comment(
@@ -345,6 +394,32 @@ object IllusionConfig {
             .translation("dxr_mc.configuration.renderer.hdr")
             .defineEnum("hdr", HdrMode.AUTO)
 
+        ALLOW_TEARING = BUILDER
+            .comment(
+                "Allow an ALLOW_TEARING (composed-flip bypassing) swapchain.",
+                "ON (default) is what low-latency/VRR wants: Present(0, ALLOW_TEARING) lets the",
+                "chain go independent flip. OFF keeps the chain in DWM composed flip — the mode",
+                "overlays such as RTSS/Afterburner draw their OSD in. Takes effect on the next",
+                "swapchain creation."
+            )
+            .translation("dxr_mc.configuration.renderer.allowTearing")
+            .define("allowTearing", true)
+
+        PRESENT_CHILD_WINDOW = BUILDER
+            .comment(
+                "Build the swapchain on a self-owned child window that never touches OpenGL",
+                "(P267 SeamlessWindowHost).",
+                "ON (default) is what overlays such as RTSS/Afterburner need to draw their OSD: the",
+                "child window always goes through DWM composition and can never enter independent",
+                "flip. It is also what keeps the D3D12 surface physically isolated from the GLFW",
+                "OpenGL context.",
+                "OFF creates the chain on the SDL top-level window. That is required for exclusive",
+                "fullscreen, which a child window cannot own.",
+                "Takes effect on the next swapchain creation."
+            )
+            .translation("dxr_mc.configuration.renderer.presentChildWindow")
+            .define("presentChildWindow", true)
+
         SHARPEN_AMOUNT = BUILDER
             .comment(
                 "Post-sharpen strength after DLAA/DLSS upscaling, 0.0-1.0.",
@@ -414,6 +489,46 @@ object IllusionConfig {
             )
             .translation("dxr_mc.configuration.dlss.frameGenerationFrames")
             .defineInRange("frameGenerationFrames", 1, 1, 5)
+
+        BUILDER.pop()
+
+        BUILDER.comment(
+            "P282/P283: which super-resolution backend the native DLL drives.",
+            "DLSS keeps the existing DeepLearningSuperSampling path byte-for-byte; FSR and XESS go",
+            "through the P271 abstraction layer (mcdr_dx12Sr*). Changing this needs no restart:",
+            "the next frame picks it up (switching to FSR/XeSS waits for the GPU once).",
+            "FSR / XeSS only upscale when the render scale is below 100% (they need separate",
+            "input and output textures), so pair the backend with a render scale below 100%.",
+            "Unavailable backends say why in the log and fall back to no upscaling."
+        ).translation("dxr_mc.configuration.sr").push("sr")
+
+        SR_BACKEND = BUILDER
+            .comment(
+                "NONE = no super resolution. DLSS = the NVIDIA path (needs an RTX card).",
+                "FSR = AMD FidelityFX. Needs amd_fidelityfx_upscaler_dx12.dll next to MCDR.dll",
+                "(dev tree only). FSR4 additionally needs an RDNA4 card; older cards get FSR 3.1",
+                "from the same runtime. XESS = Intel XeSS, whose libxess.dll ships in the JAR.",
+                "Switching needs no restart, but the first frame on a new backend waits for the",
+                "GPU to catch up once (the old context is destroyed)."
+            )
+            .translation("dxr_mc.configuration.sr.backend")
+            .defineEnum("backend", SrBackend.DLSS)
+
+        SR_SHARPNESS = BUILDER
+            .comment(
+                "Sharpening strength handed to the backend itself (0 = off, 1 = maximum).",
+                "Only FSR and XeSS consume it; the DLSS path keeps its own post-sharpen filter",
+                "([renderer] sharpenAmount)."
+            )
+            .translation("dxr_mc.configuration.sr.sharpness")
+            .defineInRange("sharpness", 0.0, 0.0, 1.0)
+    SR_MASK = BUILDER
+        .comment(
+            "P276: feeds a reactive (FSR) / responsive (XeSS) mask made from the OIT transmittance buffer.",
+            "Off by default: it is a quality refinement, not a requirement of any of the three SDKs."
+        )
+        .translation("dxr_mc.configuration.sr.mask")
+        .define("mask", false)
 
         BUILDER.pop()
 
@@ -517,6 +632,16 @@ object IllusionConfig {
             )
             .translation("dxr_mc.configuration.vrs.sriMotionPixels")
             .defineInRange("sriMotionPixels", 8, 0, 256)
+
+        VRS_SRI_TEMPORAL_CLAMP = BUILDER
+            .comment(
+                "Never let a tile get coarser than it was in the previous frame's",
+                "shading-rate image. Stops edges from breathing under a static camera,",
+                "at the cost of keeping a tile at 1X1 for one frame after it gets finer",
+                "(and of one extra ping-pong image)."
+            )
+            .translation("dxr_mc.configuration.vrs.sriTemporalClamp")
+            .define("sriTemporalClamp", true)
 
         BUILDER.pop()
 

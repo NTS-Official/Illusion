@@ -58,6 +58,8 @@ private val gMeshSkipLogReasons: MutableSet<String> = HashSet()
 private var gMeshletLogNanos = 0L
 /** P217：地形批次因 mesh 数据缺失而未绘制的去重日志（不再回退 IMR）。 */
 private val gMeshTerrainMissingLog: MutableSet<String> = HashSet()
+/** P237：`drawIndexedIndirect` 见过的管线名（每个只打一行，用来核对 VRS 白名单）。 */
+private val gDrawIndirectLocations: MutableSet<String> = HashSet()
 /** P217：上一次 AS 剔除开关状态（同会话 A/B 切换时打一条诊断）。 */
 private var gMeshletLastCull: Boolean? = null
 /** P217：按图层的派发计数（日志限流是全局的，只印一条会看不到 TRANSLUCENT）。 */
@@ -100,6 +102,15 @@ class D3D12RenderPassBackend(
 
     /** P217：最近一次 slot0 顶点切片的缓冲（meshlet 派发要把它当 t14 的 RAW SRV 绑定）。 */
     private var lastVertexBuffer: GpuBuffer? = null
+
+    /**
+     * P243：早期显示（NeoForge `ELSDrawCollector` → `RenderPearlRenderPass.bindVertexBuffer`）
+     * 会**先绑定顶点缓冲、后设置管线**。stride 只能从管线的顶点布局推导，native 的
+     * `D3D12SetVertexBuffer` 又必须给 stride，所以此时先把绑定挂起，等 `setPipeline`
+     * 拿到管线后再落实。旧逻辑在这里抛异常，整条加载屏 draw 被 NeoForge 吞掉（日志
+     * "Unexpected error while rendering the loading screen"），在冷启动的机器上会一直报。
+     */
+    private val pendingVertexBuffers = LinkedHashMap<Int, Pair<D3D12GpuBuffer, Long>>()
 
     private var pipeline: D3D12CompiledRenderPipeline? = null
     private var anyDescriptorDirty = false
@@ -257,6 +268,22 @@ class D3D12RenderPassBackend(
         val ok = MCDR_ABI.D3D12SetPipeline(this.ctx, compiled.handle(), useDepth)
         if (!ok) {
             throw IllegalStateException("dx12SetPipeline failed for ${base.info().location}")
+        }
+        // P243：落实 setPipeline 之前挂起的顶点缓冲（早期显示是"先绑 buffer、后设管线"）。
+        if (this.pendingVertexBuffers.isNotEmpty()) {
+            val formatBindings = compiled.info().vertexFormatBindings
+            val pending = this.pendingVertexBuffers.entries.map { it.key to it.value }
+            this.pendingVertexBuffers.clear()
+            for ((slot, value) in pending) {
+                val stride = formatBindings.getOrNull(slot)?.vertexSize ?: 0
+                if (stride == 0) {
+                    LOGGER.warn(
+                        "P243: vertex buffer slot {} has no format in pipeline {} (dropped)",
+                        slot, base.info().location)
+                    continue
+                }
+                this.applyVertexBuffer(slot, value.first, value.second, stride)
+            }
         }
     }
 
@@ -467,18 +494,22 @@ class D3D12RenderPassBackend(
             }
         }
         if (stride == 0) {
-            throw IllegalStateException(
-                "setVertexBuffer: cannot derive stride for slot $slot"
-                + " (pipeline=${pipeline?.info()?.location ?: "null"}"
-                + "), vertexFormatBindings is empty or slot out of range")
+            // P243：管线还没设（早期显示先绑 buffer 后设管线）或该槽位没声明顶点布局。
+            // 挂起，等 setPipeline 拿到管线再应用；抛异常会让加载屏整条 draw 失败。
+            this.pendingVertexBuffers[slot] = (buffer as D3D12GpuBuffer) to vertexBuffer.offset()
+            return
         }
-        if (!MCDR_ABI.D3D12SetVertexBuffer(this.ctx, slot,
-            (buffer as D3D12GpuBuffer).handle(), vertexBuffer.offset(), stride)) {
+        this.applyVertexBuffer(slot, buffer as D3D12GpuBuffer, vertexBuffer.offset(), stride)
+    }
+
+    /** P243：按已知 stride 真正下发顶点缓冲绑定，并维护 slot0 的 meshlet 记账。 */
+    private fun applyVertexBuffer(slot: Int, buffer: D3D12GpuBuffer, offset: Long, stride: Int) {
+        if (!MCDR_ABI.D3D12SetVertexBuffer(this.ctx, slot, buffer.handle(), offset, stride)) {
             throw IllegalStateException("dx12SetVertexBuffer failed")
         }
         if (slot == 0) {
             // P217：MDI 批次里每个段的 `baseVertex` 都相对这块切片，Stage 2 建段表要用。
-            this.lastVertexSliceOffset = vertexBuffer.offset()
+            this.lastVertexSliceOffset = offset
             this.lastVertexBuffer = buffer
         }
     }
@@ -624,6 +655,12 @@ class D3D12RenderPassBackend(
 
     override fun drawIndexedIndirect(commands: GpuBufferSlice, drawCount: Int) {
         val location = this.pipeline?.info()?.location?.toString() ?: ""
+        if (gDrawIndirectLocations.add(location)) {
+            // P237：作用域白名单是"按管线名"判的，名字错了整条通路就是静默空转 ——
+            // 一次运行里每个见过的新名字打一行，方便对着 `isTerrain`/`terrainRateFor` 核对。
+            LOGGER.info("[dxrmc] MDI terrain candidate '{}' terrain={} rate={}", location,
+                isTerrain(location), D3D12VariableShadingRate.terrainRateFor(location))
+        }
         // P217：地形**全部**（不透明 + OIT 半透明）只走 meshlet，没有 IMR 回退。
         // 半透明能这么做的前提是 `GameRendererTransparencyMixin` 把 improved transparency
         // （Wavelet OIT）强制打开 —— OIT 顺序无关，mesh 的线程组顺序才无所谓。

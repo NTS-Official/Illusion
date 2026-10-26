@@ -43,6 +43,7 @@ import java.util.concurrent.atomic.AtomicInteger
     private var MH_setlogverbose: MethodHandle? = null
     private var MH_setloglevel: MethodHandle? = null
     private var MH_setshutdowntrace: MethodHandle? = null
+    private var MH_setlogfile: MethodHandle? = null
     private var MH_setenvironment: MethodHandle? = null
     private var MH_setpixcapture: MethodHandle? = null
     private var MH_setpixdirectory: MethodHandle? = null
@@ -53,6 +54,24 @@ import java.util.concurrent.atomic.AtomicInteger
     private var MH_createdlssfeature: MethodHandle? = null
     private var MH_evaluatedlss: MethodHandle? = null
     private var MH_querydlss: MethodHandle? = null
+    /** P271：超分抽象层的 8 个契约入口（见 `mcdr_abi.h` 的 P271 段）。全部走 skipOptional。 */
+    private var MH_srpick: MethodHandle? = null
+    /** P271：后端能力面查询（填 `MCDRLayout.SR_CAPS`）。 */
+    private var MH_srquerycaps: MethodHandle? = null
+    /** P271：建/唤醒后端。 */
+    private var MH_srcreate: MethodHandle? = null
+    /** P271：尺寸变化通知。 */
+    private var MH_srresize: MethodHandle? = null
+    /** P271：逐帧提交（`MCDRLayout.SR_DISPATCH`）。 */
+    private var MH_srevaluate: MethodHandle? = null
+    /** P271：后端偏好的亚像素抖动。 */
+    private var MH_srjitter: MethodHandle? = null
+    /** P271：释放后端资源。 */
+    private var MH_srdestroy: MethodHandle? = null
+    /** P274：后端期望的 jitter 相位长度。 */
+    private var MH_srjitterphase: MethodHandle? = null
+    /** P271：一行可用性文本。 */
+    private var MH_srquery: MethodHandle? = null
     /** P231：scope 型着色率下发（见 [D3D12SetShadingRateNow]）。 */
     private var MH_setshadingratenow: MethodHandle? = null
     /** P231：着色率组合器（见 [D3D12SetShadingRateCombiners]）。 */
@@ -82,6 +101,8 @@ import java.util.concurrent.atomic.AtomicInteger
     private var MH_setreflexframelimit: MethodHandle? = null
     private var MH_sethdrmode: MethodHandle? = null
     private var MH_setraytracingmode: MethodHandle? = null
+    /** P251：交换链建链选项（allowTearing / forcePresentChild）。 */
+    private var MH_setswapchainoptions: MethodHandle? = null
     private var MH_gethdrappliedmode: MethodHandle? = null
     private var MH_reflexavailable: MethodHandle? = null
     /** P208：Streamline 的 DLSS 插件是否真的加载成功（见 native `mcdr_dlss_available`）。 */
@@ -163,6 +184,8 @@ import java.util.concurrent.atomic.AtomicInteger
     private var MH_createcomputepipelineshadingrate: MethodHandle? = null
     private var MH_createshadingrateimage: MethodHandle? = null
     private var MH_dispatchcomputeshadingrate: MethodHandle? = null
+    private var MH_createtexture3: MethodHandle? = null
+    private var MH_dispatchtexture3: MethodHandle? = null
     private var MH_setshadingrateimage: MethodHandle? = null
     private var MH_createsurface: MethodHandle? = null
     private var MH_surfacepresentmodes: MethodHandle? = null
@@ -435,8 +458,24 @@ import java.util.concurrent.atomic.AtomicInteger
     private fun addr(seg: MemorySegment?): Long {
         return if (seg == null) 0L else seg.address()
     }
-    /** `MCDR_ABI_VERSION` from `mcdr_abi.h`. */
-    const val MCDR_ABI_VERSION: Int = 2
+    /**
+     * `MCDR_ABI_VERSION` from `mcdr_abi.h`.
+     *
+     * P271：2 → 3。变动只有**追加**：两张新表（`mcdr_sr_caps` sizeof=80、`mcdr_sr_dispatch`
+     * sizeof=128）与 8 个 `mcdr_dx12Sr*` 入口。老导出与老结构一个字节都没动，但
+     * [verifyABI] 会把 native 报上来的 layout 表与 [MCDRLayout.describe] 双向比对，
+     * 所以这个常量、两张表的 Kotlin 镜像、native 的 `layoutTable()` 三处必须同时到位
+     * ——只改一处会在设备创建前抛 "MCDR ABI version mismatch" 或 layout mismatch。
+     */
+    const val MCDR_ABI_VERSION: Int = 3
+    /** P271：`MCDR_SR_BACKEND_*`。与 `mcdr_abi.h` 的同名宏逐值对应。 */
+    const val SR_BACKEND_NONE: Int = 0
+    const val SR_BACKEND_DLSS: Int = 1
+    const val SR_BACKEND_FSR: Int = 2
+    const val SR_BACKEND_XESS: Int = 3
+    /** P271：`MCDR_SR_MASK_*`。 */
+    const val SR_MASK_REACTIVE: Int = 1
+    const val SR_MASK_RESPONSIVE: Int = 2
     /** Return value of a native "bool" (declared `int32_t`) as a Java boolean. */
     private fun ok(value: Int): Boolean {
         return value != 0
@@ -552,6 +591,33 @@ import java.util.concurrent.atomic.AtomicInteger
             // logging configuration must never fail engine start-up
         }
     }
+
+    /**
+     * 把每条 native 日志同时镜像到 [path]（UTF-8，相对路径按游戏目录解析，追加写）。
+     * 对应配置 `[logging] nativeLogFile`；空串 = 关闭镜像。
+     *
+     * <p>存在的理由：Prism 这类启动器只把 log4j 的输出写进 `logs/latest.log`，子进程的
+     * stdout/stderr 不落盘，于是"用户端出问题却拿不到 native 行"。加载的 DLL 没有这个导出时
+     * 返回 `false`（它只走 stderr）。
+     *
+     * @return true 表示这条导出存在并且已经配置成功。
+     */
+    fun D3D12SetLogFile(path: String): Boolean {
+        if (LOAD_FAILURE != null) {
+            return false
+        }
+        val handle = MH_setlogfile ?: return false
+        return try {
+            Arena.ofConfined().use { arena ->
+                val status = handle.invokeExact(cstringUtf8(arena, path)) as Int
+                status != 0
+            }
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12SetLogFile failed: $t")
+            false
+        }
+    }
+
     /**     * Load Microsoft PIX's GPU capture layer (`WinPixGpuCapturer.dll`) into this process.     *     * <p>PIX hooks Direct3D 12 from inside that DLL, so it has to be in place **before the first     * device is created**. That is why [dev.nts.expdxr.Illusion] pushes this value as soon as the     * config file is read, and why the options is marked "restart required".     *     * @return 1 when the layer is loaded, 0 when capture was not requested, -1 when it was     *     requested but the DLL could not be found or loaded, and [Int.MIN_VALUE] when the loaded     *     native DLL predates this export. Never throws: a diagnostic must not break startup.     */
     fun D3D12SetPIXCapture(enabled: Boolean): Int {
         if (LOAD_FAILURE != null) {
@@ -694,7 +760,7 @@ import java.util.concurrent.atomic.AtomicInteger
             Int.MIN_VALUE
         }
     }
-    /**     * P108b：DLSS 自己的开关（`mcdr_dx12SetDlssEnabled`）。     *     * <p>在 P108b 之前，DLSS 的闸门是抗锯齿模式 `aaMode == 4`（`dxrMcAaMode` 的第 4 档）。这个     * 导出把两件事拆开：DLSS 只认 [enabled]，抗锯齿只认 `mcdrSetAntiAliasing`，于是"先对低分辨率     * 世界层做 SMAA、再让 DLSS 升采样"可以同时成立。native 只记下开关（不需要重启），下一帧 /     * 下次 blit 生效。     *     * @param enabled 1 = 打开，0 = 关闭（其余取值是参数错误）。     * @return 1 = 已记录，0 = 接受但本机 DLSS 不可用（native 自己会打原因），-1 = 参数非法，     *     [Int.MIN_VALUE] = 本地 DLL 没有这个导出（旧 DLL 仍只认 `aaMode == 4`，JVM 侧为此保留了一段     *     临时桥：`dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling`）。Never throws.     */
+    /**     * P108b：DLSS 自己的开关（`mcdr_dx12SetDlssEnabled`）。     *     * <p>在 P108b 之前，DLSS 的闸门是抗锯齿模式 `aaMode == 4`（`dxrMcAaMode` 的第 4 档）。这个     * 导出把两件事拆开：DLSS 只认 [enabled]，抗锯齿只认 `mcdrSetAntiAliasing`，于是"先对低分辨率     * 世界层做 SMAA、再让 DLSS 升采样"可以同时成立。native 只记下开关（不需要重启），下一帧 /     * 下次 blit 生效。     *     * @param enabled 1 = 打开，0 = 关闭（其余取值是参数错误）。     * @return 1 = 已记录，0 = 接受但本机 DLSS 不可用（native 自己会打原因），-1 = 参数非法，     *     [Int.MIN_VALUE] = 本地 DLL 没有这个导出（旧 DLL 仍只认 `aaMode == 4`，JVM 侧为此保留了一段     *     临时桥：`dev.nts.expdxr.dxrmc.sr.dlss.DeepLearningSuperSampling`）。Never throws.     */
     fun D3D12SetDlssEnabled(enabled: Int): Int {
         if (LOAD_FAILURE != null) {
             return Int.MIN_VALUE
@@ -842,6 +908,19 @@ import java.util.concurrent.atomic.AtomicInteger
             System.err.println("[backend-java] dx12SetHdrMode($mode) failed: ${t}")
         }
     }
+
+    /** P251：交换链建链选项 —— 下一次建链时生效（`[renderer] allowTearing` / `presentChildWindow`）。 */
+    fun D3D12SetSwapchainOptions(allowTearing: Boolean, presentChild: Boolean) {
+        if (LOAD_FAILURE != null) return
+        val handle = MH_setswapchainoptions ?: return
+        try {
+            handle.invokeExact(if (allowTearing) 1 else 0, if (presentChild) 1 else 0)
+        } catch (t: Throwable) {
+            System.err.println(
+                "[backend-java] dx12SetSwapchainOptions($allowTearing, $presentChild) failed: ${t}",
+            )
+        }
+    }
     /**     * P198：建链时**实际用掉**的 HDR 模式（0/1/2），-1 表示还没建过交换链。     *     * <p>JVM 侧拿它和 `IllusionConfig` 里的当前值比较，决定视频设置里要不要出现原版那条     * 「需要重启」提示 —— 换 HDR 格式必须重建交换链（setHdrMode 的注释），运行期不换。     */
     fun D3D12HdrAppliedMode(): Int {
         if (LOAD_FAILURE != null) return -1
@@ -922,6 +1001,243 @@ import java.util.concurrent.atomic.AtomicInteger
             Int.MIN_VALUE
         }
     }
+    // ==================================================================
+    // P271：超分（SR）抽象层的契约入口
+    //
+    // 这一层负责的只有「能被 FFM 解析 + 参数与返回值语义稳定」。真正的后端选择、热切换
+    // 与每帧提交在 P280/P282 才接上调用点；在那之前这些包装只被诊断与 UI 用来读能力面，
+    // 因此**不在任何逐帧路径上**，允许用 Arena.ofConfined() 分配。
+    //
+    // 老路径（[D3D12CreateDlssFeature] / [D3D12EvaluateDlss]）一个字节都没改：
+    // native 侧 `mcdr_dx12SrEvaluate` 在 v1 里就是把 SR 载荷翻译成 `mcdr_dlss_input`
+    // 后转发到同一条实现，所以两条路的 GPU 结果应当逐像素相同。
+    // ==================================================================
+
+    /**
+     * P271：一次能力面查询的结果，字段与 `mcdr_sr_caps` 一一对应。
+     *
+     * [note] 是 native 侧固定 `char[28]` 的 UTF-8 短原因（已 NUL 结尾），不是机器可判的
+     * 结论——结论看 [available]。
+     */
+    data class SrCaps(
+        val backend: Int,
+        val available: Boolean,
+        val coupledDenoise: Boolean,
+        val needsExposure: Boolean,
+        val takesMasks: Int,
+        val externalHeap: Boolean,
+        val jitterPhaseCount: Int,
+        val maxRenderWidth: Int,
+        val maxRenderHeight: Int,
+        val nativeAA: Boolean,
+        val note: String
+    ) {
+        /** 该后端是否吃 reactive mask（SL 的 `kBufferTypeReactiveMaskHint` / FFX 的 reactive）。 */
+        val takesReactiveMask: Boolean get() = (takesMasks and SR_MASK_REACTIVE) != 0
+
+        /** 该后端是否吃 responsive mask（XeSS 的 `pResponsivePixelMaskTexture`）。 */
+        val takesResponsiveMask: Boolean get() = (takesMasks and SR_MASK_RESPONSIVE) != 0
+    }
+
+    /**
+     * P271：把期望后端记到 native（`mcdr_dx12SrPick`）。**纯记录**：不建、不销毁、不重建。
+     *
+     * @return 1 = 已记录，0 = 后端编号未知，-1 = 参数非法，[Int.MIN_VALUE] = 本地 DLL
+     *     没有这个导出（老 DLL，静默降级）。Never throws.
+     */
+    fun D3D12SrPick(backend: Int): Int {
+        if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_srpick ?: return Int.MIN_VALUE
+        return try {
+            handle.invokeExact(backend) as Int
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12SrPick failed: $t")
+            Int.MIN_VALUE
+        }
+    }
+
+    /**
+     * P271：查询某后端在本机的能力面（`mcdr_dx12SrQueryCaps`）。
+     *
+     * @return null = 查询不可用（没有导出 / 参数非法 / 调用失败）；**不区分**这几种，
+     *     因为它们对调用方的含义相同：按「该后端不可用」处理。
+     */
+    fun querySrCaps(backend: Int): SrCaps? {
+        if (LOAD_FAILURE != null) {
+            return null
+        }
+        val handle = MH_srquerycaps ?: return null
+        return try {
+            Arena.ofConfined().use { arena ->
+                val seg = arena.allocate(MCDRLayout.SR_CAPS)
+                val rc = handle.invokeExact(backend, seg) as Int
+                if (rc != 1) {
+                    return null
+                }
+                SrCaps(
+                    backend = seg.get(MCDRLayout.I32, MCDRLayout.SR_CAPS_BACKEND),
+                    available = seg.get(MCDRLayout.I32, MCDRLayout.SR_CAPS_AVAILABLE) != 0,
+                    coupledDenoise = seg.get(MCDRLayout.I32, MCDRLayout.SR_CAPS_COUPLED_DENOISE) != 0,
+                    needsExposure = seg.get(MCDRLayout.I32, MCDRLayout.SR_CAPS_NEEDS_EXPOSURE) != 0,
+                    takesMasks = seg.get(MCDRLayout.I32, MCDRLayout.SR_CAPS_TAKES_MASKS),
+                    externalHeap = seg.get(MCDRLayout.I32, MCDRLayout.SR_CAPS_EXTERNAL_HEAP) != 0,
+                    jitterPhaseCount = seg.get(MCDRLayout.I32, MCDRLayout.SR_CAPS_JITTER_PHASE_COUNT),
+                    maxRenderWidth = seg.get(MCDRLayout.I32, MCDRLayout.SR_CAPS_MAX_RENDER_WIDTH),
+                    maxRenderHeight = seg.get(MCDRLayout.I32, MCDRLayout.SR_CAPS_MAX_RENDER_HEIGHT),
+                    nativeAA = seg.get(MCDRLayout.I32, MCDRLayout.SR_CAPS_NATIVE_AA) != 0,
+                    note = seg.getString(MCDRLayout.SR_CAPS_NOTE, Charsets.UTF_8)
+                )
+            }
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12SrQueryCaps failed: $t")
+            null
+        }
+    }
+
+    /**
+     * P271：把一行 SR 状态文本写进 [note]（`mcdr_dx12SrQuery`）。
+     *
+     * @return 1 = 已写入，0 = 没有内容，-1 = 参数非法，[Int.MIN_VALUE] = 本地 DLL 没有这个导出。
+     */
+    fun D3D12SrQuery(note: MemorySegment, cap: Int): Int {
+        if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_srquery ?: return Int.MIN_VALUE
+        return try {
+            handle.invokeExact(note, cap) as Int
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12SrQuery failed: $t")
+            Int.MIN_VALUE
+        }
+    }
+
+    /**
+     * P271：建/唤醒后端（`mcdr_dx12SrCreate`）。与 [D3D12CreateDlssFeature] 同点调用：
+     * **命令列表必须开着**（NGX 的 feature 只能在录制中创建）。
+     *
+     * @param maxRenderWidth 渲染尺寸上界（热切换/resize 时判要不要重建用），不是本帧尺寸。
+     * @return 1 = 就绪，0 = 本机不可用，-1 = 参数非法，[Int.MIN_VALUE] = 本地 DLL 没有该导出。
+     */
+    fun D3D12SrCreate(
+        ctx: Long,
+        backend: Int,
+        maxRenderWidth: Int,
+        maxRenderHeight: Int,
+        displayWidth: Int,
+        displayHeight: Int
+    ): Int {
+        if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_srcreate ?: return Int.MIN_VALUE
+        return try {
+            handle.invokeExact(ptr(ctx), backend, maxRenderWidth, maxRenderHeight, displayWidth, displayHeight) as Int
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12SrCreate failed: $t")
+            Int.MIN_VALUE
+        }
+    }
+
+    /**
+     * P271：尺寸变化通知（`mcdr_dx12SrResize`）。
+     *
+     * @return 1 = 已接受，0 = 后端未就绪（可忽略），-1 = 参数非法，[Int.MIN_VALUE] = 无导出。
+     */
+    fun D3D12SrResize(ctx: Long, renderWidth: Int, renderHeight: Int, displayWidth: Int, displayHeight: Int): Int {
+        if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_srresize ?: return Int.MIN_VALUE
+        return try {
+            handle.invokeExact(ptr(ctx), renderWidth, renderHeight, displayWidth, displayHeight) as Int
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12SrResize failed: $t")
+            Int.MIN_VALUE
+        }
+    }
+
+    /**
+     * P271：逐帧提交（`mcdr_dx12SrEvaluate`）。[desc] 必须是 `MCDRLayout.SR_DISPATCH` 的
+     * 一块内存（P272 会加一个打包器；这一轮还没有生产调用点）。
+     *
+     * @return 1 = 已执行，0 = 跳过，-1 = 参数非法，[Int.MIN_VALUE] = 无导出。
+     */
+    fun D3D12SrEvaluate(ctx: Long, desc: MemorySegment): Int {
+        if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_srevaluate ?: return Int.MIN_VALUE
+        return try {
+            handle.invokeExact(ptr(ctx), desc) as Int
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12SrEvaluate failed: $t")
+            Int.MIN_VALUE
+        }
+    }
+
+    /**
+     * P271：该后端偏好的亚像素抖动（`mcdr_dx12SrJitter`）。
+     *
+     * <p>**返回 0 是正常结果**，意思是「该后端没有自己的相位表」——本项目亚像素 jitter
+     * 只有一个源（`D3D12Temporal` 的 Halton(2,3)，P75 / P218），这时 [outX]/[outY] 不会
+     * 被修改。只有在返回 1 时才应该用写出来的值。
+     *
+     * @return 1 = 已写入，0 = 无意见，-1 = 参数非法，[Int.MIN_VALUE] = 无导出。
+     */
+    fun D3D12SrJitter(frameIndex: Int, outX: MemorySegment, outY: MemorySegment): Int {
+        if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_srjitter ?: return Int.MIN_VALUE
+        return try {
+            handle.invokeExact(frameIndex, outX, outY) as Int
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12SrJitter failed: $t")
+            Int.MIN_VALUE
+        }
+    }
+
+    /**
+     * P274：问后端要它期望的 jitter 相位长度（`mcdr_dx12SrJitterPhaseCount`）。
+     *
+     * 这是"相位长度由后端回答"的唯一来源 —— 不要在上层再写死 8 或 16。
+     * DLSS / XeSS 报 8，FSR 报 `8 * (displayWidth / renderWidth)^2`（夹到 [1, 256]）。
+     *
+     * @return 相位长度；0 = 该后端不适用（None）；-1 = 参数非法；
+     *   [Int.MIN_VALUE] = 无导出（老 DLL）。
+     */
+    fun D3D12SrJitterPhaseCount(backend: Int, renderWidth: Int, displayWidth: Int): Int {
+        if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_srjitterphase ?: return Int.MIN_VALUE
+        return try {
+            handle.invokeExact(backend, renderWidth, displayWidth) as Int
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12SrJitterPhaseCount failed: $t")
+            Int.MIN_VALUE
+        }
+    }
+
+    /**
+     * P271：释放 SR 后端（`mcdr_dx12SrDestroy`）。**只允许在没有打开命令列表时调用**
+     * （帧首）；重复调用安全。没有导出时静默返回。
+     */
+    fun D3D12SrDestroy() {
+        if (LOAD_FAILURE != null) {
+            return
+        }
+        val handle = MH_srdestroy ?: return
+        try {
+            handle.invokeExact()
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12SrDestroy failed: $t")
+        }
+    }
+
     /** Throw [IllegalStateException] carrying the native error text when `value` is 0. */
     private fun check(value: Boolean, what: String) {
         if (!value) {
@@ -1789,12 +2105,14 @@ import java.util.concurrent.atomic.AtomicInteger
     }
 
     /**
-     * P235：用上一帧深度（`t0`）与上一帧速度（`t1`）生成一次着色率图像（`u0`）。
-     * `srvDepth` / `srvMotion` 是 [D3D12CreateTextureView] 的句柄。
+     * P235：用上一帧深度（`t0`）、上一帧速度（`t1`）与上一帧的着色率图像（`t2`）生成一次
+     * 新的着色率图像（`u0`）。`srvDepth` / `srvMotion` / `srvPrevious` 都是
+     * [D3D12CreateTextureView] 的句柄；没有历史时传当前图像自己的视图，并在 `constants`
+     * 的第 8 个 dword 里关掉时间钳制（bit1）。
      */
     fun D3D12DispatchComputeShadingRate(ctx: Long, pipeline: Long, srvDepth: Long, srvMotion: Long,
-                                        image: Long, constants: IntArray, x: Int, y: Int,
-                                        z: Int): Boolean {
+                                        srvPrevious: Long, image: Long, constants: IntArray,
+                                        x: Int, y: Int, z: Int): Boolean {
         requireLoaded()
         val handle = MH_dispatchcomputeshadingrate ?: return false
         val count = constants.size
@@ -1805,7 +2123,38 @@ import java.util.concurrent.atomic.AtomicInteger
                 seg.set(MCDRLayout.I32, i * 4L, constants[i])
             }
             return ok(handle.invokeExact(ptr(ctx), ptr(pipeline), ptr(srvDepth), ptr(srvMotion),
-                ptr(image), seg, count, x, y, z) as Int)
+                ptr(srvPrevious), ptr(image), seg, count, x, y, z) as Int)
+        }
+    }
+
+    /**
+     * P276：通用 compute 纹理 pass —— 根签名与 SRI 那条完全相同（3×SRV + 1×UAV + b0 的 8 个 int），
+     * native 侧就是同一个实现，这里只是不带 `ShadingRate` 字样的名字。
+     */
+    fun D3D12CreateComputePipelineTexture3(dxil: ByteArray): Long {
+        requireLoaded()
+        val handle = MH_createtexture3 ?: return 0L
+        Arena.ofConfined().use { arena ->
+            val src = arena.allocate(dxil.size.toLong().coerceAtLeast(1L))
+            MemorySegment.copy(dxil, 0, src, ValueLayout.JAVA_BYTE, 0, dxil.size)
+            return addr(handle.invokeExact(src, dxil.size) as MemorySegment)
+        }
+    }
+
+    /** P276：在已打开的命令列表上派发一次通用 compute 纹理 pass（1=已派发）。 */
+    fun D3D12DispatchComputeTexture3(ctx: Long, pipeline: Long, srv0: Long, srv1: Long, srv2: Long,
+                                     image: Long, constants: IntArray, x: Int, y: Int, z: Int): Int {
+        requireLoaded()
+        val handle = MH_dispatchtexture3 ?: return Int.MIN_VALUE
+        val count = constants.size
+        require(count in 0..8) { "texture3 constants: 0..8 dwords, got $count" }
+        Arena.ofConfined().use { arena ->
+            val seg = if (count == 0) MemorySegment.NULL else arena.allocate(count * 4L)
+            for (i in 0 until count) {
+                seg.set(MCDRLayout.I32, i * 4L, constants[i])
+            }
+            return handle.invokeExact(ptr(ctx), ptr(pipeline), ptr(srv0), ptr(srv1), ptr(srv2),
+                ptr(image), seg, count, x, y, z) as Int
         }
     }
 
@@ -2604,6 +2953,9 @@ import java.util.concurrent.atomic.AtomicInteger
         // P184（可选导出）：关停路径进度标记是否恒定输出，配置 [logging] shutdownTrace。
         // 旧 DLL 没有它时保持内置的"恒定输出"。
         MH_setshutdowntrace = skipOptional("mcdrSetShutdownTraceAlways", fdv(MCDRLayout.I32))
+        // P250（可选导出）：配置 [logging] nativeLogFile —— 把 native 日志镜像到文件。
+        // 启动器不落盘子进程 stdout，没有这条导出时 native 行只留在启动器的控制台里。
+        MH_setlogfile = skipOptional("mcdrSetLogFile", fd(MCDRLayout.I32, MCDRLayout.PTR))
         // PIX GPU 捕获层（可选导出）：必须在首个 D3D12 设备创建之前调用 —— 捕获层靠挂钩 D3D12
         // 工作，晚一步就抓不到已经建好的对象。旧 DLL 没有这个导出，此时调用返回 MIN_VALUE。
         MH_setpixcapture = skipOptional("mcdrSetPixCapture", fd(MCDRLayout.I32, MCDRLayout.I32))
@@ -2641,9 +2993,30 @@ import java.util.concurrent.atomic.AtomicInteger
         MH_createdlssfeature = skipOptional("mcdr_dx12CreateDlssFeature", fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.PTR))
         MH_evaluatedlss = skipOptional("mcdr_dx12EvaluateDlss", fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.PTR))
         MH_querydlss = skipOptional("mcdr_dx12QueryDlss", fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.I32))
+        // P271：超分抽象层的 8 个入口。同样是 skipOptional —— 老 DLL 没有这些导出时
+        // 返回 Int.MIN_VALUE，调用方静默降级（这一轮 JVM 侧还没有必用的调用点）。
+        MH_srpick = skipOptional("mcdr_dx12SrPick", fd(MCDRLayout.I32, MCDRLayout.I32))
+        MH_srquerycaps = skipOptional("mcdr_dx12SrQueryCaps", fd(MCDRLayout.I32, MCDRLayout.I32, MCDRLayout.PTR))
+        MH_srcreate = skipOptional(
+            "mcdr_dx12SrCreate",
+            fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.I32, MCDRLayout.I32, MCDRLayout.I32, MCDRLayout.I32, MCDRLayout.I32)
+        )
+        MH_srresize = skipOptional(
+            "mcdr_dx12SrResize",
+            fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.I32, MCDRLayout.I32, MCDRLayout.I32, MCDRLayout.I32)
+        )
+        MH_srevaluate = skipOptional("mcdr_dx12SrEvaluate", fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.PTR))
+        MH_srjitter = skipOptional("mcdr_dx12SrJitter", fd(MCDRLayout.I32, MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.PTR))
+        MH_srdestroy = skipOptional("mcdr_dx12SrDestroy", fdv())
+        MH_srjitterphase =
+            skipOptional(
+                "mcdr_dx12SrJitterPhaseCount",
+                fd(MCDRLayout.I32, MCDRLayout.I32, MCDRLayout.I32, MCDRLayout.I32),
+            )
+        MH_srquery = skipOptional("mcdr_dx12SrQuery", fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.I32))
         // P108b：DLSS 自己的开关（可选导出）。它把 DLSS 与抗锯齿模式解耦，于是 native 侧可以同时
         // "先对低分辨率世界层做 SMAA、再让 DLSS 升采样"。旧 DLL 没有这个导出 ⇒ 调用返回 MIN_VALUE，
-        // 由 JVM 侧的临时桥退回 `aaMode == 4`（见 dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling）。
+        // 由 JVM 侧的临时桥退回 `aaMode == 4`（见 dev.nts.expdxr.dxrmc.sr.dlss.DeepLearningSuperSampling）。
         // MCDR_ABI_VERSION 保持 2：走 skipOptional，老 DLL 不会把游戏挡在启动之外。
         MH_setdlssenabled = skipOptional("mcdr_dx12SetDlssEnabled", fd(MCDRLayout.I32, MCDRLayout.I32))
         // P108e：深度快照（可选导出，纯追加，MCDR_ABI_VERSION 仍为 2）。调用点必须在 vanilla
@@ -2677,6 +3050,9 @@ import java.util.concurrent.atomic.AtomicInteger
         // P197：HDR 模式必须在设备/交换链创建前就可用（配置在 createDevice 前推送）。
         MH_sethdrmode = skipOptional("mcdr_dx12SetHdrMode", fdv(MCDRLayout.I32))
         MH_setraytracingmode = skipOptional("mcdr_dx12SetRaytracingMode", fdv(MCDRLayout.I32))
+        // P251：交换链建链选项（allowTearing / presentChild），下一次建链时生效。
+        MH_setswapchainoptions =
+            skipOptional("mcdr_dx12SetSwapchainOptions", fdv(MCDRLayout.I32, MCDRLayout.I32))
         // P198：建链时实际用掉的模式，视频设置据此判断要不要提示“需要重启”。
         MH_gethdrappliedmode = skipOptional("mcdr_dx12GetHdrAppliedMode", fd(MCDRLayout.I32))
         MH_reflexavailable = skipOptional("mcdr_dx12ReflexAvailable", fd(MCDRLayout.I32))
@@ -2972,11 +3348,20 @@ import java.util.concurrent.atomic.AtomicInteger
         MH_dispatchcomputeshadingrate = skip("mcdr_dx12DispatchComputeShadingRate", fd(
             MCDRLayout.I32,
             MCDRLayout.PTR, MCDRLayout.PTR, MCDRLayout.PTR, MCDRLayout.PTR, MCDRLayout.PTR,
-            MCDRLayout.PTR,
+            MCDRLayout.PTR, MCDRLayout.PTR,
             MCDRLayout.I32, MCDRLayout.I32, MCDRLayout.I32, MCDRLayout.I32
         ))
         MH_setshadingrateimage = skip("mcdr_dx12SetShadingRateImage",
             fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.PTR))
+        // P276：与 P235 同根签名的通用 compute 纹理 pass（3×SRV + 1×UAV + 8 个 int）。
+        MH_createtexture3 = skip("mcdr_dx12CreateComputePipelineTexture3",
+            fd(MCDRLayout.PTR, MCDRLayout.PTR, MCDRLayout.I32))
+        MH_dispatchtexture3 = skip("mcdr_dx12DispatchComputeTexture3", fd(
+            MCDRLayout.I32,
+            MCDRLayout.PTR, MCDRLayout.PTR, MCDRLayout.PTR, MCDRLayout.PTR, MCDRLayout.PTR,
+            MCDRLayout.PTR, MCDRLayout.PTR,
+            MCDRLayout.I32, MCDRLayout.I32, MCDRLayout.I32, MCDRLayout.I32
+        ))
         MH_createsurface = skip("mcdr_dx12CreateSurface", fd(MCDRLayout.PTR, MCDRLayout.I64))
         MH_surfacepresentmodes = skip("mcdr_dx12SurfacePresentModes", fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.I32))
         MH_setexclusivefullscreen = skip("mcdr_dx12SetExclusiveFullscreen", fd(

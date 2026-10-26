@@ -5,7 +5,7 @@ import dev.nts.expdxr.d3d12.render.adapter.D3D12Device
 import dev.nts.expdxr.d3d12.render.advanced.D3D12AntiAliasing
 import dev.nts.expdxr.d3d12.render.advanced.D3D12PostSharpen
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuTexture
-import dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling
+import dev.nts.expdxr.dxrmc.sr.dlss.DeepLearningSuperSampling
 import net.minecraft.client.Minecraft
 import org.slf4j.LoggerFactory
 

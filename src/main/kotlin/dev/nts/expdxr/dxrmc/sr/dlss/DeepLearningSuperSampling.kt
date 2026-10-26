@@ -1,4 +1,4 @@
-package dev.nts.expdxr.dxrmc.nvidia.dlss
+package dev.nts.expdxr.dxrmc.sr.dlss
 
 import dev.nts.expdxr.Illusion
 import dev.nts.expdxr.d3d12.backend.D3D12CommandEncoderBackend
@@ -22,6 +22,7 @@ import dev.nts.expdxr.d3d12.render.core.D3D12GpuTexture
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuTextureView
 import com.mojang.renderpearl.api.textures.GpuTextureView
 import com.mojang.serialization.Codec
+import dev.nts.expdxr.dxrmc.sr.SuperResolution
 import java.io.File
 import java.lang.foreign.Arena
 import java.lang.foreign.MemoryLayout.PathElement
@@ -30,6 +31,7 @@ import java.lang.foreign.ValueLayout
 import java.lang.ref.WeakReference
 import java.nio.charset.StandardCharsets
 import java.util.Locale
+import kotlin.math.atan
 import java.util.Optional
 import net.minecraft.client.Minecraft
 import net.minecraft.client.OptionInstance
@@ -542,6 +544,31 @@ object DeepLearningSuperSampling {
     @JvmStatic
     fun isStalled(): Boolean = consecutiveEvaluateFailures >= 3
 
+    /**
+     * 让 DLSS 让位给另一个超分后端（FSR / XeSS 接管时由 `SuperResolution` 调用）。
+     *
+     * <p>只关「开关」这一层（`options.dlss` 变 false → 消费者的 `push(false)`：闸门关、渲染缩放
+     * 模式切回普通档、抗锯齿解锁），**不动**挡位 / 预置这类用户偏好 —— 切回 DLSS 时还要用它们。
+     *
+     * <p>为什么不能只关 native 闸门：`reconcileAntiAliasing` 每帧都会按 `OPTION.get()` 重新对齐
+     * 闸门，开关仍是 true 的话下一帧就被重新打开，于是 DLSS 与 FSR/XeSS 同时往一张颜色图上写。
+     *
+     * <p>**必须在帧边界调用**（`Minecraft.schedule`）：`push(false)` 里那步
+     * `D3D12RenderScale.setDlssMode(false)` 会把比例从 DLSS 档读回普通档，帧中间改比例会让本帧
+     * 后半段的世界层目标与主目标附件尺寸不一致（P282c 那次 `copyDepthFrom` 崩溃）。
+     *
+     * @return true = 这一次真的改动了状态。
+     */
+    @JvmStatic
+    fun standDown(reason: String): Boolean {
+        if (!OPTION.get()) {
+            return false
+        }
+        Illusion.LOGGER.info("[dxrmc] $PREFIX standing down: {}", reason)
+        OPTION.set(false)
+        return true
+    }
+
     /** True while the game really renders through DXRMC's D3D12 backend（非 D3D12 时按钮置灰）。 */
     @JvmStatic
     fun isAvailable(): Boolean =
@@ -933,7 +960,9 @@ object DeepLearningSuperSampling {
      */
     @JvmStatic
     fun captureMotionVectors() {
-        if (!isEnabled()) {
+        // FSR / XeSS 也要这份数据（挂点、深度快照、MV 约定都在这条链上），所以闸门不是「DLSS 开着」，
+        // 而是「DLSS 开着、或另一家超分在跑」（见 SuperResolution.needsVelocityPass 的注释）。
+        if (!isEnabled() && !SuperResolution.needsVelocityPass()) {
             return
         }
         if (broken) {
@@ -1279,6 +1308,13 @@ object DeepLearningSuperSampling {
             return noteState("degenerate sizes: render ${renderWidth}x${renderHeight}, "
                 + "target ${targetWidth}x${targetHeight}")
         }
+
+        // P274：把后端期望的 jitter 相位长度交给 D3D12Temporal 协商。DLSS 走"让后端接受我们的
+        // 序列"这条路线（保持 16，只在第一次记一条日志）；FSR/XeSS 落地后会切到后端序列。
+        D3D12Temporal.adoptPhaseCount(
+            MCDR_ABI.SR_BACKEND_DLSS,
+            MCDR_ABI.D3D12SrJitterPhaseCount(MCDR_ABI.SR_BACKEND_DLSS, renderWidth, targetWidth),
+        )
 
         // P108z：把 JVM 建的 target 尺寸 UAV 纹理交给 native 当 DLSS 输出 —— **默认路径**。
         //
@@ -1631,6 +1667,21 @@ object DeepLearningSuperSampling {
      */
     private fun reportedJitter(jx: Float, jy: Float): FloatArray = floatArrayOf(jx, -jy)
 
+    /**
+     * P275：从透视投影矩阵反算垂直 FOV（弧度）。m11 = 1/tan(fovY/2)，列主序落在 index 5。
+     *
+     * 为什么要反算：`options.fov()` 是**标称**值，vanilla 在 `GameRenderer.getFov` 里还会叠加
+     * 疾跑 / 飞行 / 水下 / 药水 / 望远镜等修饰符，而 DLSS 的相机内参必须匹配**实际**渲染的投影。
+     * m11 不合理（正交投影、矩阵未就绪）时退回标称值，保持旧行为。
+     */
+    private fun fovFromProjection(proj: FloatArray): Float {
+        val m11 = proj[5]
+        if (m11.isFinite() && m11 > 1.0e-4f) {
+            return 2.0f * atan(1.0f / m11)
+        }
+        return Math.toRadians(Minecraft.getInstance().options.fov().get().toDouble()).toFloat()
+    }
+
     private fun pushDlssConstants(renderWidth: Int, renderHeight: Int, targetWidth: Int,
         targetHeight: Int, jitterX: Float, jitterY: Float, reset: Boolean) {
         val proj = D3D12Temporal.currentProjection()
@@ -1660,7 +1711,11 @@ object DeepLearningSuperSampling {
         val rightX = view[0]; val rightY = view[4]; val rightZ = view[8]
         val upX = view[1]; val upY = view[5]; val upZ = view[9]
         val fwdX = view[2]; val fwdY = view[6]; val fwdZ = view[10]
-        val fovRadians = Math.toRadians(Minecraft.getInstance().options.fov().get().toDouble()).toFloat()
+        // P275：FOV 从**实际投影矩阵**反算，不再读 `options.fov()` 的标称值。标称值漏掉疾跑 /
+        // 飞行 / 药水 / 望远镜这些修饰符（vanilla 在 `GameRenderer.getFov` 里叠加它们），DLSS 拿到的
+        // 相机内参与实际几何对不上 —— 静止看不出来，一运动就是重投影错位。
+        // 透视投影的 m11 = 1/tan(fovY/2)，列主序落在 index 5；jitter 只改 NDC 平移项，不碰它。
+        val fovRadians = fovFromProjection(proj)
         val aspect = if (targetHeight > 0) targetWidth.toFloat() / targetHeight.toFloat() else 1.0f
         val layout = MCDRLayout.DLSS_CONSTANTS
         Arena.ofConfined().use { arena ->

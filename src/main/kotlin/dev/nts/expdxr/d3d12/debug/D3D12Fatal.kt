@@ -7,6 +7,7 @@ import net.minecraft.CrashReport
 import net.minecraft.ReportedException
 import net.minecraft.client.Minecraft
 import net.minecraft.client.PreferredGraphicsApi
+import net.neoforged.fml.loading.FMLPaths
 import org.slf4j.LoggerFactory
 import java.lang.foreign.Arena
 import java.lang.foreign.FunctionDescriptor
@@ -15,6 +16,7 @@ import java.lang.foreign.MemorySegment
 import java.lang.foreign.SymbolLookup
 import java.lang.foreign.ValueLayout
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
 
 /**
  * Direct3D 12 后端的失败策略（P73）。
@@ -61,31 +63,96 @@ object D3D12Fatal {
      * 把 `preferredGraphicsBackend` 还原成 `PreferredGraphicsApi.DEFAULT` 并保存 `options.txt`，
      * 返回一句可直接放进崩溃报告的说明。
      *
+     * 同时把 `options.startedCleanly` 标成 `true`（用户 m02902）：原版
+     * `Minecraft.<init>` 对"上次非正常退出"的处理会把 `graphicsApi != OPENGL` 改成 `OPENGL`
+     * （`Minecraft.java:451-477`）。DXRMC 的失败路径按设计直接崩游戏，若不标记，下一次启动
+     * 的回退目标就会从 `default` 变成 `opengl` —— 这正是用户要修掉的那个行为。
+     *
      * 这里**绝不向外抛异常**：崩溃本身不能被"保存设置失败"这种次生问题顶掉，所以每一步失败都
      * 只记日志并把原因写进返回值。
      */
     @JvmStatic
     fun resetPreferredGraphicsApi(reason: String): String {
         val minecraft = Minecraft.getInstance()
-            ?: return detail("not reset: Minecraft instance is unavailable ($reason)", false)
 
         val options = minecraft.options
         val current = options.preferredGraphicsBackend().get()
         if (!D3D12GraphicsApi.isDx12(current)) {
             return detail(
-                "not reset: options.txt holds \"${current?.serializedName}\", which is not DXRMC's entry ($reason)",
+                "not reset: options.txt holds \"${current.serializedName}\", which is not DXRMC's entry ($reason)",
                 false)
         }
 
         options.preferredGraphicsBackend().set(PreferredGraphicsApi.DEFAULT)
+        // 用户 m02902：别让原版的“非正常退出保护”把回退目标改写成 opengl。
+        // 原版 `Minecraft.<init>` 在 `options.startedCleanly == false` 时会
+        // `graphicsApi != OPENGL -> set(OPENGL)`（Minecraft.java:451-477），而我们的失败路径
+        // 按设计直接崩游戏，下一次启动必然被判定成非正常退出 —— 于是回退目标从 default 变成
+        // opengl，玩家在设置里看到的是“图形 API 变成了 OpenGL”。这里已经在写 options.txt，
+        // 顺手把这一局的 startedCleanly 标成 true（“设置已按崩溃复位处理干净”），原版就不再
+        // 强推 opengl：回退目标停在 default，实际后端顺序仍是 gl -> vulkan，与 opengl 相同。
+        options.startedCleanly = true
         return try {
             options.save()
             detail(
-                "reset \"${current.serializedName}\" -> \"${PreferredGraphicsApi.DEFAULT.serializedName}\" and saved to options.txt ($reason)",
+                "reset \"${current.serializedName}\" -> \"${PreferredGraphicsApi.DEFAULT.serializedName}\", " +
+                    "marked startedCleanly so the vanilla unclean-shutdown guard does not force OPENGL, " +
+                    "and saved options.txt ($reason)",
                 true)
         } catch (t: Throwable) {
             LOGGER.error("[backend] preferredGraphicsBackend reset in memory but options.txt could not be saved", t)
             "reset in memory to \"${PreferredGraphicsApi.DEFAULT.serializedName}\", but saving options.txt failed: ${t}"
+        }
+    }
+
+    /**
+     * `Minecraft` 还没构造出来时的兜底（用户 m02992）。
+     *
+     * 后端/设备失败可能发生在 [Minecraft.getInstance] 被赋值之前（例如 P241 那种
+     * `D3D12CreateDevice` 失败），这时没有 `Options` 对象可改，但 `options.txt` 就在
+     * `FMLPaths.GAMEDIR` 下 —— 直接改文件，语义与 [resetPreferredGraphicsApi] 的内存版一致：
+     * `preferredGraphicsBackend` 复位成 `default`，并把 `startedCleanly` 标成 `true`，
+     * 免得原版下一次启动把它强推成 `opengl`（`Minecraft.java:451-477`）。
+     *
+     * 只在当前值确实是 DXRMC 的 `d3d12` 时动手；文件不存在、值不是 `d3d12`、读写失败都只返回说明。
+     */
+    private fun resetOptionsFileDirectly(reason: String): String {
+        val file = FMLPaths.GAMEDIR.get().resolve("options.txt")
+        if (!Files.isRegularFile(file)) {
+            return detail(
+                "not reset: Minecraft instance is unavailable and $file does not exist ($reason)", false)
+        }
+
+        return try {
+            val text = Files.readString(file, StandardCharsets.UTF_8)
+            val backendLine = Regex("(?m)^preferredGraphicsBackend:[^\\r\\n]*")
+            val current = backendLine.find(text)?.value
+                ?.substringAfter(':')?.trim()?.trim('"')
+            if (current != D3D12GraphicsApi.SERIALIZED_NAME) {
+                return detail(
+                    "not reset: Minecraft instance is unavailable and $file holds \"$current\", " +
+                        "which is not DXRMC's entry ($reason)",
+                    false)
+            }
+
+            val newline = if (text.contains("\r\n")) "\r\n" else "\n"
+            val cleanLine = Regex("(?m)^startedCleanly:[^\\r\\n]*")
+            var updated = backendLine.replace(
+                text, "preferredGraphicsBackend:\"${PreferredGraphicsApi.DEFAULT.serializedName}\"")
+            updated = if (cleanLine.containsMatchIn(updated)) {
+                cleanLine.replace(updated, "startedCleanly:true")
+            } else {
+                val separator = if (updated.isEmpty() || updated.endsWith(newline)) "" else newline
+                updated + separator + "startedCleanly:true" + newline
+            }
+            Files.writeString(file, updated, StandardCharsets.UTF_8)
+            detail(
+                "reset \"$current\" -> \"${PreferredGraphicsApi.DEFAULT.serializedName}\" and marked " +
+                    "startedCleanly in $file directly (Minecraft instance was unavailable: $reason)",
+                true)
+        } catch (t: Throwable) {
+            LOGGER.error("[backend] failed to reset $file without a Minecraft instance", t)
+            "reset failed: Minecraft instance is unavailable and $file could not be rewritten: $t"
         }
     }
 
@@ -116,7 +183,8 @@ object D3D12Fatal {
         category.setDetail("preferredGraphicsBackend", resetDetail)
         category.setDetail(
             "Next launch",
-            "vanilla's unclean-shutdown protection may force OpenGL once after this crash; to retry " +
+            "preferredGraphicsBackend is reset to default by DXRMC itself and this crash is recorded as a " +
+                "handled shutdown, so vanilla's unclean-shutdown guard does not force OpenGL once; to retry " +
                 "Direct3D 12, pick it again under Options > Video Settings")
         category.setDetail(
             "Where to look",
@@ -163,9 +231,8 @@ object D3D12Fatal {
             append("关闭本窗口后会写出崩溃报告（crash-reports/）。\n")
             append("A crash report is written to crash-reports/ after you close this dialog.\n")
             append("日志行带 [backend] 前缀，见 logs/latest.log。\n\n")
-            append("注意：下一次启动可能被强制成 OpenGL 一次；请在 选项 > 视频设置 里重新选择 Direct3D 12。\n")
-            append("Note: the next launch may force OpenGL once; pick Direct3D 12 again under ")
-            append("Options > Video Settings to retry.")
+            append("首选图形 API 已复位为 default，下一次启动不会再被改成 opengl。\n")
+            append("The fallback target stays at \"default\"; the next launch will not be forced to OpenGL.\n")
         }
         val fallbackMessage = sanitizeForTinyfd(message)
 

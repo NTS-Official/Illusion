@@ -1,7 +1,7 @@
 package dev.nts.expdxr.d3d12.render
 
 import dev.nts.expdxr.d3d12.render.adapter.D3D12AdapterInfo
-import dev.nts.expdxr.dxrmc.nvidia.dlss.DLSSFrameGeneration
+import dev.nts.expdxr.dxrmc.sr.dlss.DLSSFrameGeneration
 import kotlin.math.roundToInt
 
 /**

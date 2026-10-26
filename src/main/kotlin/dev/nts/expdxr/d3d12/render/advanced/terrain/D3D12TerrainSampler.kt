@@ -6,7 +6,8 @@ import com.mojang.renderpearl.api.textures.GpuSampler
 import dev.nts.expdxr.d3d12.render.adapter.D3D12AdapterInfo
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale
 import dev.nts.expdxr.d3d12.render.shader.D3D12GpuSampler
-import dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling
+import dev.nts.expdxr.dxrmc.sr.dlss.DeepLearningSuperSampling
+import dev.nts.expdxr.dxrmc.sr.SuperResolution
 import java.util.OptionalDouble
 import kotlin.math.log2
 
@@ -79,9 +80,13 @@ object D3D12TerrainSampler {
     @JvmStatic
     fun currentBias(): Float {
         if (D3D12AdapterInfo.current == null) return 0f
-        if (!DeepLearningSuperSampling.isEnabled()) return 0f
+        // P282：闸门从"DLSS 开着"扩到"任何一家超分开着" —— FSR / XeSS 的输入同样是降分辨率
+        // 渲染的世界层，不加 bias 一样会在升采样后发糊。
+        if (!SuperResolution.isEnabled()) return 0f
         val scale = D3D12RenderScale.current() / 100.0
         if (!(scale > 0.0 && scale <= 1.0)) return 0f
+        // 1:1（DLAA）时 FSR / XeSS 那条路径不跑（它们拒绝输入输出同资源），只有 DLSS 需要 bias。
+        if (scale >= 1.0 && !DeepLearningSuperSampling.isEnabled()) return 0f
         return (log2(scale) - 0.5).toFloat().coerceIn(-16f, 0f)
     }
 }

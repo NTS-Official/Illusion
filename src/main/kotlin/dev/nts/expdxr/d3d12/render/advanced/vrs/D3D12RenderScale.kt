@@ -485,6 +485,28 @@ object D3D12RenderScale {
     fun scheduledRebuild() {
         rebuildMainTarget()
     }
+
+    /**
+     * P282c：在**帧边界**上按新比例重建，供渲染线程内的调用方使用（超分门面的 100% 自愈）。
+     *
+     * <p>帧中间直接改 [setPercent] 只改了字段、主目标附件仍是旧比例，而本帧**后半段**创建的世界层
+     * 目标会按新比例分配，于是 `RenderTarget.copyDepthFrom` 抛
+     * `IllegalArgumentException: Depth texture: size does not match expected attachment size.
+     * Is 854x480 expected 572x321`（实测 crash-2026-10-26_16.46.00-client）。
+     * 走 `Minecraft.schedule` 则在 `runTick` 的 `runAllTasks` 里执行 —— 介于两帧之间。
+     */
+    @JvmStatic
+    fun setPercentAtFrameBoundary(value: Int) {
+        val minecraft = try {
+            Minecraft.getInstance()
+        } catch (t: Throwable) {
+            null
+        }
+        if (minecraft == null) {
+            return
+        }
+        minecraft.schedule { setProgrammatically(value) }
+    }
     private fun rebuildMainTarget() {
         val minecraft = try {
             Minecraft.getInstance()

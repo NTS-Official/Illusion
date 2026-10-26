@@ -3,6 +3,7 @@ package dev.nts.expdxr
 import com.mojang.logging.LogUtils
 import dev.nts.expdxr.Illusion.Companion.OPTIONS_KEY_PREFERRED_GRAPHICS
 import dev.nts.expdxr.misc.D3D12Settings
+import dev.nts.expdxr.misc.EarlyWindowJarInstaller
 import dev.nts.expdxr.d3d12.backend.D3D12GraphicsApi
 import dev.nts.expdxr.d3d12.debug.D3D12VrsDebugEntry
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
@@ -42,6 +43,8 @@ class Illusion(modEventBus: IEventBus, modContainer: ModContainer) {
         D3D12VariableShadingRate.register()
         // Construct log level before initialize the logger.
         IllusionLogger.applyDefaults()
+        // P270：early-window provider 以 jar-in-jar 形式随模组发布，启动时解到 mods/ 并改好 fml.toml。
+        EarlyWindowJarInstaller.ensureInstalled()
         modEventBus.addListener<ModConfigEvent.Loading> {
             IllusionLogger.applyFromConfig()
             D3D12Settings.reload()

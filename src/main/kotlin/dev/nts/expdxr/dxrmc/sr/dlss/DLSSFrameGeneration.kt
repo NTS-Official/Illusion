@@ -1,4 +1,4 @@
-package dev.nts.expdxr.dxrmc.nvidia.dlss
+package dev.nts.expdxr.dxrmc.sr.dlss
 
 import com.mojang.serialization.Codec
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI

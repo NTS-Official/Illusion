@@ -1,4 +1,4 @@
-package dev.nts.expdxr.dxrmc.nvidia.dlss
+package dev.nts.expdxr.dxrmc.sr.dlss
 
 import com.mojang.renderpearl.api.GpuFormat
 import com.mojang.renderpearl.api.textures.GpuTexture

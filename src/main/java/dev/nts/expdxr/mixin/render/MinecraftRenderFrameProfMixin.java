@@ -1,6 +1,7 @@
 package dev.nts.expdxr.mixin.render;
 
 import dev.nts.expdxr.d3d12.render.adapter.D3D12RenderProf;
+import dev.nts.expdxr.misc.ImprovedTransparencyLock;
 import net.minecraft.client.Minecraft;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -17,6 +18,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public class MinecraftRenderFrameProfMixin {
     @Inject(method = "renderFrame", at = @At("HEAD"), remap = false)
     private void D3D12ProfFrameHead(boolean advanceGameTime, CallbackInfo ci) {
+        ImprovedTransparencyLock.ensure();
         D3D12RenderProf.frameStart();
         D3D12RenderProf.begin(D3D12RenderProf.FRAME);
     }

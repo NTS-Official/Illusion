@@ -379,7 +379,8 @@ object D3D12VariableShadingRate {
             return "VRS: AUTO unsupported by this device (staying 1X1) | $caps"
         }
         val judge = if (D3D12ShadingRateImage.isReady()) {
-            "sri ${D3D12ShadingRateImage.tileSize()} imgs=$scopedImages"
+            "sri ${D3D12ShadingRateImage.tileSize()} imgs=$scopedImages" +
+                " clamp=${if (D3D12ShadingRateImage.temporalClampActive()) "on" else "off"}"
         } else {
             "band<=${rateName(MAX_TERRAIN_RATE)} near=${IllusionConfig.VRS_TERRAIN_NEAR_BLOCKS.get().toInt()}" +
                 " far=${IllusionConfig.VRS_TERRAIN_FAR_BLOCKS.get().toInt()}"

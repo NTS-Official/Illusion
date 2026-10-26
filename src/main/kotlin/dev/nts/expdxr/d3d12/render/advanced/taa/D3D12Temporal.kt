@@ -3,9 +3,10 @@ package dev.nts.expdxr.d3d12.render.advanced.taa
 import com.mojang.renderpearl.api.buffers.GpuBuffer
 import com.mojang.renderpearl.api.buffers.GpuBufferSlice
 import dev.nts.expdxr.misc.D3D12Settings
+import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuBuffer
-import dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling
+import dev.nts.expdxr.dxrmc.sr.dlss.DeepLearningSuperSampling
 import net.minecraft.client.Minecraft
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
@@ -118,6 +119,55 @@ object D3D12Temporal {
         }
 
     private var frameIndex: Long = 0L
+
+    /**
+     * P274：后端报告的 jitter 相位长度（0 = 不适用 / 尚未协商）。
+     *
+     * 只是**记录**，不直接决定 [jitterSamples]，取舍见 [adoptPhaseCount]。
+     */
+    @Volatile
+    var negotiatedPhaseCount: Int = 0
+        private set
+
+    /** 上一次打印过协商结论的长度（−1 = 还没打过），用来"只唠叨一次"。 */
+    private var loggedPhaseCount: Int = -1
+
+    /**
+     * P274：把后端报告的相位长度纳入协商。**不动注入开关** —— 有没有消费者仍由
+     * [hasJitterConsumer] 决定（P218：没有消费者还注入 jitter 就是整幅画面抖）。
+     *
+     * 两条路线，按后端选：
+     * - **DLSS(SL)**：让后端接受我们的序列。SL 只要求 `sl::Constants.jitterOffset` 与我们注入的
+     *   值逐帧一致，长度本身不参与它的累积权重；而 16 是本工程从 P203/P207/P217 一路调出来的
+     *   （"一帧内多次推进 jitter"就是那时修的），改它会重开那段历史。所以只记一条日志。
+     * - **FSR / XeSS**：切到后端序列（FSR 的累积权重按相位长度设计，XeSS 同理）。这两家还没有
+     *   可用后端（P277/P278），当前不会真的发生；逻辑先就位，后端一落地自动生效。
+     */
+    fun adoptPhaseCount(backend: Int, reported: Int) {
+        if (reported <= 0) {
+            return
+        }
+        negotiatedPhaseCount = reported
+        if (reported == jitterSamples) {
+            loggedPhaseCount = reported
+            return
+        }
+        if (backend == MCDR_ABI.SR_BACKEND_DLSS) {
+            if (loggedPhaseCount != reported) {
+                loggedPhaseCount = reported
+                LOGGER.info(
+                    "jitter phase: backend=DLSS wants {} but the caller-owned sequence stays {} " +
+                        "(SL only requires jitterOffset to match what we injected)",
+                    reported,
+                    jitterSamples,
+                )
+            }
+            return
+        }
+        LOGGER.info("jitter phase: adopting backend-reported {} (was {})", reported, jitterSamples)
+        jitterSamples = reported
+        loggedPhaseCount = reported
+    }
 
     /**
      * P204：上一帧“关卡投影上传”所属的帧戳（[Minecraft.getFrameTimeNs]）。

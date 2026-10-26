@@ -1,12 +1,15 @@
 package dev.nts.expdxr.misc.gui
 
 import dev.nts.expdxr.Illusion.Companion.MODID
-import dev.nts.expdxr.dxrmc.nvidia.dlss.DLSSFrameGeneration
+import dev.nts.expdxr.d3d12.extern.MCDR_ABI
+import dev.nts.expdxr.dxrmc.sr.dlss.DLSSFrameGeneration
+import dev.nts.expdxr.SrBackend
+import dev.nts.expdxr.dxrmc.sr.SuperResolution
 import dev.nts.expdxr.misc.D3D12HdrPresentation
 import dev.nts.expdxr.d3d12.render.advanced.D3D12AntiAliasing
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12VariableShadingRate
-import dev.nts.expdxr.dxrmc.nvidia.dlss.DeepLearningSuperSampling
+import dev.nts.expdxr.dxrmc.sr.dlss.DeepLearningSuperSampling
 import dev.nts.expdxr.dxrmc.nvidia.reflex.NvidiaReflex
 import dev.nts.expdxr.mixin.options.VideoSettingsScreenOptionsAccessor
 import net.minecraft.client.Minecraft
@@ -107,6 +110,14 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
     private sealed interface Entry {
         class Heading(val text: Component) : Entry
 
+        /**
+         * 只读说明行：写"这项为什么现在不可用"这类**状态**（例如运行库缺失），不参与交互。
+         *
+         * <p>它存在的理由：SR 的后端能力差别很大，光一个"打了勾但每帧没生效"看不出原因，
+         * 而原因只有 native 问得出来（caps.note）。
+         */
+        class Note(val text: Component, val warning: Boolean = false) : Entry
+
         class Setting(val option: OptionInstance<*>) : Entry
     }
 
@@ -173,6 +184,26 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
                     // P213：帧生成只在 DLSS 启用时才有意义，这里的 listOfNotNull 会把它藏掉。
                     if (DLSSFrameGeneration.isAvailable()) Entry.Setting(DLSSFrameGeneration.option()) else null,
                     if (DLSSFrameGeneration.isAvailable()) Entry.Setting(DLSSFrameGeneration.framesOption()) else null,
+                    // 用户 m01923：SR 的两个非 NVIDIA 后端接在这两段里。开关共用门面里的
+                    // 一个"当前后端"，点开一家另一家自动关（见 SuperResolution.requestBackend）。
+                    Entry.Heading(Component.empty()),
+                    Entry.Heading(translatable("dxr_mc.video.group.amd")),
+                    Entry.Setting(SuperResolution.fsrOption()),
+                    Entry.Setting(SuperResolution.sharpnessOption()),
+                    Entry.Heading(Component.empty()),
+                    Entry.Heading(translatable("dxr_mc.video.group.intel")),
+                    Entry.Setting(SuperResolution.xessOption()),
+
+                    // 用户 m01923 的两段之后：这两行是 P284 的诊断结论（可用 / 缺什么）。
+                    // 直接显示 caps.note —— 运行库在不在只有 native 问得出来，这里不再判断一次。
+                    Entry.Note(
+                        SuperResolution.statusLine(MCDR_ABI.SR_BACKEND_FSR),
+                        SuperResolution.isBackendMissing(MCDR_ABI.SR_BACKEND_FSR),
+                    ),
+                    Entry.Note(
+                        SuperResolution.statusLine(MCDR_ABI.SR_BACKEND_XESS),
+                        SuperResolution.isBackendMissing(MCDR_ABI.SR_BACKEND_XESS),
+                    ),
                 ),
             ),
         )
@@ -191,6 +222,7 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
         for (entry in pages[page].entries) {
             val widget: D3D12Widget = when (entry) {
                 is Entry.Heading -> D3D12HeadingWidget(contentLeft, y, contentWidth, entry.text)
+                is Entry.Note -> D3D12NoteWidget(contentLeft, y, contentWidth, entry.text, entry.warning)
                 is Entry.Setting -> {
                     val row = optionWidgetFor(entry.option, contentLeft, y, contentWidth)
                     carried[entry.option]?.let { row.stageExternal(it) }
@@ -270,12 +302,15 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
     private fun lockReasonFor(option: OptionInstance<*>): Component? {
         val upscaling = DeepLearningSuperSampling.isEnabled() && !DeepLearningSuperSampling.isDlaaActive()
         val dlaa = DeepLearningSuperSampling.isDlaaActive()
+        // 超分器换成 FSR / XeSS 时 DLSS 那条链路并没有在跑，这两把锁的理由都不成立（比例是三家共用的
+        // "世界层分辨率"，抗锯齿也轮不到没在跑的 DLSS 说话），所以只在 DLSS 档才锁。
+        val dlssIsTheUpscaler = SuperResolution.backend() == SrBackend.DLSS
         // 渲染缩放：DLSS 上采样时比例由挡位决定（bindRenderScaleToDlss），手拖会自相矛盾。
-        if (option === D3D12RenderScale.option() && upscaling) {
+        if (option === D3D12RenderScale.option() && upscaling && dlssIsTheUpscaler) {
             return Component.translatable("dxr_mc.video.lock.renderscale_dlss")
         }
         // 抗锯齿：DLSS 上采样自己就是时域消解，再叠加 TAA/SMAA 只会双重处理（DLAA 时反而不锁）。
-        if (option === D3D12AntiAliasing.option() && upscaling) {
+        if (option === D3D12AntiAliasing.option() && upscaling && dlssIsTheUpscaler) {
             return Component.translatable("dxr_mc.video.lock.aa_dlss")
         }
         if (option === DeepLearningSuperSampling.option()) {
@@ -286,6 +321,22 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
             // DLAA 走的就是 DLSS 特性链路，开关与挡位由 DLAA 决定。
             if (dlaa) {
                 return Component.translatable("dxr_mc.video.lock.dlss_dlaa")
+            }
+            // 超分器已经切给 FSR / XeSS 了：这时再动 DLSS 这一行不会有效果（门面按当前后端分派），
+            // 置灰比让人以为"打开了 DLSS"更诚实。
+            if (SuperResolution.backend() != SrBackend.DLSS) {
+                return Component.translatable("dxr_mc.video.lock.sr_other_backend")
+            }
+        }
+        // 用户 m01923：两家非 NVIDIA 后端共用一个"当前后端"，所以另一家置灰；
+        // 帧生成插值的是 DLSS 输出，开着它的时候也不能把超分器换成别人。
+        if (option === SuperResolution.fsrOption() || option === SuperResolution.xessOption()) {
+            if (DLSSFrameGeneration.isEnabled()) {
+                return Component.translatable("dxr_mc.video.lock.sr_framegen")
+            }
+            val other = if (option === SuperResolution.fsrOption()) SuperResolution.xessOption() else SuperResolution.fsrOption()
+            if (other.get()) {
+                return Component.translatable("dxr_mc.video.lock.sr_exclusive")
             }
         }
         if (option === DeepLearningSuperSampling.qualityOption() && dlaa) {

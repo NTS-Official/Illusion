@@ -2,7 +2,7 @@ package dev.nts.expdxr.dxrmc.nvidia.reflex
 
 import com.mojang.serialization.Codec
 import dev.nts.expdxr.Illusion
-import dev.nts.expdxr.dxrmc.nvidia.dlss.DLSSFrameGeneration
+import dev.nts.expdxr.dxrmc.sr.dlss.DLSSFrameGeneration
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import java.io.File
 import java.nio.charset.StandardCharsets

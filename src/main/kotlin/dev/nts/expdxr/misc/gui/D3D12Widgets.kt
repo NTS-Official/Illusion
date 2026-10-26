@@ -43,6 +43,25 @@ class D3D12HeadingWidget(x: Int, y: Int, width: Int, private val text: Component
         renderer.text(text, x + 6, centerTextY(renderer), ACCENT)
     }
 }
+/**
+ * 只读的说明行：不画底、不可点、不参与悬停，灰色小字。
+ *
+ * <p>用来写"为什么这一项现在不可用"这类**状态**（例如超分后端的运行库缺失），
+ * 与分组标题的区别只是颜色 —— 它必须看起来不可交互，否则会有人去点。
+ *
+ * @author DXRMC
+ */
+class D3D12NoteWidget(x: Int, y: Int, width: Int, private val text: Component, private val warning: Boolean) :
+    D3D12Widget(x, y, width, DEFAULT_HEIGHT) {
+
+    override fun render(renderer: D3D12WidgetRenderer, mouseX: Int, mouseY: Int, delta: Float) {
+        if (text.string.isEmpty()) {
+            return
+        }
+
+        renderer.text(text, x + 6, centerTextY(renderer), if (warning) RED else DISABLED)
+    }
+}
 
 /**
  * 左侧页签：深色底 + 白字，选中时左边一条 1px 主题色竖条，出现/消失带淡入淡出。
@@ -138,10 +157,11 @@ class D3D12OptionWidget<T : Any>(
     private val lockReasonProvider: () -> Component? = { null },
 ) : D3D12Widget(x, y, width, DEFAULT_HEIGHT + if (expanded) SLIDER_LINE else 0) {
 
-    private val caption: Component = (option as OptionInstanceAccessor).`dxr_mc$caption`()
-    @Suppress("UNCHECKED_CAST")
-    private val stringifier: Function<T, Component> =
-        (option as OptionInstanceAccessor).`dxr_mc$valueToComponent`() as Function<T, Component>
+    // `caption` 与 `toString` 在 `OptionInstance` 上是 public 字段（26.2 起就是），直接读即可；
+    // 原先经 `OptionInstanceAccessor` 的两道转换永远不可能成功，只剩 `tooltip`
+    // 仍是 private，那个才需要 accessor（见 [tooltipText]）。
+    private val caption: Component = option.caption
+    private val stringifier: Function<T, Component> = option.toString
     private val slider: OptionInstance.SliderableValueSet<T>? =
         option.values() as? OptionInstance.SliderableValueSet<T>
     private val cycleValues: List<T>? = run {
@@ -284,6 +304,9 @@ class D3D12OptionWidget<T : Any>(
     /** 只读原因；为空表示这一行没有额外解释。 */
     fun lockReasonText(): Component? = if (readOnlyProvider()) lockReasonProvider() else null
 
+    // `tooltip` 是 `OptionInstance` 里唯一还是 private 的字段，只能走 @Accessor；Kotlin 看不到
+    // mixin 在加载期织进去的接口，所以把这句判成“转换永远不可能成功”——运行时是成功的。
+    @Suppress("CAST_NEVER_SUCCEEDS")
     fun tooltipText(): Component? {
         val supplier = (option as OptionInstanceAccessor).`dxr_mc$tooltipSupplier`() ?: return null
         val tooltip = supplier.apply(displayValue()) ?: return null

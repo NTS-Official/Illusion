@@ -145,7 +145,7 @@ object IllusionLogger {
     /** Apply the values currently held by `config/dxr_mc-client.toml`. */
     fun applyFromConfig() {
         applyOpt(IllusionConfig.LOG_LEVEL.get(), IllusionConfig.NATIVE_VERBOSE.get(),
-            IllusionConfig.SHUTDOWN_TRACE.get())
+            IllusionConfig.SHUTDOWN_TRACE.get(), IllusionConfig.NATIVE_LOG_FILE.get())
     }
 
     /**
@@ -159,8 +159,16 @@ object IllusionLogger {
     /**
      * @param shutdownTrace P184：关停路径的 native 进度标记是否**无视 logLevel 恒定输出**
      *   （配置 `[logging] shutdownTrace`）。默认 true —— 与 native 侧的默认值一致。
+     * @param nativeLogFile P250：把 native 日志也镜像到这个文件（配置 `[logging] nativeLogFile`）。
+     *   空串 = 只走 stderr。启动器不会把子进程 stdout 落盘，所以"用户端出问题"时这条是唯一的
+     *   native 取证途径。
      */
-    fun applyOpt(level: IllusionLogLevel, nativeVerbose: Boolean, shutdownTrace: Boolean = true) {
+    fun applyOpt(
+        level: IllusionLogLevel,
+        nativeVerbose: Boolean,
+        shutdownTrace: Boolean = true,
+        nativeLogFile: String = "",
+    ) {
         // `D3D12_LOG_VERBOSE=1` stays an escape hatch that *wins over the config file*, so a
         // developer gets a verbose run without editing (or remembering) the toml.
         val effective = if (ENV_VERBOSE) IllusionLogLevel.DEBUG else level
@@ -170,7 +178,7 @@ object IllusionLogger {
             Configurator.setLevel(name, effective.toLog4j())
         }
         val nativeLevel = if (ENV_VERBOSE || nativeVerbose) NATIVE_DEBUG else effective.nativeLevel
-        pushNative(nativeLevel, shutdownTrace)
+        pushNative(nativeLevel, shutdownTrace, nativeLogFile)
         // Reported at INFO: a default run stays silent, while a verbose run can confirm that
         // the *config* (and not a leftover environment variable) set the level.
         val source = if (ENV_VERBOSE) "D3D12_LOG_VERBOSE" else "config/dxr_mc-client.toml"
@@ -181,7 +189,7 @@ object IllusionLogger {
         }
     }
 
-    private fun pushNative(level: Int, shutdownTrace: Boolean) {
+    private fun pushNative(level: Int, shutdownTrace: Boolean, nativeLogFile: String) {
         try {
             // Loading the native library here (first call) is intentional and safe: it only
             // LoadLibrary's MCDR.dll and binds exports, and isAvailable() reports a missing
@@ -192,10 +200,16 @@ object IllusionLogger {
                 // P184：关停路径的进度标记（INFO）是否恒定输出。旧 DLL 没有这个导出时静默保持
                 // 它内置的"恒定输出"行为。
                 MCDR_ABI.D3D12SetShutdownTraceAlways(shutdownTrace)
+                // P250：native 日志镜像文件。旧 DLL 没有这个导出时返回 false，只走 stderr。
+                if (nativeLogFile.isNotBlank() && MCDR_ABI.D3D12SetLogFile(nativeLogFile)) {
+                    LOGGER.info("[dxrmc] native log mirrored to {}", nativeLogFile)
+                }
             }
         } catch (t: Throwable) {
-            LOGGER.warn("[dxrmc] could not push the native log settings (level {}, shutdownTrace {})",
-                level, shutdownTrace, t)
+            LOGGER.warn(
+                "[dxrmc] could not push the native log settings (level {}, shutdownTrace {}, file {})",
+                level, shutdownTrace, nativeLogFile, t,
+            )
         }
     }
 

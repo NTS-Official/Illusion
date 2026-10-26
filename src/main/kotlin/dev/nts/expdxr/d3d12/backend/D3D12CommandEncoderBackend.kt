@@ -199,19 +199,10 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
         var y = 0
         var w = 0
         var h = 0
-        if (area != null) {
-            x = area.x()
-            y = area.y()
-            w = area.width()
-            h = area.height()
-        } else {
-            // Fall back to the first attachment's size (vanilla asserts non-null).
-            if (colorCount > 0) {
-                val view = colorAttachments.get(0)!!.textureView()
-                w = view.getWidth(0)
-                h = view.getHeight(0)
-            }
-        }
+        x = area.x()
+        y = area.y()
+        w = area.width()
+        h = area.height()
 
         // P33：确保命令列表已打开
         this.ensureListOpen()
