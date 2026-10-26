@@ -688,6 +688,191 @@ tasks.matching { it.name == "runClient" }.configureEach {
     dependsOn(copyVendorDlls)
 }
 
+// ---------------------------------------------------------------------------
+// jarALL -- TEST ONLY: `jar` plus every runtime DLL this machine has
+// ---------------------------------------------------------------------------
+// The release JAR deliberately carries only the three redistributable SDKs
+// (`vendorJarLibs`); DLSS / FidelityFX / Streamline / NRC stay in `run/dxrmc/`
+// because NVIDIA's RTX SDKs licence forbids shipping them and the user asked for
+// FSR to be out of release builds (2026-10-20). Testing then needs three manual
+// steps -- build, `copyNative`, `copyVendorDlls` -- plus a hand-copied DLL set.
+//
+// `jarALL` collapses that into one artifact: identical to `jar`, except that the
+// `vendor/` tree also gets every dev-only DLL under `MCDR/lib/*`, and the manifest
+// `MCDR_ABI.extractVendorResources()` reads lists all of them -- so launching that
+// JAR unpacks the whole set next to MCDR.dll on its own.
+//
+// TEST ONLY, never publish: it redistributes binaries whose licences forbid it.
+// Written by scanning `MCDR/lib/*/ *.dll` instead of naming files, so a new SDK
+// folder is picked up without touching this script.
+val vendorAllRoot = layout.buildDirectory.dir("generated/vendorJarAll")
+val vendorAllDir = vendorAllRoot.map { it.dir("vendor") }
+
+val stageVendorLibsAll = tasks.register("stageVendorLibsAll") {
+    group = "build"
+    description = "TEST ONLY: stages every runtime DLL (shipped SDKs + DLSS/FidelityFX/Streamline/NRC) into one vendor/ tree."
+    // Captured by value for the configuration cache, same as the other staging tasks.
+    val root = vendorAllDir.get().asFile
+    val jarLibs: List<VendorJarLib> = vendorJarLibs
+    val devLibRoot: File = file("../MCDR/lib")
+    outputs.dir(root)
+    outputs.upToDateWhen { false }
+
+    doLast {
+        try {
+            root.mkdirs()
+            // Not named `manifest`: the Groovy version of this task shadowed the Task property.
+            val manifestEntries = mutableListOf<String>()
+            val clashes = mutableListOf<String>()
+            val missing = mutableListOf<String>()
+            val stagedLengths = HashMap<String, Long>()
+            // `MCDR/lib/xess` 里还有 libxess_dx11.dll（D3D11 口味）。MCDR 是 D3D12-only，
+            // vendorDevLibs 早就把它排除在外面，这里保持一致，免得测试包里多一个永远用不上的 DLL。
+            val skippedNames = setOf("libxess_dx11.dll")
+            var staged = 0
+            var totalBytes = 0L
+
+            fun stage(src: File, asName: String) {
+                if (asName in skippedNames) return
+                val previous = stagedLengths[asName]
+                if (previous != null) {
+                    // 同一个 DLL 同时出现在 shipped 与 dev 目录时（libxess.*、external/xess/bin）
+                    // 只留一份；大小不一致才值得警告。
+                    if (previous != src.length()) clashes += "${src.absolutePath} (size ${src.length()} vs $previous)"
+                    return
+                }
+                val dst = File(root, asName)
+                if (!dst.isFile || dst.length() != src.length()) {
+                    src.copyTo(dst, overwrite = true)
+                    staged++
+                }
+                stagedLengths[asName] = dst.length()
+                totalBytes += dst.length()
+                manifestEntries += "vendor/$asName"
+            }
+
+            jarLibs.forEach { entry ->
+                if (!entry.dir.isDirectory) {
+                    missing += "$entry.dir (目录不存在)"
+                    return@forEach
+                }
+                entry.files.forEach file@{ name ->
+                    val src = File(entry.dir, name)
+                    if (!src.isFile) {
+                        missing += src.toString()
+                        return@file
+                    }
+                    stage(src, name)
+                }
+                val lic = entry.license
+                if (lic != null && lic.isFile) {
+                    stage(lic, "LICENSE-${entry.licenseName}.txt")
+                } else {
+                    missing += "licence for ${entry.dir} ($lic)"
+                }
+            }
+
+            // Dev-only SDKs: MCDR/lib/{dlss,fidelityfx,streamline,nrc}/*.dll.
+            val devDlls = devLibRoot.listFiles().orEmpty()
+                .filter { it.isDirectory }
+                .flatMap { dir ->
+                    (dir.listFiles() ?: emptyArray()).filter { it.isFile && it.name.endsWith(".dll", true) }
+                }
+                .sortedBy { it.absolutePath }
+            if (devDlls.isEmpty()) missing += "$devLibRoot/**/*.dll (没有找到开发侧 DLL)"
+            devDlls.forEach { stage(it, it.name) }
+
+            val mf = File(root, "manifest.txt")
+            mf.writeText(manifestEntries.joinToString("\n") + "\n")
+            // Same stale sweep as stageVendorLibs: whatever is not in the manifest must not
+            // ride into the JAR.
+            val keep = manifestEntries.mapTo(HashSet()) { it.substringAfterLast('/') }
+            keep += "manifest.txt"
+            (root.listFiles() ?: emptyArray()).forEach { stale ->
+                if (stale.isFile && stale.name !in keep) {
+                    stale.delete()
+                    logger.lifecycle("[stageVendorLibsAll] pruned stale ${stale.name}")
+                }
+            }
+            logger.lifecycle(
+                "[stageVendorLibsAll] ${manifestEntries.size} entries, " +
+                    "${"%,d".format(Locale.ROOT, totalBytes)} bytes on disk ($staged copied, rest already current)")
+            if (clashes.isNotEmpty()) {
+                logger.warn("[stageVendorLibsAll] duplicate names, last one wins: ${clashes.joinToString(", ")}")
+            }
+            if (missing.isNotEmpty()) {
+                logger.warn("[stageVendorLibsAll] not staged (missing source): ${missing.joinToString(", ")}")
+            }
+        } catch (t: Throwable) {
+            logger.warn("[stageVendorLibsAll] skipped: $t")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P269: early-window companion jar
+// ---------------------------------------------------------------------------
+// FML's early-service discovery claims any jar that carries one of the early `META-INF/services`
+// entries and EXCLUDES it from mod discovery (verified in `FMLLoader.loadEarlyServices` ->
+// `ModDiscoverer.discoverMods(earlyServiceJars)`). Shipping the provider inside the mod jar
+// therefore made the mod itself disappear from the mod list.
+//
+// So the provider + its bridge live in their own tiny jar that FML is allowed to claim, and the
+// mod jar stays a normal mod. Both files go into `mods/`.
+val earlyWindowJar = tasks.register<Jar>("earlyWindowJar") {
+    group = "build"
+    description = "Companion jar holding the P268/P269 ImmediateWindowProvider (claimed by FML as an early service)."
+    archiveBaseName.set("dxrmc-earlywindow")
+    archiveClassifier.set("")
+    archiveVersion.set("")
+    destinationDirectory.set(layout.buildDirectory.dir("libs"))
+    from(sourceSets.main.get().output) {
+        include("dev/nts/expdxr/earlywindow/**")
+        include("META-INF/services/net.neoforged.neoforgespi.earlywindow.ImmediateWindowProvider")
+    }
+    // P271: artwork for the loading screen, decoded with AWT inside the provider.
+    from(layout.projectDirectory.file("assets/logo_flat_dark.jpg")) {
+        into("assets/dxrmc")
+    }
+    // P272: the vanilla Mojangles glyph sheet (16x16 cells of 8x8), so the caption uses Minecraft's own font.
+    from(layout.projectDirectory.file("assets/mojangles_ascii.png")) {
+        into("assets/dxrmc")
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
+tasks.named<Jar>("jar") {
+    // The early-window classes must exist exactly once, in the companion jar: a second copy on the
+    // mod class path would give the bridge class two separate sets of static state.
+    exclude("dev/nts/expdxr/earlywindow/**")
+    exclude("META-INF/services/net.neoforged.neoforgespi.earlywindow.ImmediateWindowProvider")
+    // P270: ship the companion jar *inside* the mod jar so a release is a single download. FML only
+    // recognises early services in top-level jars under mods/, so the mod extracts this resource into
+    // mods/ on first launch (see EarlyWindowJarInstaller) and points fml.toml at our provider.
+    from(earlyWindowJar.map { it.archiveFile }) {
+        into("META-INF/dxrmc")
+        rename { "earlywindow.jar" }
+    }
+}
+
+val jarALL = tasks.register<Jar>("jarALL") {
+    group = "build"
+    description = "TEST ONLY: same content as `jar` plus every runtime DLL (DLSS / FidelityFX / " +
+        "Streamline / NRC). Never publish; the extra binaries are not redistributable."
+    archiveClassifier.set("ALL")
+    val base = tasks.named<Jar>("jar")
+    // Reuse the plain jar's input tree rather than unzipping its output: zipTree would drop
+    // the manifest `jar` itself writes. Only the vendor/ subtree is swapped out.
+    // `MANIFEST.MF` shows up in `jar.source` at the archive root: the real manifest is the one
+    // the Jar task generates as `META-INF/MANIFEST.MF`, so the stray copy is dropped.
+    from(base.map { it.source }) {
+        exclude("vendor/**")
+        exclude("MANIFEST.MF")
+    }
+    from(stageVendorLibsAll) { into("vendor") }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
 // Example configuration to allow publishing using the maven-publish plugin
 publishing {
     publications {
