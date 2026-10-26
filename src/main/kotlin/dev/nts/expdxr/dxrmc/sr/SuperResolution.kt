@@ -29,6 +29,9 @@ import kotlin.math.roundToInt
 import net.minecraft.client.Minecraft
 import net.minecraft.client.OptionInstance
 import net.minecraft.client.gui.components.Tooltip
+import net.minecraft.client.gui.components.CycleButton
+import com.mojang.serialization.Codec
+import java.util.Optional
 import net.minecraft.network.chat.Component
 
 /**
@@ -93,6 +96,8 @@ object SuperResolution {
 
     /** 让位动作是否已排到帧边界（避免每帧往主线程队列里塞一个 Runnable）。 */
     private var standDownScheduled = false
+    /** P291l/P291m：启动期配置自检只跑一次（放在第一次进世界，客户端已就位）。 */
+    private var startupChecked = false
 
     /**
      * P284b GPU side: real super-resolution cost, measured with timestamp queries.
@@ -130,7 +135,11 @@ object SuperResolution {
      * <p>75 是**滑条实际能停住**的档位：非 DLSS 模式下取值域按 25% 步进吸附
      * （`D3D12RenderScale` 的 `PercentRange.snap`），写 67 会被吸附成 75，日志与生效值对不上。
      */
-    private const val DEFAULT_RENDER_PERCENT = 75
+    /** 后两家的最小渲染尺寸（与 caps 里 native 报的 320x180 一致）。 */
+private const val MIN_RENDER_WIDTH = 320
+private const val MIN_RENDER_HEIGHT = 180
+
+private const val DEFAULT_RENDER_PERCENT = 75
 
     /** caps 缓存的存活时间（见 [cachedCaps]）。 */
     private const val CAPS_TTL_NANOS = 1_000_000_000L
@@ -251,6 +260,32 @@ object SuperResolution {
     }
 
     /**
+     * 运行中的一句话状态（P292g）：与 DLSS 那行对等 —— native 的 `mcdr_dx12SrQuery` 会给出
+     * `active/picked/eval ok/fail/size/caps/why/last`，直接摊在设置页上，省得玩家为了看这行去翻日志。
+     *
+     * <p>只在这一家就是当前后端时返回内容；每帧一次跨 ABI 调用，且只在设置页打开时才会被调。
+     */
+    @JvmStatic
+    fun runtimeLine(backend: Int): Component {
+        if (backendId() != backend) {
+            return Component.empty()
+        }
+        return try {
+            Arena.ofConfined().use { arena ->
+                val buffer = arena.allocate(384L)
+                val written = MCDR_ABI.D3D12SrQuery(buffer, 384)
+                if (written <= 0) {
+                    Component.empty()
+                } else {
+                    Component.literal(buffer.getString(0, Charsets.UTF_8).trim())
+                }
+            }
+        } catch (t: Throwable) {
+            Component.empty()
+        }
+    }
+
+    /**
      * 该后端现在是不是**缺东西**（运行库 / 驱动 / ABI 入口）。
      *
      * 只给界面上色用：缺东西时那行状态显示成红色 —— 灰色小字在一屏幕设置里太容易被
@@ -281,6 +316,8 @@ object SuperResolution {
 
     /** `options.txt` 键：锐度百分比（0..100，打包进载荷时除以 100）。 */
     const val OPTIONS_KEY_SHARPNESS: String = "dxrMcSrSharpness"
+    /** P292b：半透明遮罩开关。UI 里能改，默认取 TOML 的 `[sr] mask`。 */
+    const val OPTIONS_KEY_MASK: String = "dxrMcSrMask"
 
     /** 当前后端；`null` = 还没初始化（首次访问从 `[sr] backend` 取初始值）。 */
     @Volatile
@@ -288,6 +325,16 @@ object SuperResolution {
 
     /** 正在同步两个开关时置位，避免 `OptionInstance.set` 的回调打回来。 */
     private var syncingOptions = false
+
+    /** P292b：null = 还没被 options.txt 或界面覆盖过，此时跟随 TOML 的 `[sr] mask`。 */
+    @Volatile
+    private var maskOverride: Boolean? = null
+
+    private val MASK_OPTION: OptionInstance<Boolean> = OptionInstance.createBoolean(
+        "options.sr.mask",
+        { on -> Tooltip.create(Component.translatable("options.sr.mask.tooltip")) },
+        D3D12Settings.srMask,
+    ) { on -> maskOverride = on }
 
     private val FSR_OPTION: OptionInstance<Boolean> = OptionInstance.createBoolean(
         "options.sr.fsr",
@@ -312,6 +359,108 @@ object SuperResolution {
         { value -> IllusionLogger.debugMessage("$PREFIX sharpness: ${value}%") },
     )
 
+    /** `options.txt` 键：FSR 的质量档（[QUALITY_NAMES] 下标）。 */
+    const val QUALITY_OPTIONS_KEY_FSR: String = "dxrMcSrFsrQuality"
+
+    /** `options.txt` 键：XeSS 的质量档（[QUALITY_NAMES] 下标）。 */
+    const val QUALITY_OPTIONS_KEY_XESS: String = "dxrMcSrXessQuality"
+
+    /**
+     * 质量档名，与 DLSS 的 `QUALITY_NAMES` 同序同名：0=极致性能、1=性能、2=平衡、3=质量、
+     * 4=原生分辨率（FSR 的 NativeAA / XeSS 的 AA —— 这一档不再降渲染比例）。
+     */
+    private val QUALITY_NAMES: List<String> =
+        listOf("ultra_performance", "performance", "balanced", "quality", "native_aa")
+
+    /** 「原生分辨率」那一档的下标；选中它就不替用户降渲染比例。 */
+    private const val NATIVE_AA_TIER: Int = 4
+
+    /** 质量档 -> 渲染比例百分比。前四档与 DLSS 的 `percentForTier` 完全一致。 */
+    private fun percentForQuality(tier: Int): Int = when {
+        // P291f（用户 m03752）：DLSS 的极致性能档不能用 33% —— NGX 要求 render >= target/3
+        // （2560/3 = 853.33），33% 只给 844x440，NGX 会报「Dynamic scaling error ... outside
+        // of Min ... Max」并交出一张空纹理（世界黑、GUI 正常）。这一档向上取整到 34%；
+        // 对 FSR / XeSS 只是多画 1% 的像素。
+        tier <= 0 -> 34
+        tier == 1 -> 50
+        tier == 2 -> 59
+        tier == 3 -> 67
+        else -> 100
+    }
+
+    /** 循环按钮的值域（照 DLSS `QualityValues` 的形状；`CycleableValueSet` 才会画成循环按钮）。 */
+    private object QualityValues : OptionInstance.CycleableValueSet<Int> {
+        override fun validateValue(value: Int): Optional<Int> =
+            if (value in QUALITY_NAMES.indices) Optional.of(value) else Optional.empty()
+
+        override fun valueListSupplier(): CycleButton.ValueListSupplier<Int> =
+            CycleButton.ValueListSupplier.create(QUALITY_NAMES.indices.toList())
+
+        override fun codec(): Codec<Int> = Codec.intRange(0, QUALITY_NAMES.lastIndex)
+    }
+
+    private val FSR_QUALITY_OPTION: OptionInstance<Int> = OptionInstance(
+        "options.sr.fsr.quality",
+        { Tooltip.create(Component.translatable("options.sr.fsr.quality.tooltip")) },
+        { _, value -> Component.translatable("options.sr.quality.${QUALITY_NAMES[value.coerceIn(0, QUALITY_NAMES.lastIndex)]}") },
+        QualityValues,
+        2,
+        { value -> applyQuality(SrBackend.FSR, value) },
+    )
+
+    private val XESS_QUALITY_OPTION: OptionInstance<Int> = OptionInstance(
+        "options.sr.xess.quality",
+        { Tooltip.create(Component.translatable("options.sr.xess.quality.tooltip")) },
+        { _, value -> Component.translatable("options.sr.quality.${QUALITY_NAMES[value.coerceIn(0, QUALITY_NAMES.lastIndex)]}") },
+        QualityValues,
+        2,
+        { value -> applyQuality(SrBackend.XESS, value) },
+    )
+
+    /** FSR 的质量档那一行（与 DLSS 的质量档同一套语义：拨它就会改渲染比例）。 */
+    @JvmStatic
+    fun fsrQualityOption(): OptionInstance<Int> = FSR_QUALITY_OPTION
+
+    /** XeSS 的质量档那一行。 */
+    @JvmStatic
+    fun xessQualityOption(): OptionInstance<Int> = XESS_QUALITY_OPTION
+
+    /** 某个后端当前选中的质量档下标（DLSS 走它自己的 `quality()`）。 */
+    private fun qualityOf(target: SrBackend): Int = when (target) {
+        SrBackend.FSR -> FSR_QUALITY_OPTION.get().coerceIn(0, QUALITY_NAMES.lastIndex)
+        SrBackend.XESS -> XESS_QUALITY_OPTION.get().coerceIn(0, QUALITY_NAMES.lastIndex)
+        else -> 2
+    }
+
+    /**
+     * 质量档拨动时把渲染比例推到对应百分比。
+     *
+     * 只在该后端**正在跑**时动手：否则用户在 FSR 那一行上拨档，会悄悄改掉 DLSS / XeSS 的渲染比例。
+     * 走 [D3D12RenderScale.setPercentAtFrameBoundary]（P282c）：帧中间改比例会让本帧后半段的
+     * world-layer 目标与主目标附件尺寸不一致，`RenderTarget.copyDepthFrom` 直接抛
+     * IllegalArgumentException。
+     */
+    private fun applyQuality(target: SrBackend, tier: Int) {
+        if (currentBackend() != target) {
+            return
+        }
+        val percent = percentForQuality(tier)
+        D3D12RenderScale.setPercentAtFrameBoundary(percent)
+        Illusion.LOGGER.info(
+            "[dxrmc] {} quality = {} (render scale {}%)",
+            PREFIX, QUALITY_NAMES.getOrElse(tier) { "quality" }, percent,
+        )
+    }
+
+    /** `key:value` 里取质量档：档名与下标都接受（手改 `options.txt` 时两种都可能）。 */
+    private fun parseTier(line: String, key: String): Int? {
+        val raw = line.substring(key.length + 1).trim().trim('"').lowercase(Locale.ROOT)
+        val index = QUALITY_NAMES.indexOf(raw)
+        val value = if (index >= 0) index else raw.toIntOrNull()
+        return value?.takeIf { it in QUALITY_NAMES.indices }
+    }
+
+
     @JvmStatic
     fun fsrOption(): OptionInstance<Boolean> = FSR_OPTION
 
@@ -320,6 +469,46 @@ object SuperResolution {
 
     @JvmStatic
     fun sharpnessOption(): OptionInstance<Int> = SHARPNESS_OPTION
+    @JvmStatic
+    fun maskOption(): OptionInstance<Boolean> = MASK_OPTION
+
+    /** P292b：界面 / options.txt 的覆盖优先，没覆盖就跟随 TOML。 */
+    @JvmStatic
+    fun mask(): Boolean = maskOverride ?: D3D12Settings.srMask
+
+    /**
+     * 当前后端是否吃遮罩。DLSS 走 NGX，没有遮罩输入（caps.takesMasks == 0），那一行拨了也不会有
+     * 效果，设置页据此置灰。
+     */
+    @JvmStatic
+    fun maskSupported(): Boolean = (cachedCaps(backendId())?.takesMasks ?: 0) != 0
+
+    /**
+     * 启动期的配置自检（P291l）：把"档位与渲染比例不匹配"这类**会在进世界后变成黑屏或糊屏**的
+     * 组合提前说出来，而不是等玩家看到画面才发现。只读配置、不碰设备，可以在客户端初始化时调用。
+     *
+     * <p>DLSS 那条的判据来自 P291f/P291h：`percent < 100/nominal` 时 NGX 会拒帧（世界黑），
+     * 我们会在第一帧把比例抬上去 —— 但"偷偷改玩家的设置"这件事本身就该在日志里留痕。
+     */
+    @JvmStatic
+    fun validateAtStartup() {
+        // P291m：只能在客户端建好之后调（模组构造期 Minecraft.getInstance() 为 null）。
+        if (Minecraft.getInstance() == null) {
+            return
+        }
+        val wanted = currentBackend()
+        if (wanted != SrBackend.DLSS) {
+            return
+        }
+        val tier = DeepLearningSuperSampling.quality()
+        val needed = percentForQuality(tier)
+        val current = D3D12RenderScale.percent()
+        if (current < needed) {
+            Illusion.LOGGER.error(
+                "[dxrmc] {} DLSS tier {} needs a render scale of at least {}% but the saved value is {}% (entering a world will raise it automatically, see P291f)",
+                PREFIX, QUALITY_NAMES[tier.coerceIn(0, QUALITY_NAMES.lastIndex)], needed, current)
+        }
+    }
 
     /** 当前锐度（0..1），打包载荷时用。 */
     @JvmStatic
@@ -328,6 +517,25 @@ object SuperResolution {
     /** 当前后端（界面与日志用它判断"谁在跑"）。 */
     @JvmStatic
     fun backend(): SrBackend = currentBackend()
+
+    /**
+     * DLSS 那一行被拨动时同步"当前后端"（P239）。
+     *
+     * `[sr] backend` 的默认值是 [SrBackend.NONE]，而 DLSS 自己的开关在 NVIDIA 段，是另一条管道。
+     * 结果是「后端 = NONE + DLSS 勾上」时 [isEnabled] 仍是 false（一次都不升采样），而视频设置又把
+     * DLSS 那一行按"后端不是 DLSS"置灰 —— 两边合起来就是死锁（用户 m03463 实测"超分被锁了开不起来"）。
+     * 所以 DLSS 打开时顺手认领后端；关掉时只在后端本来就是 DLSS 的情况下退回 NONE，不碰 FSR / XeSS。
+     */
+    @JvmStatic
+    fun onDlssToggle(enabled: Boolean) {
+        if (enabled) {
+            if (currentBackend() != SrBackend.DLSS) {
+                requestBackend(SrBackend.DLSS)
+            }
+        } else if (currentBackend() == SrBackend.DLSS) {
+            requestBackend(SrBackend.NONE)
+        }
+    }
 
     private fun currentBackend(): SrBackend {
         backend?.let { return it }
@@ -340,6 +548,12 @@ object SuperResolution {
     }
 
     private fun syncOptions(selected: SrBackend) {
+        // P291m：`OptionInstance.set` 内部会问 `Minecraft.getInstance().isRunning()`，而模组构造期
+        // 那个单例还是 null —— 启动自检因此把游戏打崩过一次。选项值只是界面镜像，客户端没建好
+        // 之前不同步也不丢信息（真值在 `[sr] backend` 与 `options.txt` 里）。
+        if (Minecraft.getInstance() == null) {
+            return
+        }
         syncingOptions = true
         try {
             FSR_OPTION.set(selected == SrBackend.FSR)
@@ -377,12 +591,17 @@ object SuperResolution {
             }
             // 100% 时 FSR / XeSS 无事可做（门面会拦下并记一条 note）。用户刚在界面上勾了它，就把比例
             // 降到一个能用的默认档，而不是让画面看起来"什么都没发生"。
-            if (D3D12RenderScale.percent() >= 100) {
-                D3D12RenderScale.setPercentAtFrameBoundary(DEFAULT_RENDER_PERCENT)
+            // 勾上这一家就等于"按它自己的质量档出图"：以前只在比例还是 100% 时才设，结果从
+            // DLSS 的 58% 切到 FSR 时比例停在 58%，而 FSR 那行显示的是"极致性能"（33%/34%）——
+            // 行的数值与实际不符。现在只要不是"原生分辨率"档就对齐到该档的名义比例。
+            val tier = qualityOf(requested)
+            val nominal = percentForQuality(tier)
+            if (tier != NATIVE_AA_TIER && D3D12RenderScale.percent() != nominal) {
                 Illusion.LOGGER.info(
-                    "[dxrmc] {} render scale 100% -> {}% so {} has something to upscale",
-                    PREFIX, DEFAULT_RENDER_PERCENT, requested,
+                    "[dxrmc] {} render scale {}% -> {}% to match the {} quality tier",
+                    PREFIX, D3D12RenderScale.percent(), nominal, QUALITY_NAMES[tier],
                 )
+                D3D12RenderScale.setPercentAtFrameBoundary(nominal)
             }
         }
         backend = requested
@@ -413,6 +632,13 @@ object SuperResolution {
                 } else if (line.startsWith("$OPTIONS_KEY_SHARPNESS:")) {
                     val text = line.substring(OPTIONS_KEY_SHARPNESS.length + 1).trim().trim('"')
                     text.toIntOrNull()?.let { SHARPNESS_OPTION.set(it.coerceIn(0, 100)) }
+                } else if (line.startsWith("$QUALITY_OPTIONS_KEY_FSR:")) {
+                    parseTier(line, QUALITY_OPTIONS_KEY_FSR)?.let { FSR_QUALITY_OPTION.set(it) }
+                } else if (line.startsWith("$OPTIONS_KEY_MASK:")) {
+                val text = line.substring(OPTIONS_KEY_MASK.length + 1).trim().trim('"')
+                text.toBooleanStrictOrNull()?.let { MASK_OPTION.set(it) }
+            } else if (line.startsWith("$QUALITY_OPTIONS_KEY_XESS:")) {
+                    parseTier(line, QUALITY_OPTIONS_KEY_XESS)?.let { XESS_QUALITY_OPTION.set(it) }
                 }
             }
         } catch (t: Throwable) {
@@ -426,9 +652,16 @@ object SuperResolution {
         // `dxrMcDlss` 还是 true 是**升级上来最常见**的组合（DLSS 曾经是唯一的超分）。
         // 不在这里让位，DLSS 会先跑起来、把渲染缩放切到它自己的档（58%），再被门面在帧中间关掉 ——
         // 实测那种顺序会让速度通道此后一直没纹理（`recorded=-1 current=false`），FSR 一帧都评不了。
-        if (currentBackend() != SrBackend.DLSS) {
+        //
+        // P239：`NONE` 不算"另一家"——它只是"还没选过后端"。此时 `dxrMcDlss` 若为 true（P239 之前
+        // DLSS 是唯一超分，升级上来就是这种组合），把它认作 DLSS，而不是把用户唯一能用的超分静默关掉
+        // （用户 m03463 的"超分被锁了开不起来"就是这条 standDown 加上行锁一起造成的死锁）。
+        val wanted = currentBackend()
+        if (wanted == SrBackend.NONE && DeepLearningSuperSampling.isEnabled()) {
+            requestBackend(SrBackend.DLSS)
+        } else if (wanted != SrBackend.DLSS) {
             DeepLearningSuperSampling.standDown(
-                "the SR backend in options.txt is ${currentBackend().name}, so DLSS must not also present")
+                "the SR backend in options.txt is ${wanted.name}, so DLSS must not also present")
         }
     }
 
@@ -441,13 +674,20 @@ object SuperResolution {
         try {
             val eol = System.lineSeparator()
             val kept = file.readLines(StandardCharsets.UTF_8).filterNot {
-                it.startsWith("$OPTIONS_KEY_BACKEND:") || it.startsWith("$OPTIONS_KEY_SHARPNESS:")
+                it.startsWith("$OPTIONS_KEY_BACKEND:") ||
+                    it.startsWith("$OPTIONS_KEY_SHARPNESS:") ||
+                    it.startsWith("$QUALITY_OPTIONS_KEY_FSR:") ||
+                    it.startsWith("$QUALITY_OPTIONS_KEY_XESS:")
+                || it.startsWith("$OPTIONS_KEY_MASK:")
             }
             val text = (
                 kept + listOf(
                     "$OPTIONS_KEY_BACKEND:${currentBackend().name}",
                     "$OPTIONS_KEY_SHARPNESS:${SHARPNESS_OPTION.get()}",
-                )
+                    "$QUALITY_OPTIONS_KEY_FSR:${FSR_QUALITY_OPTION.get()}",
+                    "$QUALITY_OPTIONS_KEY_XESS:${XESS_QUALITY_OPTION.get()}",
+                "$OPTIONS_KEY_MASK:${mask()}",
+            )
                 ).joinToString(eol) + eol
             file.writeText(text, StandardCharsets.UTF_8)
         } catch (t: Throwable) {
@@ -591,6 +831,15 @@ object SuperResolution {
     // ------------------------------------------------------------------
 
     private fun evaluateOther() {
+        // P291l/P291m：启动自检放在这里 —— 第一次真正要跑超分的那一帧，客户端与配置都已就位。
+        if (!startupChecked) {
+            startupChecked = true
+            try {
+                validateAtStartup()
+            } catch (t: Throwable) {
+                Illusion.LOGGER.warn("[dxrmc] {} the start-up configuration check failed: {}", PREFIX, t.toString())
+            }
+        }
         val backend = backendId()
         val minecraft = Minecraft.getInstance()
         // 标题界面 / 加载界面：没有世界层，谈不上"世界层升采样"。
@@ -627,6 +876,24 @@ object SuperResolution {
         val renderHeight = color.getHeight(0)
         val displayWidth = guiColor.getWidth(0)
         val displayHeight = guiColor.getHeight(0)
+        // P291i：低于能力下限（caps 里报的 320x180）时后两端都给不出有效结果，直接被 SDK 拒绝；
+        // 与 DLSS 那条"低于名义输入就抬比例"的兜底同理，这里也把比例抬到够用为止（只做一次，
+        // 否则玩家故意拖小会被反复顶回去）。
+        // SrCaps 目前没有把 min 尺寸透出来（native 里是 320x180 写死的），先与 native 保持一致。
+        val minRenderWidth = MIN_RENDER_WIDTH
+        val minRenderHeight = MIN_RENDER_HEIGHT
+        if (renderWidth < minRenderWidth || renderHeight < minRenderHeight) {
+            if (!autoScaleAdjusted) {
+                val needed = maxOf(
+                    Math.ceil(minRenderWidth * 100.0 / renderWidth).toInt(),
+                    Math.ceil(minRenderHeight * 100.0 / renderHeight).toInt(),
+                ).coerceIn(D3D12RenderScale.minimumPercent(), 100)
+                autoScaleAdjusted = true
+                D3D12RenderScale.setPercentAtFrameBoundary(needed)
+                return note("render ${renderWidth}x$renderHeight is below the ${backendName(backend)} minimum of ${minRenderWidth}x$minRenderHeight; raising the render scale to $needed%")
+            }
+            return note("render ${renderWidth}x$renderHeight is below the ${backendName(backend)} minimum of ${minRenderWidth}x$minRenderHeight; raise the render scale")
+        }
         if (renderWidth <= 0 || renderHeight <= 0 || displayWidth <= 0 || displayHeight <= 0) {
             return note("degenerate sizes: render ${renderWidth}x$renderHeight, "
                 + "display ${displayWidth}x$displayHeight")
@@ -675,7 +942,6 @@ object SuperResolution {
             val now = System.nanoTime()
             if (now - lastVelocityDiagNanos > VELOCITY_DIAG_NANOS) {
                 lastVelocityDiagNanos = now
-                Illusion.LOGGER.info("[dxrmc] [SR] velocity diag: {}", D3D12Velocity.debugState())
             }
             return note("no motion-vector texture (the velocity pass has no history yet)")
         }
@@ -707,8 +973,8 @@ object SuperResolution {
 
         // P276：可选 reactive / responsive 掩码。产生器必须与 evaluate 用同一条命令列表，
         // 所以在这里做（列表已打开、还没提交）；关掉配置时传 0 = "没有这张纹理"。
-        val mask = if (D3D12Settings.srMask) D3D12SrMask.produce(encoder, renderWidth, renderHeight) else 0L
-        if (D3D12Settings.srMask && mask == 0L) {
+        val mask = if (mask()) D3D12SrMask.produce(encoder, renderWidth, renderHeight) else 0L
+        if (mask() && mask == 0L) {
             note("the P276 mask producer did not run: " + D3D12SrMask.note())
         }
 
@@ -880,7 +1146,7 @@ object SuperResolution {
             return
         }
         val sorted = gpuSamples.copyOf(accepted).also { it.sort() }
-        Illusion.LOGGER.info(
+        Illusion.LOGGER.debug(
             "[dxrmc] [SR] gpu cost over {} frames: backend={} p50={}us p95={}us (max {}us, {} samples rejected)",
             accepted,
             backendLabel(backendId()),
@@ -908,7 +1174,7 @@ object SuperResolution {
         val frames = minOf(sampleCursor, COST_SAMPLES)
         val eval = evalSamples.copyOf(frames).also { it.sort() }
         val blit = blitSamples.copyOf(frames).also { it.sort() }
-        Illusion.LOGGER.info(
+        Illusion.LOGGER.debug(
             "[dxrmc] [SR] record cost over {} frames: evaluate p50={}us p95={}us, blit p50={}us p95={}us (CPU only)",
             frames,
             eval[frames / 2] / 1_000,

@@ -233,6 +233,12 @@ object DeepLearningSuperSampling {
 
     /** 每会话一次的"数据真的喂进去了"结论行。 */
     private var loggedFed = false
+    // P291e：升采样结果到底是黑的还是只是"看着不对"，必须能自证。做法是在下一帧开头（此时没有
+    // 打开的命令列表）读回 pInOutput 的 36 个采样点，打一行均值。默认日志级别是 ERROR，所以
+    // 真的全黑时同时用 error 报一次 —— 这就是用户报"黑屏但日志什么都没有"的那一行。
+    private var pendingOutputSample = false
+    private var outputSampleDone = false
+    private var sampleTarget: D3D12GpuTexture? = null
 
     private var lastState: String? = null
 
@@ -243,14 +249,10 @@ object DeepLearningSuperSampling {
     /** 上一次**真正评价成功**时的输入状态，用来判 `reset`。 */
     private var evaluatedOnce = false
 
-    /**
-     * P211b：本会话是否已经做过“启动期把渲染缩放绑到 DLSS 挡位”。
-     *
-     * <p>用户 m07719 报“DLSS 开、GPU 满、帧率反而低”，取证发现 `dxrMcRenderScale` 停在 100%：
-     * 那种配置下世界层与窗口同尺寸，DLSS 只能做 1:1 推理 —— NGX 的代价一分不少，超分收益为零。
-     * 挡位一旦启用就应当按挡位比例缩放，所以第一次评价时补一次绑定；之后玩家手动拖滑条不再覆盖。
-     */
-    private var startupScaleBound = false
+    /** P291f: 已经警告过“比例低于该档名义输入”，只警告一次。 */
+    private var reportedBelowNominal = false
+    /** P291e：采样确认升采样结果是全黑之后，本会话改走线性 blit（宁可糊不要黑）。 */
+    private var defuseBlackOutput = false
 
 
     private var lastRenderWidth = -1
@@ -281,7 +283,12 @@ object DeepLearningSuperSampling {
         "options.dlss",
         { Tooltip.create(Component.translatable("options.dlss.tooltip")) },
         false,
-        { value -> push(value) },
+        { value ->
+            // P239：先把门面的"当前后端"带上 DLSS，再推 native —— 否则 `[sr] backend` 停在 NONE 时
+            // 超分门面会觉得没有后端在跑（`SuperResolution.isEnabled()` 返回 false），一次都不升采样。
+            SuperResolution.onDlssToggle(value)
+            push(value)
+        },
     )
 
     @JvmStatic
@@ -355,14 +362,20 @@ object DeepLearningSuperSampling {
     /**
      * 挡位 → 输入百分比的唯一映射点（[inputPercent] 与 [bindRenderScaleToDlss] 共用）。
      *
-     * <p>编号跟着 [QUALITY_NAMES] 走：0=极致性能（33%，NVIDIA 的 1/3 档）、1=性能、
+     * <p>编号跟着 [QUALITY_NAMES] 走：0=极致性能（34%，NVIDIA 的 1/3 档向上取整）、1=性能、
      * 2=平衡、3=质量（66.7%），4 及以后是 DLAA 的 100%。
      */
     private fun percentForTier(tier: Int): Int = when (tier) {
-        0 -> 33
-        1 -> 50
-        2 -> 58
-        3 -> 67
+        // P291f（用户 m03752）：这里原来是 33，而 NGX 对极致性能（3.0x）要求
+        // render >= target/3 —— 2560/3 = 853.33，33% 只给 844x440，于是
+        // NGXDLAA::EvaluateFeature 每帧只写一行
+        //   "Dynamic scaling error ... RenderSubrect (844x440) outside of Min ... Max"
+        // 然后交出一张空纹理：世界全黑、GUI 正常（sl.log 里 2289 行都是这句）。
+        // 34% 给 870x453，回到区间内。
+        0 -> 34   // 1/3.00 = 33.33 -> 34
+        1 -> 50   // 1/2.00 = 50.00 -> 50
+        2 -> 59   // 1/1.72 = 58.14 -> 59（58 会留下 0.24% 的缺口，只靠 NGX 的容差活着）
+        3 -> 67   // 1/1.50 = 66.67 -> 67
         else -> 100
     }
 
@@ -404,6 +417,9 @@ object DeepLearningSuperSampling {
      * 选择，不刷屏、不影响其它功能；`MCDR_ABI_VERSION` 保持 2（走 `skipOptional`）。
      */
     private fun pushQuality(value: Int) {
+        // 换挡位 = 让 NGX 重建 feature：给黑帧熔断一次重新判定的机会（P291e）。
+        defuseBlackOutput = false
+        outputSampleDone = false
         val status = MCDR_ABI.D3D12SetDlssQuality(value)
         when {
             status == value -> Illusion.LOGGER.info(
@@ -1239,6 +1255,10 @@ object DeepLearningSuperSampling {
         val minecraft = Minecraft.getInstance()
         // 标题界面 / 加载界面：没有世界层，谈不上"世界层升采样"。
         val level = minecraft.level ?: return
+        if (pendingOutputSample) {
+            pendingOutputSample = false
+            reportOutputSample()
+        }
         modeActive = true
         // P211d（用户 m08068“超平坦也满占用 140fps”）：世界层必须真的按 DLSS 输入比例出图。
         //
@@ -1257,12 +1277,31 @@ object DeepLearningSuperSampling {
             return
         }
 
-        // P211b：见 [startupScaleBound] 的注释 —— 把“缩放 100%”这种退化配置救回来。只做一次，
-        // 且只在“上采样开着、非 DLAA、当前仍是 100%”时生效（玩家手动设过的比例不动）。
-        if (!startupScaleBound) {
-            startupScaleBound = true
-            if (!dlaaActive && D3D12RenderScale.percent() == 100) {
-                bindRenderScaleToDlss()
+        // P211b + P291f：把“渲染比例没法用”的配置救回来。两件事：
+        //   * 100%（玩家从没动过滑条，等于没上采样）；
+        //   * 比该档名义输入还小的比例 —— 实测 2026-10-26：极致性能档存的是 33%，而 NGX 要求
+        //     render >= target/3，844x440 落在下界外，NGX 每帧只写一行 "Dynamic scaling error"
+        //     然后交出一张空纹理：世界全黑、GUI 正常。percentForTier 已改成 34，但旧存档、以及
+        //     玩家手动把滑条拖到名义值以下，都还会落进这个坑，所以这里无条件兜住。
+        if (!dlaaActive) {
+            val currentPercent = D3D12RenderScale.percent()
+            val nominalPercent = percentForTier(quality())
+            if (currentPercent == 100 || (currentPercent > 0 && currentPercent < nominalPercent)) {
+                if (currentPercent > 0 && currentPercent < nominalPercent) {
+                    if (!reportedBelowNominal) {
+                        reportedBelowNominal = true
+                        Illusion.LOGGER.warn(
+                            "[dxrmc] $PREFIX render scale {}% is below what tier {} needs ({}%); raising it, " +
+                                "otherwise NGX rejects the frame and the world goes black",
+                            currentPercent, QUALITY_NAMES[quality()], nominalPercent,
+                        )
+                    }
+                    // 走帧边界那一版：这条是从渲染线程里判出来的，帧中间改比例会让本帧后半段的
+                    // 世界层目标与主目标附件尺寸不一致（P282c 的 copyDepthFrom 崩溃）。
+                    D3D12RenderScale.setPercentAtFrameBoundary(nominalPercent)
+                } else {
+                    bindRenderScaleToDlss()
+                }
             }
         }
 
@@ -1401,6 +1440,10 @@ object DeepLearningSuperSampling {
                     window.width, window.height, jitter[0].toFloat(), jitter[1].toFloat(), resetReason)
                 // P121：升采样之后的后置锐化（SDK 自带 sharpness 已废弃）。
                 sharpenUpscaledFrame(encoder, output, targetWidth, targetHeight)
+                if (!outputSampleDone && output != null) {
+                    sampleTarget = output
+                    pendingOutputSample = true
+                }
             }
             // 0 = native 自己跳过（模式/尺寸/特征未就绪），它已经打过自己的 WARN；这里只在状态
             // 变化时报一行，绝不每帧刷屏。
@@ -1408,6 +1451,14 @@ object DeepLearningSuperSampling {
                 countEvaluateFailure()
                 noteState("native skipped this frame (feature not ready, or the sizes changed "
                     + "without a successful create)")
+            }
+            // 2 = 评价了，但结果落在 native 自己的私有纹理上（JVM 交过去的交接纹理没有被接受）。
+            // 这种情况下 prepareForGui 必须继续做世界层 blit，否则界面目标里没有任何世界内容
+            // —— 正是用户 m03636 那种"世界全黑、GUI 正常"的形态。
+            2 -> {
+                countEvaluateFailure()
+                noteState("DLSS evaluated into its private output texture (the JVM hand-over " 
+                    + "texture was rejected); keeping the linear blit so the world stays visible")
             }
             -1 -> {
                 countEvaluateFailure()
@@ -1532,16 +1583,71 @@ object DeepLearningSuperSampling {
      * 所以画面不会黑；这里只负责在"连败超过阈值"时打一行限流 WARN，让人知道 DLSS 实际上没在工作
      * （而不是以为它在跑）。成功一帧即清零（见 [onEvaluated]）。
      */
+    /**
+     * P291e：读回升采样输出的 36 个采样点，报一行均值。
+     *
+     * 为什么要它：用户报的是"世界全黑、GUI 正常"，而黑屏有两种完全不同的成因 —— 输出纹理真的全黑
+     * （SDK 没写进去 / 写进了我们没拿到的纹理），或者输出有内容但没被合成进 GUI 目标。这一行把它
+     * 们区分开，也顺手证明"这一帧确实评价过"。
+     */
+    private fun reportOutputSample() {
+        val target = sampleTarget ?: return
+        sampleTarget = null
+        val pixels = try {
+            MCDR_ABI.D3D12ReadbackTexturePixels(target.handle())
+        } catch (t: Throwable) {
+            IllusionLogger.debugMessage("[P291e] readback threw: " + t.toString())
+            return
+        }
+        if (pixels == null || pixels.isEmpty()) {
+            return
+        }
+        // 关键：`mcdr_dx12ReadbackTexturePixels` 返回的是 3x3 采样网格 × RGBA 四个分量
+        // （native `readbackSamples36`，共 36 个 int，每个元素是**一个通道**的值，不是打包的
+        // 32 位像素）。必须按 4 个一组解码 —— 早先把一个 int 当成打包 RGBA（`shr 16`）解出来
+        // 的永远是 0，于是"每会话第一帧都是全黑"，熔断把 DLSS 永久退回线性 blit。
+        val samples = pixels.size / 4
+        var sum = 0.0
+        var dark = 0
+        for (i in 0 until samples) {
+            val r = pixels[i * 4]
+            val g = pixels[i * 4 + 1]
+            val b = pixels[i * 4 + 2]
+            val luma = (r * 299 + g * 587 + b * 114) / 1000
+            sum += luma
+            if (luma <= 2) {
+                dark++
+            }
+        }
+        outputSampleDone = true
+        val mean = if (samples > 0) sum / samples else 0.0
+        val darkPercent = if (samples > 0) dark * 100.0 / samples else 100.0
+        if (mean <= 2.0) {
+            // 宁可糊，不要黑：一旦确认这张纹理是全黑的，本会话就不再让 prepareForGui 跳过世界层
+            // blit —— 世界层会被线性放大搬进 GUI 目标，画面差一点，但不会整块黑。
+            defuseBlackOutput = true
+            Illusion.LOGGER.error(
+                "[dxrmc] P291e: the upscaled image is BLACK (mean={} of {} sampled pixels) — "
+                    + "falling back to the linear blit for the rest of this session so the world "
+                    + "stays visible. The evaluate path claims success, so either the SDK wrote "
+                    + "into a texture we never hand to the compositor, or the hand-over texture "
+                    + "was rejected; set [logging] logLevel = INFO to see the P108/P291d lines.",
+                String.format(Locale.ROOT, "%.1f", mean),
+                samples)
+        }
+    }
+
     private fun countEvaluateFailure() {
         if (consecutiveEvaluateFailures < Int.MAX_VALUE) {
             consecutiveEvaluateFailures++
         }
         handoverSkipNoteShown = false
         if (consecutiveEvaluateFailures == EVALUATE_FAILURE_WARN_THRESHOLD) {
-            Illusion.LOGGER.warn(
+            // P291c：默认日志级别是 ERROR，warn 级等于没人看得见。
+            Illusion.LOGGER.error(
                 "[dxrmc] $PREFIX DLSS has failed to evaluate {} frames in a row; the world layer "
                     + "is being blitted every frame instead (this is the safe path, not a crash). "
-                    + "Check the P108 lines above for the reason.",
+                    + "Set [logging] logLevel = INFO in config/dxr_mc-client.toml to see the P108 reason.",
                 consecutiveEvaluateFailures)
         }
     }
@@ -1559,7 +1665,8 @@ object DeepLearningSuperSampling {
         // 照旧 blit 一次（画面绝对不会黑），也不要赌。
         val handoverEnabled = dlssOutputHandoverEnabled()
         val handoverOk = this.handoverOkThisFrame
-        if (!handoverEnabled || handoverOk) {
+        // P291e：采样确认全黑之后不再跳过 blit（糊但可见）。
+        if ((!handoverEnabled || handoverOk) && !defuseBlackOutput) {
             // 关键：DLSS 已经把升采样后的世界层写进 GUI 目标，本帧的 prepareForGui 必须跳过世界层 blit。
             D3D12GUISplit.markWorldLayerDone()
         } else {
@@ -1941,6 +2048,10 @@ object DeepLearningSuperSampling {
 
     private fun resetInputState() {
         evaluatedOnce = false
+        // P291e：熔断与"已采样"都是**会话级**状态 —— 退出 DLSS（换后端 / 关掉 / 换世界后重建）时
+        // 必须复位，否则一次采样到的黑帧会让之后每一次进世界都退化成线性放大。
+        defuseBlackOutput = false
+        outputSampleDone = false
         lastRenderWidth = -1
         lastRenderHeight = -1
         lastTargetWidth = -1
@@ -1958,6 +2069,31 @@ object DeepLearningSuperSampling {
      * `dx12QueryDlss` 探一次（每次进入 DLSS 模式一次）：答案是"不可用"时不必再每帧下探，
      * 也就能把"没有真实评价"的原因写进 JVM 日志（native 的说明文本一起带上）。
      */
+    /**
+     * P292c：给「视频设置 → Illusion 设置」的 DLSS 段用的一行运行状态，与 FSR / XeSS 段的状态行对等。
+     *
+     * 内容完全由 native 的 `mcdr_dx12QueryDlss` 给出（帧数、render→target 尺寸、质量档与来源），
+     * 所以界面里看到的和日志里打的是同一份事实。只应在界面打开时调用（每帧一次跨 ABI 调用）。
+     */
+    @JvmStatic
+    fun statusLine(): Component {
+        val note = try {
+            noteSegment()
+        } catch (t: Throwable) {
+            return Component.literal("DLSS: $t")
+        }
+        val result = try {
+            MCDR_ABI.D3D12QueryDlss(note, NOTE_CAPACITY)
+        } catch (t: Throwable) {
+            return Component.literal("DLSS: query threw ($t)")
+        }
+        if (result == Int.MIN_VALUE) {
+            return Component.translatable("dxr_mc.video.sr.noabi", "DLSS")
+        }
+        val text = runCatching { note.getString(0) }.getOrDefault("").ifEmpty { "(no detail)" }
+        return Component.literal("DLSS: " + text)
+    }
+
     private fun ensureAvailable(): Boolean {
         if (availabilityProbed) {
             return available
@@ -2092,6 +2228,7 @@ object DeepLearningSuperSampling {
             return
         }
         broken = true
-        Illusion.LOGGER.warn("[dxrmc] $PREFIX DLSS input feeding is disabled for this session: {}", reason)
+        // P291c：这是用户唯一能看到的「超分坏了」信号，必须在默认 ERROR 级别下可见。
+        Illusion.LOGGER.error("[dxrmc] $PREFIX DLSS input feeding is disabled for this session: {}", reason)
     }
 }

@@ -6,6 +6,7 @@ import dev.nts.expdxr.IllusionConfig
 import dev.nts.expdxr.misc.D3D12VRSSettings
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.adapter.D3D12AdapterInfo
+import dev.nts.expdxr.dxrmc.sr.SuperResolution
 import java.io.File
 import java.nio.charset.StandardCharsets
 import net.minecraft.client.OptionInstance
@@ -147,6 +148,20 @@ object D3D12VariableShadingRate {
     /** P232：地形最多粗到 2X2（枚举数值按面积单调递增，所以"更细"就是数值更小）。 */
     const val MAX_TERRAIN_RATE: Int = 0x5
 
+    /**
+     * P239：本帧地形实际允许的粗粒度上限。
+     *
+     * <p>超分（DLSS / FSR / XeSS，统一走 [SuperResolution.isEnabled]）在跑时把上限压到 **1X2**：
+     * 58% 渲染尺度下 2X2 只剩四分之一的着色样本，超分的抖动采样会把这种低频化放大成"整屏跳动"
+     * （2026-10-25 实测：VRS OFF 平稳、VRS ON 全屏跳、关掉超分又平稳）。1X2 只丢竖直一半，
+     * 在低尺度下的观感代价小得多；100% 尺度时仍允许 2X2（那时 2X2 ≈ 2 个屏幕像素）。
+     *
+     * <p>[MAX_TERRAIN_RATE] 仍是"设备能接受的最粗档"（[push] 的能力预检用它），这里只是
+     * 在运行期按是否超分把它收紧，所以换超分后端/开关不需要重推 native 上限。
+     */
+    @JvmStatic
+    fun terrainRateCap(): Int = if (SuperResolution.isEnabled()) RATE_1X2 else RATE_2X2
+
     /** 已下发的粗粒度批次 / 已恢复 1X1 的次数（诊断用，P237 会把它送进 OSD）。 */
     @JvmStatic
     var scopedBatches: Long = 0L
@@ -206,7 +221,7 @@ object D3D12VariableShadingRate {
      * P232：这条地形批次允许的着色率，`-1` = 一个调用都不发（保持 1X1）。
      *
      * <p>白名单而不是黑名单 —— 26.3 的 pass 表还在变，新加的 pass 默认必须是"不粗"。
-     * 只有 `solid_terrain`（不含 shadow）能拿到 [MAX_TERRAIN_RATE]：再粗下去，法线/UV 的块状误差
+     * 只有 `solid_terrain`（不含 shadow）能拿到 [terrainRateCap]：再粗下去，法线/UV 的块状误差
      * 在 TAA/DLSS 之后仍然可见。`cutout_terrain`（叶子、栅栏的镂空）与 `translucent`/`oit_`
      * 一律 1X1 —— 粗像素会把相邻 alpha 混进同一个着色样本，表现为"叶子边缘破洞"（§8.3）。
      */
@@ -218,7 +233,7 @@ object D3D12VariableShadingRate {
         if (location.contains("shadow") || !location.contains("solid_terrain")) {
             return -1
         }
-        return MAX_TERRAIN_RATE
+        return terrainRateCap()
     }
 
     /**
@@ -321,17 +336,17 @@ object D3D12VariableShadingRate {
     /**
      * P233：`b8` 的 `gVrsBand` —— (近带外沿, 中带外沿, 远带速率, 启用位)，距离单位是方块、相机相对。
      *
-     * <p>近带内 1X1（脚下的方块、手持物附近必须清楚），中带 1X2，远带 2X2。两个外沿每批次现读
-     * `[vrs]` 配置，改 `dxr_mc-client.toml` 下一帧就生效 —— P233 的地平线闪烁正是靠这个在不重启的
-     * 情况下定位的（结论与三次失败尝试见 `known_bugs.md` 的 P233 条目）。远带速率自 P238 起固定
-     * 2X2：玩家档位已删，这里不再读配置。
+     * <p>近带内 1X1（脚下的方块、手持物附近必须清楚），中带 1X2，远带取 [terrainRateCap] ——
+     * 超分在跑时它等于 1X2，此时中带与远带同档（就是"竖直减半"），不在跑时才是 2X2。两个外沿
+     * 每批次现读 `[vrs]` 配置，改 `dxr_mc-client.toml` 下一帧就生效 —— P233 的地平线闪烁正是靠
+     * 这个在不重启的情况下定位的（结论与三次失败尝试见 `known_bugs.md` 的 P233 条目）。
      */
     @JvmStatic
     fun msBand(): FloatArray {
         val enabled = isEnabled()
         val near = configFloat(IllusionConfig.VRS_TERRAIN_NEAR_BLOCKS, MS_NEAR_END)
         val far = configFloat(IllusionConfig.VRS_TERRAIN_FAR_BLOCKS, MS_FAR_START)
-        return floatArrayOf(near, far, RATE_2X2.toFloat(), if (enabled) 1.0f else 0.0f)
+        return floatArrayOf(near, far, terrainRateCap().toFloat(), if (enabled) 1.0f else 0.0f)
     }
 
     /** 配置没加载（早期帧、单元测试）时退回常量，不让 `get()` 抛异常打断整帧。 */
@@ -378,11 +393,14 @@ object D3D12VariableShadingRate {
         if (nativeRefused) {
             return "VRS: AUTO unsupported by this device (staying 1X1) | $caps"
         }
+        // P239：cap 单列一段 —— 它决定"允许粗到哪一档"，与"谁是判决者（图像/距离带）"是两件事。
+        val cap = "cap=${rateName(terrainRateCap())}${if (SuperResolution.isEnabled()) "(sr)" else ""}"
         val judge = if (D3D12ShadingRateImage.isReady()) {
             "sri ${D3D12ShadingRateImage.tileSize()} imgs=$scopedImages" +
-                " clamp=${if (D3D12ShadingRateImage.temporalClampActive()) "on" else "off"}"
+                " clamp=${if (D3D12ShadingRateImage.temporalClampActive()) "on" else "off"}" +
+                " $cap"
         } else {
-            "band<=${rateName(MAX_TERRAIN_RATE)} near=${IllusionConfig.VRS_TERRAIN_NEAR_BLOCKS.get().toInt()}" +
+            "$cap near=${IllusionConfig.VRS_TERRAIN_NEAR_BLOCKS.get().toInt()}" +
                 " far=${IllusionConfig.VRS_TERRAIN_FAR_BLOCKS.get().toInt()}"
         }
         return "VRS: AUTO $judge | $caps batches=$scopedBatches restores=$scopedRestores"

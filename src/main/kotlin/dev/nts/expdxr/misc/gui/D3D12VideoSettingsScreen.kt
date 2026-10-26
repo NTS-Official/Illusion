@@ -177,6 +177,7 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
                     Entry.Setting(D3D12VariableShadingRate.option()),
                     Entry.Heading(Component.empty()),
                     Entry.Heading(translatable("dxr_mc.video.group.nvidia")),
+                    Entry.Note(DeepLearningSuperSampling.statusLine()),
                     Entry.Setting(DeepLearningSuperSampling.option()),
                     Entry.Setting(DeepLearningSuperSampling.presetOption()),
                     Entry.Setting(DeepLearningSuperSampling.qualityOption()),
@@ -186,24 +187,32 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
                     if (DLSSFrameGeneration.isAvailable()) Entry.Setting(DLSSFrameGeneration.framesOption()) else null,
                     // 用户 m01923：SR 的两个非 NVIDIA 后端接在这两段里。开关共用门面里的
                     // 一个"当前后端"，点开一家另一家自动关（见 SuperResolution.requestBackend）。
+                    // 每段的形状与上面 DLSS 段对齐：状态行 -> 开关 -> 质量档；下面再接三行
+                    // 两家共用的项（遮罩 / 锐化 / 帧生成说明）。
                     Entry.Heading(Component.empty()),
                     Entry.Heading(translatable("dxr_mc.video.group.amd")),
-                    Entry.Setting(SuperResolution.fsrOption()),
-                    Entry.Setting(SuperResolution.sharpnessOption()),
-                    Entry.Heading(Component.empty()),
-                    Entry.Heading(translatable("dxr_mc.video.group.intel")),
-                    Entry.Setting(SuperResolution.xessOption()),
-
-                    // 用户 m01923 的两段之后：这两行是 P284 的诊断结论（可用 / 缺什么）。
-                    // 直接显示 caps.note —— 运行库在不在只有 native 问得出来，这里不再判断一次。
                     Entry.Note(
                         SuperResolution.statusLine(MCDR_ABI.SR_BACKEND_FSR),
                         SuperResolution.isBackendMissing(MCDR_ABI.SR_BACKEND_FSR),
                     ),
+                    Entry.Setting(SuperResolution.fsrOption()),
+                    Entry.Setting(SuperResolution.fsrQualityOption()),
+        Entry.Note(SuperResolution.runtimeLine(MCDR_ABI.SR_BACKEND_FSR)),
+                    Entry.Heading(Component.empty()),
+                    Entry.Heading(translatable("dxr_mc.video.group.intel")),
                     Entry.Note(
                         SuperResolution.statusLine(MCDR_ABI.SR_BACKEND_XESS),
                         SuperResolution.isBackendMissing(MCDR_ABI.SR_BACKEND_XESS),
                     ),
+                    Entry.Setting(SuperResolution.xessOption()),
+                    Entry.Setting(SuperResolution.xessQualityOption()),
+        Entry.Note(SuperResolution.runtimeLine(MCDR_ABI.SR_BACKEND_XESS)),
+                    Entry.Heading(Component.empty()),
+                    Entry.Heading(translatable("dxr_mc.video.group.sr_shared")),
+                    Entry.Setting(SuperResolution.maskOption()),
+                    Entry.Setting(SuperResolution.sharpnessOption()),
+                    Entry.Note(translatable("dxr_mc.video.sr.framegen_absent")),
+        Entry.Note(translatable("dxr_mc.video.sr.latency_absent")),
                 ),
             ),
         )
@@ -322,9 +331,14 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
             if (dlaa) {
                 return Component.translatable("dxr_mc.video.lock.dlss_dlaa")
             }
-            // 超分器已经切给 FSR / XeSS 了：这时再动 DLSS 这一行不会有效果（门面按当前后端分派），
-            // 置灰比让人以为"打开了 DLSS"更诚实。
-            if (SuperResolution.backend() != SrBackend.DLSS) {
+            // 另一家超分（FSR / XeSS）已经占了后端时，再动 DLSS 这一行不会有效果（门面按当前后端
+            // 分派），置灰比让人以为"打开了 DLSS"更诚实。
+            //
+            // P239 修：`backend() == NONE`（还没选过后端）**不能**锁 —— 否则"没选后端 → DLSS 置灰 →
+            // 选不了后端"就是死锁（用户 m03463：「超分被锁了开不起来」）。NONE 时打开 DLSS 会由
+            // `SuperResolution.onDlssToggle` 顺手认领后端。
+            val owner = SuperResolution.backend()
+            if (owner == SrBackend.FSR || owner == SrBackend.XESS) {
                 return Component.translatable("dxr_mc.video.lock.sr_other_backend")
             }
         }
@@ -338,6 +352,23 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
             if (other.get()) {
                 return Component.translatable("dxr_mc.video.lock.sr_exclusive")
             }
+        }
+        // 新加的两行质量档只在"那一家正在跑"时才有效（applyQuality 对非当前后端直接返回）；
+        // 置灰比让人拨了半天没反应更诚实。帧生成开着时同样锁（插值的是 DLSS 输出，不能换源）。
+        val fsrQuality = option === SuperResolution.fsrQualityOption()
+        val xessQuality = option === SuperResolution.xessQualityOption()
+        if (fsrQuality || xessQuality) {
+            if (DLSSFrameGeneration.isEnabled()) {
+                return Component.translatable("dxr_mc.video.lock.sr_framegen")
+            }
+            val wanted = if (fsrQuality) SrBackend.FSR else SrBackend.XESS
+            if (SuperResolution.backend() != wanted) {
+                return Component.translatable("dxr_mc.video.lock.sr_not_active")
+            }
+        }
+        // 遮罩是"谁吃谁用"的：DLSS 走 NGX，没有遮罩输入，拨了不会有效果。
+        if (option === SuperResolution.maskOption() && !SuperResolution.maskSupported()) {
+            return Component.translatable("dxr_mc.video.lock.sr_mask_unsupported")
         }
         if (option === DeepLearningSuperSampling.qualityOption() && dlaa) {
             return Component.translatable("dxr_mc.video.lock.dlss_dlaa")

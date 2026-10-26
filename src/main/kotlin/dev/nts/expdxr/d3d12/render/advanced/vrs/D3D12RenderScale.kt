@@ -144,6 +144,10 @@ object D3D12RenderScale {
 
     private fun minOf(): Int = if (mode == MODE_DLSS) DLSS_MIN_PERCENT else MIN_PERCENT
 
+    /** 当前模式下允许的最小百分比（供超分门面算"抬到多少才够"时用）。 */
+    @JvmStatic
+    fun minimumPercent(): Int = minOf()
+
     private fun maxOf(): Int = if (mode == MODE_DLSS) DLSS_MAX_PERCENT else MAX_PERCENT
 
     private fun stepOf(): Int = MODE_STEPS[mode]

@@ -58,6 +58,8 @@ class Illusion(modEventBus: IEventBus, modContainer: ModContainer) {
             applyGpuCaptureConfig()
         }
         LOGGER.info("[$MODID] $MOD_NAME is constructing...")
+        // P291c：一行构建标记。用户 m03636 那轮黑屏取证里，我插的临时探针日志一次都没出现，
+        // 无法证明"跑的是不是刚编出来的代码"—— 让任何一份日志自己回答这个问题。
         // To probe exact backend setting before loading the mod, the only way to achieve this is to read it from file.
         val preferredGraphics = preferredGraphicsSettingFromOptionsFile()
         LOGGER.info(
