@@ -156,6 +156,10 @@
   "dxr_mc.video.sr.framegen_absent": "Frame generation: not available for this backend yet (v1 only has DLSS-G).",
   "dxr_mc.video.sr.noabi": "%s: the native library has no super-resolution entry points (ABI too old)",
   "dxr_mc.video.sr.unavailable": "%s is not available - %s",
+  "dxr_mc.video.fg.available": "Frame generation is ready (%s)",
+  "dxr_mc.video.fg.unavailable": "Frame generation is not available - %s",
+  "dxr_mc.video.fg.noabi": "Frame generation: the native library has no frame-generation entry points (ABI too old)",
+  "dxr_mc.video.fg.rolled_back": "Frame generation was switched off automatically (reason: %s). Turn it back on after fixing the cause.",
   "dxr_mc.video.tab.display": "Display",
   "dxr_mc.video.tab.illusion": "Illusion Settings",
   "dxr_mc.video.tab.preferences": "Preferences",
@@ -232,5 +236,6 @@
   "options.sr.xess.tooltip": "Intel XeSS: the same idea as FSR, rebuilt by Intel's upscaler. XeSS is told the actual render resolution every frame, so any Render Scale below 100% works. Needs libxess.dll next to MCDR.dll; the row is greyed out otherwise.\n\nMutually exclusive with FSR; frame generation keeps DLSS as the upscaler.",
   "options.video.illusion.header": "Illusion Settings",
   "dxr_mc.video.lock.sr_mask_unsupported": "Only AMD FidelityFX and Intel XeSS take a reactive / responsive mask",
+  "dxr_mc.video.lock.fg_unavailable": "Frame generation cannot run on this combination - see the status line above for the reason",
   "dxr_mc.video.sr.latency_absent": "Low latency: only NVIDIA Reflex (DLSS) in v1."
 }

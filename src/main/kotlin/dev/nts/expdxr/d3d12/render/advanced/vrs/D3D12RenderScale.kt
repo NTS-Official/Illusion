@@ -634,7 +634,33 @@ object D3D12RenderScale {
 
     @JvmStatic
     fun scaled(value: Int): Int {
-        val p = percent
+        return scaledAt(value, percent)
+    }
+
+    /**
+     * P302：**主目标附件上一次真的按哪个比例建的**。
+     *
+     * <p>[percent] 是"用户要什么"（随时会被改），这个值是"主目标现在是什么"（只在重建附件时更新）。
+     * 两者在帧中间可能不一致：`setPercent` / `store` 会立刻改 [percent]，而主目标的重建排在帧边界
+     * （`rebuildMainTarget` → `Minecraft.schedule`）。中间这段窗口里如果世界层目标按 [percent] 分配，
+     * 就会出现"主目标 640x360、世界层 290x163"的一帧 —— OIT 的 depth-bounds pass 用主目标深度当附件、
+     * 用世界层目标当渲染区，`FrontendCommandEncoder.createRenderPass` 直接抛
+     * `Depth texture: size does not match expected attachment size. Is 640x360 expected 290x163`
+     * （crash-2026-10-27_14.10.19-client：自测钩子把 SR 后端从 FSR 切回 DLSS，`setDlssMode` 里
+     * `setProgrammatically` → `store` 同步改了比例，重建还在下一帧）。
+     *
+     * <p>所以世界层目标必须按**这个**值分配：它一定等于主目标附件的真实尺寸，而主目标重建时
+     * [scaledForAttachment] 会把它一起推到新值 —— 两边永远同一帧、同一个数。
+     */
+    @Volatile
+    private var appliedPercent: Int = DEFAULT_PERCENT
+
+    /** 只打一次 P302 取证行（每帧两次调用，不能刷屏）。 */
+    @Volatile
+    private var loggedPendingPercent = false
+
+    /** [scaled] 的显式比例版本（P302：[worldLayerSize] 要按"已生效"的比例算）。 */
+    private fun scaledAt(value: Int, p: Int): Int {
         if (p == 100 || value <= 0) {
             return value
         }
@@ -688,13 +714,24 @@ object D3D12RenderScale {
      */
     @JvmStatic
     fun worldLayerSize(value: Int): Int {
-        val result = attachmentDimension(value)
+        // P302：按**已生效**的比例算，而不是用户刚改的那个 —— 否则主目标还是旧尺寸、世界层目标已经是
+        // 新尺寸，OIT 的 pass 立刻因为"深度附件与渲染区不同尺寸"崩掉。
+        val applied = appliedPercent
+        if (applied != percent && !loggedPendingPercent) {
+            loggedPendingPercent = true
+            Illusion.LOGGER.info(
+                "P302: 世界层目标先按已生效的 {}% 分配（用户已经改成 {}%）；主目标的重建排在帧边界，"
+                    + "重建完两者才一起换到新比例",
+                applied, percent,
+            )
+        }
+        val result = attachmentDimensionAt(value, applied)
         if (result != value && !loggedWorldLayerSize) {
             loggedWorldLayerSize = true
             Illusion.LOGGER.info(
                 "P105b: 世界层辅助目标（translucent/particles/weather/clouds + 后处理内部目标）按渲染尺寸分配" +
                     "（主目标 {} -> {}，renderScale={}%）；深度拷贝与合成回到同一坐标系",
-                value, result, percent,
+                value, result, applied,
             )
         }
         return result
@@ -712,6 +749,11 @@ object D3D12RenderScale {
      */
     @JvmStatic
     fun scaledForAttachment(value: Int): Int {
+        // P302：这里是主目标附件**真的被创建**的那条路径（`MainTargetRenderScaleMixin` 的构造路径与
+        // `RenderTargetCreateBuffersScaleMixin` 的 resize 路径都走它），所以"已生效的比例"在这里更新 ——
+        // 世界层目标随之换到同一个数，两者不可能落在不同尺寸上。
+        appliedPercent = percent
+        loggedPendingPercent = false
         val result = attachmentDimension(value)
         if (result != value) {
             // 取证用：只有真正缩放时才打；主目标每次（重）建纹理最多四行
@@ -734,8 +776,13 @@ object D3D12RenderScale {
      * <p>超采样（> 100%）时不能越过设备的 maxTextureSize：vanilla 的尺寸检查只按**未缩放**的值算，
      * 越过去会 OOM 并掉到 854x480 兜底（再被缩放一次，可能又 OOM）。
      */
-    private fun attachmentDimension(value: Int): Int {
-        val scaled = scaled(value)
+    private fun attachmentDimension(value: Int): Int = attachmentDimensionAt(value, percent)
+
+    /**
+     * [attachmentDimension] 的显式比例版本（P302：世界层目标按 [appliedPercent] 算）。
+     */
+    private fun attachmentDimensionAt(value: Int, p: Int): Int {
+        val scaled = scaledAt(value, p)
         if (scaled <= value) {
             return scaled
         }

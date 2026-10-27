@@ -94,6 +94,11 @@ val dxrmcTemporalVelocity = providers.gradleProperty("dxrmc.temporal.velocity")
 // P76f 判别实验：给上一帧视图矩阵人为加固定旋转（静止也能测出 mv 是否真的在写）。
 // 自动化取证：`-Pdxrmc.quickPlayWorld=<存档名>` 让客户端启动后直接进单人世界（无人值守截图/复现用）。
 // 空字符串 = 不传（普通游玩保持手动进世界）。
+// P300 验收：会话中途改设置的自动化钩子（只给自动化跑测试用，不是功能入口）。
+// `gradlew runClient -Pdxrmc.selfTest=fg-on@20,fg-off@400` —— tick 从进入世界那刻开始算。
+// A6（中途关帧生成）与 A11（中途把超分换成 XeSS）靠它才跑得起来：脚本改不了运行中的状态。
+val dxrmcSelfTest = providers.gradleProperty("dxrmc.selfTest")
+    .orElse(providers.systemProperty("dxrmc.selfTest")).getOrElse("")
 val dxrmcQuickPlayWorld = providers.gradleProperty("dxrmc.quickPlayWorld").getOrElse("")
 // P108z：DLSS 输出纹理的"交接"（handover）—— **默认开启**。
 //
@@ -148,6 +153,8 @@ neoForge {
             systemProperty("dxrmc.temporal.velocity", dxrmcTemporalVelocity)
             // P108z 验收：DLSS 输出纹理交接（默认 off；handover 只用于验证 NGX 是否真的写入）。
             systemProperty("dxrmc.dlssOutput", dxrmcDlssOutput)
+            // P300 验收：会话中途改设置的自动化钩子（空 = 不启用）。
+            systemProperty("dxrmc.selfTest", dxrmcSelfTest)
 
             // DXRMC：native 侧的诊断环境变量。必须显式转发 —— Loom 的 run config 不继承
             // shell 环境（实测 `$env:DX12_NATIVE_LOG_FILE` 到不了客户端）。

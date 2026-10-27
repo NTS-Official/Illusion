@@ -544,6 +544,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
         val initial = D3D12Settings.srBackend
         backend = initial
         syncOptions(initial)
+        pushBackendToNative(initial)
         return initial
     }
 
@@ -570,6 +571,27 @@ private const val DEFAULT_RENDER_PERCENT = 75
      * [createdFor] / [lastKey] 清空 —— 下一帧 `createKey` 里带着后端号，native 的
      * `ensureProvider` 会先放掉旧 provider 再建新的（它自己保证 GPU 追平）。
      */
+    /**
+     * P300b：把「用户选的是哪一家超分」告诉 native。
+     *
+     * <p>为什么需要：帧生成的可用性判据要问「SR 是不是 DLSS」，而 native 原来只有 `gSrPicked`，
+     * 只有 `mcdr_dx12SrPick` 会写它 —— JVM 侧**从来没调过**这个导出（只调 `SrCreate`），于是那个
+     * 判据恒等于"没选后端"，等于没有门控（2026-10-27 实测：`[sr] backend` 选 XESS + 帧生成开，
+     * `[FG]` 仍报 `available=1 note="DLSS-G ready"`）。
+     *
+     * <p>为什么按「选的」而不是「正在跑的」：比例 100% 时 FSR / XeSS 根本不跑（门面会拦下并记
+     * `xess did not run this frame`），但这时 DLSS 也已经 stand down（日志：`P108: standing down:
+     * the SR backend in options.txt is XESS`）—— 按「正在跑的」判会把这种情况当成"没超分"，
+     * 那是假的。选的那家才是意图。
+     */
+    private fun pushBackendToNative(selected: SrBackend) {
+        try {
+            MCDR_ABI.D3D12SrPick(selected.id)
+        } catch (t: Throwable) {
+            Illusion.LOGGER.debug("[dxrmc] {} could not push the SR backend {} to native: {}", PREFIX, selected, t.toString())
+        }
+    }
+
     private fun requestBackend(requested: SrBackend) {
         if (syncingOptions) {
             return
@@ -605,6 +627,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
             }
         }
         backend = requested
+        pushBackendToNative(requested)
         syncOptions(requested)
         createdFor = ""
         lastKey = ""
@@ -629,6 +652,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
                     val loaded = backendFromName(name)
                     backend = loaded
                     syncOptions(loaded)
+                    pushBackendToNative(loaded)
                 } else if (line.startsWith("$OPTIONS_KEY_SHARPNESS:")) {
                     val text = line.substring(OPTIONS_KEY_SHARPNESS.length + 1).trim().trim('"')
                     text.toIntOrNull()?.let { SHARPNESS_OPTION.set(it.coerceIn(0, 100)) }

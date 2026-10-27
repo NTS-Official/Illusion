@@ -374,6 +374,84 @@ object MCDRLayout {
     @JvmField val SR_CAPS_NATIVE_AA: Long = offset(SR_CAPS, "nativeAA")
     @JvmField val SR_CAPS_NOTE: Long = offset(SR_CAPS, "note")
 
+    // P295：帧生成抽象层的两张新表（C 侧见 mcdr_abi.h 的「P293：帧生成」段）。
+    // 与 SR 一样：字段顺序/名字必须与 typedef 逐字一致，verify() 双向比对 offset + size。
+    // `note` 是 `char note[28]`、`latencyProvider` 是 P298 加的那一格，两者都要写成
+    // **有名字段**：describe() 只枚举有名字的成员，C 侧的 MCDR_FIELD 也是按名字登记的一一对应。
+    @JvmField
+    val FG_CAPS: MemoryLayout = MemoryLayout.structLayout(
+        I32.withName("backend"),
+        I32.withName("available"),
+        I32.withName("runtimeLoaded"),
+        I32.withName("deviceSupported"),
+        I32.withName("chainCompatible"),
+        I32.withName("needsReflex"),
+        I32.withName("needsUiResource"),
+        I32.withName("needsHudless"),
+        I32.withName("transitionsInputs"),
+        I32.withName("maxGeneratedFrames"),
+        I32.withName("chainOwner"),
+        // C 里这一格叫 reserved（必须为 0）；留着是为了将来加 flags 时不改 sizeof。
+        I32.withName("reserved"),
+        MemoryLayout.sequenceLayout(28L, I8).withName("note"),
+        // P298：本后端架构上该配哪个低延迟方案（MCDR_FG_LATENCY_*）。它占了原来那格尾填充，
+        // 所以 sizeof 仍是 80 —— 换掉名字时别顺手加字段，会破 C 侧的 MCDR_FIELD 断言。
+        I32.withName("latencyProvider")
+    ).withName("mcdr_fg_caps")
+
+    // 设期望值的载荷（C sizeof = 96 / align = 8）。三个 int64 从 24 起，正好 8 字节对齐，
+    // 所以 0..23 这段没有隐式填充；末尾 `int32_t _pad2[2]` 是**两个** int32（8 B），
+    // 漏掉一个就会让 java 侧算出 92 而 C 侧是 96 —— 这里用 length=2 的序列显式表示。
+    @JvmField
+    val FG_DISPATCH: MemoryLayout = MemoryLayout.structLayout(
+        I32.withName("displayWidth"),
+        I32.withName("displayHeight"),
+        I32.withName("backend"),
+        I32.withName("mode"),
+        I32.withName("numFrames"),
+        I32.withName("reset"),
+        I64.withName("appFrameId"),
+        I64.withName("backendFrameId"),
+        I64.withName("presentId"),
+        PTR.withName("pBackbuffer"),
+        PTR.withName("pHudlessColor"),
+        PTR.withName("pDepth"),
+        PTR.withName("pMotionVectors"),
+        PTR.withName("pUiColor"),
+        MemoryLayout.sequenceLayout(2L, I32).withName("_pad2")
+    ).withName("mcdr_fg_dispatch")
+
+    /** `mcdr_fg_caps` 的字段偏移（P295）。 */
+    @JvmField val FG_CAPS_BACKEND: Long = offset(FG_CAPS, "backend")
+    @JvmField val FG_CAPS_AVAILABLE: Long = offset(FG_CAPS, "available")
+    @JvmField val FG_CAPS_RUNTIME_LOADED: Long = offset(FG_CAPS, "runtimeLoaded")
+    @JvmField val FG_CAPS_DEVICE_SUPPORTED: Long = offset(FG_CAPS, "deviceSupported")
+    @JvmField val FG_CAPS_CHAIN_COMPATIBLE: Long = offset(FG_CAPS, "chainCompatible")
+    @JvmField val FG_CAPS_NEEDS_REFLEX: Long = offset(FG_CAPS, "needsReflex")
+    @JvmField val FG_CAPS_NEEDS_UI_RESOURCE: Long = offset(FG_CAPS, "needsUiResource")
+    @JvmField val FG_CAPS_NEEDS_HUDLESS: Long = offset(FG_CAPS, "needsHudless")
+    @JvmField val FG_CAPS_TRANSITIONS_INPUTS: Long = offset(FG_CAPS, "transitionsInputs")
+    @JvmField val FG_CAPS_MAX_GENERATED_FRAMES: Long = offset(FG_CAPS, "maxGeneratedFrames")
+    @JvmField val FG_CAPS_CHAIN_OWNER: Long = offset(FG_CAPS, "chainOwner")
+    @JvmField val FG_CAPS_NOTE: Long = offset(FG_CAPS, "note")
+    @JvmField val FG_CAPS_LATENCY_PROVIDER: Long = offset(FG_CAPS, "latencyProvider")
+
+    /** `mcdr_fg_dispatch` 的写偏移（P295；P296 接 Present 之后才会被真正写满）。 */
+    @JvmField val FG_DISPATCH_DISPLAY_WIDTH: Long = offset(FG_DISPATCH, "displayWidth")
+    @JvmField val FG_DISPATCH_DISPLAY_HEIGHT: Long = offset(FG_DISPATCH, "displayHeight")
+    @JvmField val FG_DISPATCH_BACKEND: Long = offset(FG_DISPATCH, "backend")
+    @JvmField val FG_DISPATCH_MODE: Long = offset(FG_DISPATCH, "mode")
+    @JvmField val FG_DISPATCH_NUM_FRAMES: Long = offset(FG_DISPATCH, "numFrames")
+    @JvmField val FG_DISPATCH_RESET: Long = offset(FG_DISPATCH, "reset")
+    @JvmField val FG_DISPATCH_APP_FRAME_ID: Long = offset(FG_DISPATCH, "appFrameId")
+    @JvmField val FG_DISPATCH_BACKEND_FRAME_ID: Long = offset(FG_DISPATCH, "backendFrameId")
+    @JvmField val FG_DISPATCH_PRESENT_ID: Long = offset(FG_DISPATCH, "presentId")
+    @JvmField val FG_DISPATCH_P_BACKBUFFER: Long = offset(FG_DISPATCH, "pBackbuffer")
+    @JvmField val FG_DISPATCH_P_HUDLESS_COLOR: Long = offset(FG_DISPATCH, "pHudlessColor")
+    @JvmField val FG_DISPATCH_P_DEPTH: Long = offset(FG_DISPATCH, "pDepth")
+    @JvmField val FG_DISPATCH_P_MOTION_VECTORS: Long = offset(FG_DISPATCH, "pMotionVectors")
+    @JvmField val FG_DISPATCH_P_UI_COLOR: Long = offset(FG_DISPATCH, "pUiColor")
+
     private val EXPECTED_C_SIZES: Array<Array<Any>> = arrayOf(
     // ------------------------------------------------------------------
         arrayOf<Any>("mcdr_binding_slot",         BINDING_SLOT,        40L),
@@ -389,6 +467,9 @@ object MCDRLayout {
         // P271：SR 抽象层。两个数字都是 MSVC x64 实际 sizeof（改结构时两边一起改）。
         arrayOf<Any>("mcdr_sr_caps",             SR_CAPS,            80L),
         arrayOf<Any>("mcdr_sr_dispatch",         SR_DISPATCH,       136L),
+        // P295：FG 抽象层。两个数字都是 MSVC x64 实际 sizeof（改结构时两边一起改）。
+        arrayOf<Any>("mcdr_fg_caps",             FG_CAPS,            80L),
+        arrayOf<Any>("mcdr_fg_dispatch",         FG_DISPATCH,        96L),
         arrayOf<Any>("mcdr_abi_field",            ABI_FIELD,           24L),
     )
 
@@ -426,6 +507,9 @@ object MCDRLayout {
         // "reported by native but absent from the Java mirror" 并 abort。
         STRUCTS["mcdr_sr_caps"] = SR_CAPS
         STRUCTS["mcdr_sr_dispatch"] = SR_DISPATCH
+        // P295：FG 的两张表同理必须登记（native 的 layoutTable() 有它们的字段）。
+        STRUCTS["mcdr_fg_caps"] = FG_CAPS
+        STRUCTS["mcdr_fg_dispatch"] = FG_DISPATCH
     }
 
     /** Named top-level members of every mirrored struct, as `"Struct.field" -> {offset, size}`. */

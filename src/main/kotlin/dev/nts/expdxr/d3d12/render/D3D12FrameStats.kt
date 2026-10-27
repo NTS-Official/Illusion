@@ -1,7 +1,7 @@
 package dev.nts.expdxr.d3d12.render
 
 import dev.nts.expdxr.d3d12.render.adapter.D3D12AdapterInfo
-import dev.nts.expdxr.dxrmc.sr.dlss.DLSSFrameGeneration
+import dev.nts.expdxr.dxrmc.framegen.FrameGeneration
 import kotlin.math.roundToInt
 
 /**
@@ -78,7 +78,7 @@ object D3D12FrameStats {
         }
         // 用户 m01219：关掉帧生成后这里仍会显示 `120/240 (FG 2.0x)` —— native 的“每帧提交数”
         // 那时停在旧值上。双数值只在真的有生成帧时才有意义，关着就交给原版。
-        if (!DLSSFrameGeneration.isEnabled()) {
+        if (!FrameGeneration.isEnabled()) {
             smoothedMultiplier = 1.0
             return vanilla
         }

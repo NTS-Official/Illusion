@@ -2,7 +2,7 @@ package dev.nts.expdxr.dxrmc.nvidia.reflex
 
 import com.mojang.serialization.Codec
 import dev.nts.expdxr.Illusion
-import dev.nts.expdxr.dxrmc.sr.dlss.DLSSFrameGeneration
+import dev.nts.expdxr.dxrmc.framegen.FrameGeneration
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import java.io.File
 import java.nio.charset.StandardCharsets
@@ -78,13 +78,13 @@ object NvidiaReflex {
     private fun push(mode: Int) {
         // P213 联动：帧生成开着时 Reflex 必须为 On。用户（或旧配置）想关掉也按 On 处理，
         // 这样“设置里显示关 / 实际强制开”这种错位不会出现；关掉帧生成后即可自由切换。
-        val effective = if (mode == 0 && DLSSFrameGeneration.isEnabled()) 1 else mode
+        val effective = if (mode == 0 && FrameGeneration.isEnabled()) 1 else mode
         currentMode = effective
         MCDR_ABI.D3D12SetReflexMode(effective)
     }
 
     /**
-     * 联动入口：帧生成打开时由 [DLSSFrameGeneration] 调用，
+     * 联动入口：帧生成打开时由 [FrameGeneration] 调用，
      * 把 Reflex 抬到 On。
      *
      * 不能只 `OPTION.set(1)`：`Options.load` 期间 `OptionInstance.set` 不触发回调，

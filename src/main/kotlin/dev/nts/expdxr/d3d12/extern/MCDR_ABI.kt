@@ -72,6 +72,17 @@ import java.util.concurrent.atomic.AtomicInteger
     private var MH_srjitterphase: MethodHandle? = null
     /** P271：一行可用性文本。 */
     private var MH_srquery: MethodHandle? = null
+    /** P295：帧生成抽象层的 5 个契约入口（见 `mcdr_abi.h` 的「P293：帧生成」段）。全部走 skipOptional。 */
+    private var MH_fgpick: MethodHandle? = null
+    /** P295：后端能力面查询（填 `MCDRLayout.FG_CAPS`）。 */
+    private var MH_fgquerycaps: MethodHandle? = null
+    /** P295：设期望值（读 `MCDRLayout.FG_DISPATCH`）。 */
+    private var MH_fgsetmode: MethodHandle? = null
+    /** P295：上一次 Present 真正提交的帧数。 */
+    private var MH_fgpresented: MethodHandle? = null
+    /** P295：一行状态文本。 */
+    private var MH_fgstatus: MethodHandle? = null
+    private var MH_fgstate: MethodHandle? = null
     /** P231：scope 型着色率下发（见 [D3D12SetShadingRateNow]）。 */
     private var MH_setshadingratenow: MethodHandle? = null
     /** P231：着色率组合器（见 [D3D12SetShadingRateCombiners]）。 */
@@ -197,6 +208,10 @@ import java.util.concurrent.atomic.AtomicInteger
     private var MH_getbackbufferhandle: MethodHandle? = null
     private var MH_issurfacesuboptimal: MethodHandle? = null
     private var MH_readbacktexturepixels: MethodHandle? = null
+    /** P291e：已知起始状态的读回（被 GPU 写过、当前不在 COMMON 的纹理必须走这条）。 */
+    private var MH_readbacktexturepixelsin: MethodHandle? = null
+    /** P291e：DLSS 输出纹理上一帧结束时停在哪个 D3D12_RESOURCE_STATES（0 = 未知）。 */
+    private var MH_dlssoutputstate: MethodHandle? = null
     private var MH_destroysurface: MethodHandle? = null
     private var MH_setpipeline: MethodHandle? = null
     private var MH_setscissor: MethodHandle? = null
@@ -466,8 +481,32 @@ import java.util.concurrent.atomic.AtomicInteger
      * [verifyABI] 会把 native 报上来的 layout 表与 [MCDRLayout.describe] 双向比对，
      * 所以这个常量、两张表的 Kotlin 镜像、native 的 `layoutTable()` 三处必须同时到位
      * ——只改一处会在设备创建前抛 "MCDR ABI version mismatch" 或 layout mismatch。
+     *
+     * P293：3 → 4。同样只有**追加**：两张新表（`mcdr_fg_caps` sizeof=80、`mcdr_fg_dispatch`
+     * sizeof=96）与 5 个 `mcdr_dx12Fg*` 入口。老的 `mcdr_dx12SetDlssgMode` /
+     * `mcdr_dx12GetDlssgPresented` 保持原样转发（见 `abi_meta.cpp`），所以没升级的调用方
+     * 行为不变；`MCDRLayout.EXPECTED_C_SIZES` 与 `STRUCTS` 里两张 FG 表也必须与本常量同步。
      */
-    const val MCDR_ABI_VERSION: Int = 3
+    const val MCDR_ABI_VERSION: Int = 4
+    /** P293：`MCDR_FG_BACKEND_*`。与 `mcdr_abi.h` 的同名宏逐值对应。 */
+    const val FG_BACKEND_NONE: Int = 0
+    const val FG_BACKEND_DLSSG: Int = 1
+    const val FG_BACKEND_FSRFG: Int = 2
+    const val FG_BACKEND_XESSFG: Int = 3
+    /** P293：`MCDR_FG_CHAIN_*`。v1 只有前两态可达。 */
+    const val FG_CHAIN_APP_NATIVE: Int = 0
+    const val FG_CHAIN_SL_PROXY: Int = 1
+    const val FG_CHAIN_FSR_WRAP: Int = 2
+    const val FG_CHAIN_XESS_WRAP: Int = 3
+    /**
+     * P298：`MCDR_FG_LATENCY_*` = 本后端**架构上**该配哪个低延迟方案（`mcdr_fg_caps.latencyProvider`）。
+     * 它不代表运行时可用：Anti-Lag 2 在仓库里只有头、XeLL 的契约没接。真正的"能不能用"看
+     * `available` 与 `note`，别拿这个值当可用性判断。
+     */
+    const val FG_LATENCY_NONE: Int = 0
+    const val FG_LATENCY_REFLEX: Int = 1
+    const val FG_LATENCY_ANTILAG2: Int = 2
+    const val FG_LATENCY_XELL: Int = 3
     /** P271：`MCDR_SR_BACKEND_*`。与 `mcdr_abi.h` 的同名宏逐值对应。 */
     const val SR_BACKEND_NONE: Int = 0
     const val SR_BACKEND_DLSS: Int = 1
@@ -1235,6 +1274,214 @@ import java.util.concurrent.atomic.AtomicInteger
             handle.invokeExact()
         } catch (t: Throwable) {
             System.err.println("[backend-java] dx12SrDestroy failed: $t")
+        }
+    }
+
+    /**
+     * P293：记录期望的帧生成后端（`mcdr_dx12FgPick`）。纯记录，不建不销毁。
+     *
+     * <p>与 [D3D12SrPick] 的分工：SR 的后端决定"谁来把低分辨率升上来"，FG 的后端决定
+     * "谁来补中间帧"。两者可以不是同一家（例如 SR=DLSS + FG=DLSS-G 是合法组合，SR=FSR +
+     * FG=DLSS-G 非法），合法性由 native 的 `fgFillCaps` + 门面共同判定。
+     *
+     * @param backend `0` = 无 / `1` = DLSS-G / `2` = FSR-FG / `3` = XeSS-FG。
+     * @return 1 = 已记录，0 = 未知编号，[Int.MIN_VALUE] = 本地 DLL 没有该导出。
+     */
+    fun D3D12FgPick(backend: Int): Int {
+        if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_fgpick ?: return Int.MIN_VALUE
+        return try {
+            handle.invokeExact(backend) as Int
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12FgPick failed: $t")
+            Int.MIN_VALUE
+        }
+    }
+
+    /**
+     * P293：查询帧生成后端的能力面（`mcdr_dx12FgQueryCaps`），结果写进 [out]
+     * （按 [MCDRLayout.FG_CAPS] 布局，80 字节，调用方用 `Arena.ofConfined()` 分配）。
+     *
+     * <p>**唯一结论位是 `available`**，其余布尔位（`runtimeLoaded` / `deviceSupported` /
+     * `chainCompatible` / `needsReflex` / …）是给 UI 与日志解释"为什么不可用"用的，
+     * 不要拿它们自己拼结论。
+     *
+     * @return 1 = 已填，-1 = 参数非法，[Int.MIN_VALUE] = 本地 DLL 没有该导出。
+     */
+    fun D3D12FgQueryCaps(backend: Int, out: MemorySegment): Int {
+        if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_fgquerycaps ?: return Int.MIN_VALUE
+        return try {
+            handle.invokeExact(backend, out) as Int
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12FgQueryCaps failed: $t")
+            Int.MIN_VALUE
+        }
+    }
+
+    /**
+     * P293：设期望值（`mcdr_dx12FgSetMode`），`desc` 按 [MCDRLayout.FG_DISPATCH] 布局填。
+     *
+     * <p>**只记录，不立即下发**：真正的 `slDLSSGSetOptions` 在渲染线程的下一次 present 前
+     * 生效（Streamline 官方文档 §6 明确说跨线程调用"不能确定哪一次 Present 会拿到新值"），
+     * 所以这条可以在任意线程调。`mode` 与老的 [D3D12SetDlssgMode] 完全同义：
+     * 0 = 关、1 = 固定倍率（看 `numFrames`）、2 = dynamic（provider 自己算，P225/P226）。
+     *
+     * @return 1 = 已记录，0 = 后端不可用（原因见 [D3D12FgStatus]），-1 = 参数非法，
+     *     [Int.MIN_VALUE] = 本地 DLL 没有该导出。
+     */
+    fun D3D12FgSetMode(desc: MemorySegment): Int {
+        if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_fgsetmode ?: return Int.MIN_VALUE
+        return try {
+            handle.invokeExact(desc) as Int
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12FgSetMode failed: $t")
+            Int.MIN_VALUE
+        }
+    }
+
+    /**
+     * P293：上一次 Present **真正提交**的帧数（`mcdr_dx12FgPresented`；1 = 没插帧）。
+     *
+     * <p>与 [D3D12DlssgPresentedFrames] 同义、同源。F3 的 "output" 计数用它累积
+     * （P213c / P238：关掉 FG 时必须回 1，否则 FPS 行会一直显示 `(FG 2.0x)`）。
+     *
+     * @return 帧数，[Int.MIN_VALUE] = 本地 DLL 没有该导出。
+     */
+    fun D3D12FgPresented(): Int {
+        if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_fgpresented ?: return Int.MIN_VALUE
+        return try {
+            handle.invokeExact() as Int
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12FgPresented failed: $t")
+            Int.MIN_VALUE
+        }
+    }
+
+    /**
+     * P293：一行帧生成状态文本（`mcdr_dx12FgStatus`）：期望/生效后端、可用性、呈现链归属、
+     * 最近一次失败原因。与 [D3D12SrQuery] 同风格。
+     *
+     * @param note 输出缓冲（UTF-8，NUL 结尾）。
+     * @param cap 缓冲字节数。
+     * @return 1 = 已写，0 = 没有内容，-1 = 参数非法，[Int.MIN_VALUE] = 本地 DLL 没有该导出。
+     */
+    fun D3D12FgStatus(note: MemorySegment, cap: Int): Int {
+        if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_fgstatus ?: return Int.MIN_VALUE
+        return try {
+            handle.invokeExact(note, cap) as Int
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12FgStatus failed: $t")
+            Int.MIN_VALUE
+        }
+    }
+
+    /**
+     * P300：帧生成状态的打包整数（`mcdr_dx12FgState`）。位布局是 native 的契约（见
+     * `include\mcdr_abi.h` 的声明注释）：
+     *
+     * <ul>
+     *   <li>`[0..7]` desiredMode —— native 侧的**期望**值（回滚会把它清成 0）</li>
+     *   <li>`[8..15]` chainMode —— 链是在哪个 mode 下建成的</li>
+     *   <li>`[16..23]` active —— 1 = 现在有一个活着的后端</li>
+     *   <li>`[24..31]` rebuilds —— min(重建次数, 255)</li>
+     * </ul>
+     *
+     * <p>为什么要读它而不是读 `options.txt`：P300 的回滚会在 native 侧把期望值清成 0（例如 SR
+     * 后端从 DLSS 换成 FSR/XeSS 之后 DLSS-G 拿不到合法输入），而 `options.txt` 仍然写着「开」——
+     * 只看配置的界面会说假话。
+     *
+     * @return 打包值；[Int.MIN_VALUE] = 本地 DLL 没有该导出（老 DLL）。
+     */
+    fun D3D12FgState(): Int {
+        if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_fgstate ?: return Int.MIN_VALUE
+        return try {
+            handle.invokeExact() as Int
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12FgState failed: $t")
+            Int.MIN_VALUE
+        }
+    }
+
+    /**
+     * P300：`mcdr_fg_caps` 的 Kotlin 镜像。字段与 native 的 typedef 一一对应，读法见 [queryFgCaps]。
+     *
+     * <p>`note` 是 native 给的一句短原因（英文、27 字节以内），UI 上直接摊给用户看 —— 故意不翻译：
+     * 它和设备/运行库的实际情况绑定，翻译反而容易和日志对不上。
+     */
+    data class FgCaps(
+        val backend: Int,
+        val available: Boolean,
+        val runtimeLoaded: Boolean,
+        val deviceSupported: Boolean,
+        val chainCompatible: Boolean,
+        val needsReflex: Boolean,
+        val needsUiResource: Boolean,
+        val needsHudless: Boolean,
+        val transitionsInputs: Boolean,
+        val maxGeneratedFrames: Int,
+        val chainOwner: Int,
+        /** `MCDR_FG_LATENCY_*`：架构上该配哪个低延迟方案，**不是**运行时可用性。 */
+        val latencyProvider: Int,
+        val note: String
+    )
+
+    /**
+     * P300：查询某后端在本机的能力面（`mcdr_dx12FgQueryCaps`）。
+     *
+     * <p>与 [querySrCaps] 同构：`null` 表示"查不到"（没有导出 / 参数非法 / 调用失败），调用方按
+     * 「该后端不可用」处理即可 —— 不区分这几种，因为它们对调用方的含义相同。
+     *
+     * <p>和 SR 的区别：FG 的 `available` **不做** LoadLibrary 试探，它读的是 native 已经加载过的
+     * 运行库状态，所以可以在每帧路径上调（实际只在设置页打开与 `push()` 时调）。
+     */
+    fun queryFgCaps(backend: Int): FgCaps? {
+        if (LOAD_FAILURE != null) {
+            return null
+        }
+        val handle = MH_fgquerycaps ?: return null
+        return try {
+            Arena.ofConfined().use { arena ->
+                val seg = arena.allocate(MCDRLayout.FG_CAPS)
+                val rc = handle.invokeExact(backend, seg) as Int
+                if (rc != 1) {
+                    return null
+                }
+                FgCaps(
+                    backend = seg.get(MCDRLayout.I32, MCDRLayout.FG_CAPS_BACKEND),
+                    available = seg.get(MCDRLayout.I32, MCDRLayout.FG_CAPS_AVAILABLE) != 0,
+                    runtimeLoaded = seg.get(MCDRLayout.I32, MCDRLayout.FG_CAPS_RUNTIME_LOADED) != 0,
+                    deviceSupported = seg.get(MCDRLayout.I32, MCDRLayout.FG_CAPS_DEVICE_SUPPORTED) != 0,
+                    chainCompatible = seg.get(MCDRLayout.I32, MCDRLayout.FG_CAPS_CHAIN_COMPATIBLE) != 0,
+                    needsReflex = seg.get(MCDRLayout.I32, MCDRLayout.FG_CAPS_NEEDS_REFLEX) != 0,
+                    needsUiResource = seg.get(MCDRLayout.I32, MCDRLayout.FG_CAPS_NEEDS_UI_RESOURCE) != 0,
+                    needsHudless = seg.get(MCDRLayout.I32, MCDRLayout.FG_CAPS_NEEDS_HUDLESS) != 0,
+                    transitionsInputs = seg.get(MCDRLayout.I32, MCDRLayout.FG_CAPS_TRANSITIONS_INPUTS) != 0,
+                    maxGeneratedFrames = seg.get(MCDRLayout.I32, MCDRLayout.FG_CAPS_MAX_GENERATED_FRAMES),
+                    chainOwner = seg.get(MCDRLayout.I32, MCDRLayout.FG_CAPS_CHAIN_OWNER),
+                    latencyProvider = seg.get(MCDRLayout.I32, MCDRLayout.FG_CAPS_LATENCY_PROVIDER),
+                    note = seg.getString(MCDRLayout.FG_CAPS_NOTE, Charsets.UTF_8)
+                )
+            }
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12FgQueryCaps failed: $t")
+            null
         }
     }
 
@@ -2274,6 +2521,53 @@ import java.util.concurrent.atomic.AtomicInteger
     fun D3D12ReadbackTexturePixels(texHandle: Long): IntArray? {
         return readback36(MH_readbacktexturepixels, texHandle, "dx12ReadbackTexturePixels")
     }
+    /**
+     * P291e：**状态正确**的读回。
+     *
+     * <p>不带状态的 [D3D12ReadbackTexturePixels] 假设纹理当前在 `COMMON`。这只对"建完就没被 GPU
+     * 写过"的纹理成立；被 DLSS 写过的输出纹理在帧末停在 `COPY_SOURCE`（帧生成关）或
+     * `UNORDERED_ACCESS`（帧生成开），按 `COMMON` 转过去是状态不匹配的非法 barrier，读回来的
+     * 内容未定义 —— 实测恒为 0，于是黑帧判据是在拿垃圾做决定。
+     *
+     * <p>`fromState` 必须来自 native（[D3D12DlssOutputState]），**不要猜**。读回结束纹理恢复成
+     * `fromState`，所以对 native 的状态跟踪没有净影响。
+     *
+     * @param fromState 这张纹理当前真实所处的 `D3D12_RESOURCE_STATES` 数值。
+     * @return int[36]（9 像素 × RGBA），失败时 null。
+     */
+    fun D3D12ReadbackTexturePixelsIn(texHandle: Long, fromState: Int): IntArray? {
+        requireLoaded()
+        val handle = MH_readbacktexturepixelsin ?: return null
+        val count = 36
+        val buf = scratch(0, count * 4L)
+        try {
+            val rc = handle.invokeExact(ptr(texHandle), fromState, buf) as Int
+            if (rc == 0) {
+                return null
+            }
+            val out = IntArray(count)
+            for (i in 0 until count) {
+                out[i] = buf.get(MCDRLayout.I32, i * 4L) as Int
+            }
+            return out
+        } catch (t: Throwable) {
+            throw unexpected(t)
+        }
+    }
+    /**
+     * P291e：DLSS 输出纹理上一帧结束时停在哪个 `D3D12_RESOURCE_STATES` 数值。
+     *
+     * <p>0（`COMMON`）= 这一帧没有 handover 输出纹理，或本机没有 DLSS —— 调用方不要据此采样。
+     */
+    fun D3D12DlssOutputState(): Int {
+        requireLoaded()
+        val handle = MH_dlssoutputstate ?: return 0
+        return try {
+            handle.invokeExact() as Int
+        } catch (t: Throwable) {
+            0
+        }
+    }
     private fun readback36(handle: MethodHandle?, obj: Long, what: String): IntArray? {
         requireLoaded()
         val count = 36
@@ -3014,6 +3308,20 @@ import java.util.concurrent.atomic.AtomicInteger
                 fd(MCDRLayout.I32, MCDRLayout.I32, MCDRLayout.I32, MCDRLayout.I32),
             )
         MH_srquery = skipOptional("mcdr_dx12SrQuery", fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.I32))
+        // P293（ABI v4）：帧生成抽象层的 5 个入口。这批导出与上面 SR 那批的区别只有一点：
+        // **它们是 ABI v4 的契约**，`mcdrABIVersion()` 不匹配时 `MCDR_ABI_VERSION` 那条检查会先抛出来，
+        // 所以这里仍用 skipOptional 只是为了让"JVM 侧新、DLL 旧"的半升级状态退化成"FG 面板说明不可用"
+        // 而不是启动失败。FG 关闭时这些函数不会被调用（`FrameGeneration.isEnabled()` 门控），
+        // 于是老 DLL + 老配置的行为与升级前完全一致。
+        MH_fgpick = skipOptional("mcdr_dx12FgPick", fd(MCDRLayout.I32, MCDRLayout.I32))
+        MH_fgquerycaps = skipOptional(
+            "mcdr_dx12FgQueryCaps",
+            fd(MCDRLayout.I32, MCDRLayout.I32, MCDRLayout.PTR)
+        )
+        MH_fgsetmode = skipOptional("mcdr_dx12FgSetMode", fd(MCDRLayout.I32, MCDRLayout.PTR))
+        MH_fgpresented = skipOptional("mcdr_dx12FgPresented", fd(MCDRLayout.I32))
+        MH_fgstatus = skipOptional("mcdr_dx12FgStatus", fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.I32))
+        MH_fgstate = skipOptional("mcdr_dx12FgState", fd(MCDRLayout.I32))
         // P108b：DLSS 自己的开关（可选导出）。它把 DLSS 与抗锯齿模式解耦，于是 native 侧可以同时
         // "先对低分辨率世界层做 SMAA、再让 DLSS 升采样"。旧 DLL 没有这个导出 ⇒ 调用返回 MIN_VALUE，
         // 由 JVM 侧的临时桥退回 `aaMode == 4`（见 dev.nts.expdxr.dxrmc.sr.dlss.DeepLearningSuperSampling）。
@@ -3386,6 +3694,14 @@ import java.util.concurrent.atomic.AtomicInteger
             MCDRLayout.PTR,
             MCDRLayout.PTR
         ))
+        // P291e：纯追加导出，走 skipOptional —— 老 DLL 没有它们时黑帧采样自动退回旧路径。
+        MH_readbacktexturepixelsin = skipOptional("mcdr_dx12ReadbackTexturePixelsIn", fd(
+            MCDRLayout.I32,
+            MCDRLayout.PTR,
+            MCDRLayout.I32,
+            MCDRLayout.PTR
+        ))
+        MH_dlssoutputstate = skipOptional("mcdr_dx12DlssOutputState", fd(MCDRLayout.I32))
         MH_destroysurface = skip("mcdr_dx12DestroySurface", fdv(MCDRLayout.PTR))
         MH_setpipeline = skip("mcdr_dx12SetPipeline", fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.PTR, MCDRLayout.I32))
         MH_setscissor = skip("mcdr_dx12SetScissor", fd(

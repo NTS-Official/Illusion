@@ -124,8 +124,23 @@ object DeepLearningSuperSampling {
     private const val PREFIX: String = "P108:"
 
     /**
-     * `mvScaleX/Y = 1.0`：`D3D12Velocity` 写出的已经是 `(uv - prevUv) * ScreenSize` 的**像素**
-     * 位移（`MCDR\include\mcdr_abi.h:374`）。
+     * `mcdr_dlss_input.mvScaleX/Y = 1.0`（**2026-10-27 复核后维持原值**，P303）。
+     *
+     * 这个字段只被 **NGX 直连路径**消费（`MCDR\src\advanced\d3d12_dlss.cpp:3139-3140`
+     * 的 `ep.InMVScaleX = in->mvScaleX;`）。NGX 的语义是「把 MV 换算到像素空间所需的缩放」，
+     * 所以像素空间的 MV 就该填 `1.0`（`MCDR\external\dlss\include\nvsdk_ngx_helpers_d3d.h:44`
+     * 原文 `float InMVScaleX; /* If MVs need custom scaling to convert to pixel space */`）。
+     *
+     * **不要把它和 Streamline 的 `mvecScale` 混为一谈**：`D3D12Velocity` 写出的 MV 是渲染像素
+     * 位移（`Illusion\src\main\kotlin\dev\nts\expdxr\d3d12\render\advanced\taa\D3D12Velocity.kt:854`
+     * 的 `(prevUv - uv) * ScreenSize`），Streamline 要求**归一化**，所以 `pushDlssConstants()`
+     * 往 `sl::Constants.mvecScale` 填的是 `1.0 / renderWidth` 与 `1.0 / renderHeight`
+     * （`MCDR\external\streamline\docs\ProgrammingGuideDLSS.md:213-215`），native 在
+     * `MCDR\src\advanced\d3d12_dlss.cpp:2620` 用它。两个参数、两套约定，各自都是对的：
+     * 这里填比例 = 1.0，那里填尺寸的倒数。
+     *
+     * FSR 的约定与 NGX 相同（像素空间填 `1.0`，`ffx_framegeneration.h:137`），所以
+     * `SuperResolution.kt` 的 `MOTION_VECTOR_SCALE` 也是 1.0，不必跟着 Streamline 改。
      */
     private const val MV_SCALE: Float = 1.0f
 
@@ -137,6 +152,23 @@ object DeepLearningSuperSampling {
      * （见 [countEvaluateFailure] / [onEvaluated]），所以这个阈值只影响日志，不影响画面。
      */
     private const val EVALUATE_FAILURE_WARN_THRESHOLD: Int = 30
+
+    /**
+     * P291e 修正：黑帧熔断的**暖机期**（已成功评价的帧数）。
+     *
+     * 为什么必须有：会话里第一次 `evaluate` 返回 1 时，NGX 往往还没真正写进输出纹理
+     * （P108 那行的 `text=DLSS not initialised yet`），于是第一次采样读到的必然是 0 ——
+     * 旧实现只采一次、采到就永久熔断，结果是**每个会话都退化成线性 blit、DLSS 一帧都没生效**，
+     * 用户看到的就是"画面抖、时域消解没起作用"（2026-10-27 实测：4 个会话全是这个形态）。
+     * 30 帧 ≈ 0.5 s，用户感觉不到，但足够让 NGX 落地第一张图。
+     */
+    private const val SAMPLE_WARMUP_FRAMES: Int = 60
+
+    /** 判定黑/恢复都要**连续两次**采样（相隔这些帧），避免单帧的偶发（贴图切换、加载屏）误判。 */
+    private const val SAMPLE_CONFIRM_FRAMES: Int = 60
+
+    /** 熔断/健康状态下的复查间隔：熔断之后仍然定期看，能自愈（换世界、加载完、NGX 迟到）。 */
+    private const val SAMPLE_RETRY_FRAMES: Int = 240
 
     /** 只有 [EXPOSURE_MODE_NONE] 时 native 才读它（`mcdr_abi.h:382`）。 */
     private const val EXPOSURE_SCALE: Float = 1.0f
@@ -237,8 +269,28 @@ object DeepLearningSuperSampling {
     // 打开的命令列表）读回 pInOutput 的 36 个采样点，打一行均值。默认日志级别是 ERROR，所以
     // 真的全黑时同时用 error 报一次 —— 这就是用户报"黑屏但日志什么都没有"的那一行。
     private var pendingOutputSample = false
-    private var outputSampleDone = false
     private var sampleTarget: D3D12GpuTexture? = null
+    /**
+     * P291e：采样调度那一刻，native 报告的"DLSS 输出纹理停在哪个状态"
+     * （`D3D12_RESOURCE_STATES` 数值，见 [MCDR_ABI.D3D12DlssOutputState]）。0 = 未知/不适用，
+     * 读回退回不带状态的旧导出。
+     */
+    private var sampleFromState = 0
+
+    /** 已经成功评价过的帧数（P291e 的采样节奏以它为准，不看墙钟）。 */
+    private var evaluatedFrames = 0
+
+    /** 下一次允许采样的 `evaluatedFrames` 值。`Int.MAX_VALUE` = 不再采样（已经健康）。 */
+    private var nextSampleAt = SAMPLE_WARMUP_FRAMES
+
+    /** 连续"全黑"的采样次数；连续两次才认定真的黑（见 [SAMPLE_CONFIRM_FRAMES]）。 */
+    private var blackSamples = 0
+
+    /** 熔断之后连续"有内容"的采样次数；连续两次就恢复 DLSS。 */
+    private var goodSamples = 0
+
+    /** 本次采样周期是否已经报过那行 INFO 证据（见 [reportOutputSample]）。 */
+    private var firstSampleReported = false
 
     private var lastState: String? = null
 
@@ -418,8 +470,7 @@ object DeepLearningSuperSampling {
      */
     private fun pushQuality(value: Int) {
         // 换挡位 = 让 NGX 重建 feature：给黑帧熔断一次重新判定的机会（P291e）。
-        defuseBlackOutput = false
-        outputSampleDone = false
+        resetOutputSampleSchedule()
         val status = MCDR_ABI.D3D12SetDlssQuality(value)
         when {
             status == value -> Illusion.LOGGER.info(
@@ -1440,10 +1491,11 @@ object DeepLearningSuperSampling {
                     window.width, window.height, jitter[0].toFloat(), jitter[1].toFloat(), resetReason)
                 // P121：升采样之后的后置锐化（SDK 自带 sharpness 已废弃）。
                 sharpenUpscaledFrame(encoder, output, targetWidth, targetHeight)
-                if (!outputSampleDone && output != null) {
-                    sampleTarget = output
-                    pendingOutputSample = true
-                }
+                // P291e **2026-10-27 停用**：黑帧采样整条路径撤下来了，原因写在
+                // [reportOutputSample] 的注释里（一句话：我们没法安全地给一张"由 native 写、
+                // 状态由 JVM 的锐化/合成继续改"的纹理发 barrier，读回来的是未定义内容，
+                // 按它熔断等于拿噪声决定要不要关闭 DLSS）。判"DLSS 有没有在干活"改用
+                // native 的 evaluate 返回值 + `[FG]`/`P108` 行，见 known_bugs.md P301。
             }
             // 0 = native 自己跳过（模式/尺寸/特征未就绪），它已经打过自己的 WARN；这里只在状态
             // 变化时报一行，绝不每帧刷屏。
@@ -1584,57 +1636,52 @@ object DeepLearningSuperSampling {
      * （而不是以为它在跑）。成功一帧即清零（见 [onEvaluated]）。
      */
     /**
-     * P291e：读回升采样输出的 36 个采样点，报一行均值。
+     * P291e：采样节奏与熔断状态一起复位。换挡位、重进世界、退出 DLSS 都走这里，
+     * 保证"一次误判"不会跟着用户一整局（2026-10-27 的教训：旧实现只采一次）。
+     */
+    private fun resetOutputSampleSchedule() {
+        defuseBlackOutput = false
+        pendingOutputSample = false
+        sampleTarget = null
+        sampleFromState = 0
+        evaluatedFrames = 0
+        blackSamples = 0
+        goodSamples = 0
+        firstSampleReported = false
+        nextSampleAt = SAMPLE_WARMUP_FRAMES
+    }
+
+    /**
+     * P291e：**已停用（2026-10-27）**。这里原来读回 36 个采样点、均值 <= 2 就熔断 DLSS。
      *
      * 为什么要它：用户报的是"世界全黑、GUI 正常"，而黑屏有两种完全不同的成因 —— 输出纹理真的全黑
-     * （SDK 没写进去 / 写进了我们没拿到的纹理），或者输出有内容但没被合成进 GUI 目标。这一行把它
-     * 们区分开，也顺手证明"这一帧确实评价过"。
+     * （SDK 没写进去 / 写进了我们没拿到的纹理），或者输出有内容但没被合成进 GUI 目标。这一行本该
+     * 把它们区分开，也顺手证明"这一帧确实评价过"。
+     *
+     * 为什么停用：见函数体内的长注释 —— 判据本身读的是未定义内容（barrier 的 StateBefore 说错），
+     * 实测恒为 0，于是每个会话都被误判成黑帧、把 DLSS 永久退回线性 blit；改成"已知起始状态"的读回
+     * 又会因为状态过期把设备送进 DXGI_ERROR_DEVICE_REMOVED。恢复它的前提是先有一套自己的纹理状态
+     * 跟踪，那是独立议题（known_bugs.md 的 P301）。
      */
     private fun reportOutputSample() {
-        val target = sampleTarget ?: return
-        sampleTarget = null
-        val pixels = try {
-            MCDR_ABI.D3D12ReadbackTexturePixels(target.handle())
-        } catch (t: Throwable) {
-            IllusionLogger.debugMessage("[P291e] readback threw: " + t.toString())
-            return
-        }
-        if (pixels == null || pixels.isEmpty()) {
-            return
-        }
-        // 关键：`mcdr_dx12ReadbackTexturePixels` 返回的是 3x3 采样网格 × RGBA 四个分量
-        // （native `readbackSamples36`，共 36 个 int，每个元素是**一个通道**的值，不是打包的
-        // 32 位像素）。必须按 4 个一组解码 —— 早先把一个 int 当成打包 RGBA（`shr 16`）解出来
-        // 的永远是 0，于是"每会话第一帧都是全黑"，熔断把 DLSS 永久退回线性 blit。
-        val samples = pixels.size / 4
-        var sum = 0.0
-        var dark = 0
-        for (i in 0 until samples) {
-            val r = pixels[i * 4]
-            val g = pixels[i * 4 + 1]
-            val b = pixels[i * 4 + 2]
-            val luma = (r * 299 + g * 587 + b * 114) / 1000
-            sum += luma
-            if (luma <= 2) {
-                dark++
-            }
-        }
-        outputSampleDone = true
-        val mean = if (samples > 0) sum / samples else 0.0
-        val darkPercent = if (samples > 0) dark * 100.0 / samples else 100.0
-        if (mean <= 2.0) {
-            // 宁可糊，不要黑：一旦确认这张纹理是全黑的，本会话就不再让 prepareForGui 跳过世界层
-            // blit —— 世界层会被线性放大搬进 GUI 目标，画面差一点，但不会整块黑。
-            defuseBlackOutput = true
-            Illusion.LOGGER.error(
-                "[dxrmc] P291e: the upscaled image is BLACK (mean={} of {} sampled pixels) — "
-                    + "falling back to the linear blit for the rest of this session so the world "
-                    + "stays visible. The evaluate path claims success, so either the SDK wrote "
-                    + "into a texture we never hand to the compositor, or the hand-over texture "
-                    + "was rejected; set [logging] logLevel = INFO to see the P108/P291d lines.",
-                String.format(Locale.ROOT, "%.1f", mean),
-                samples)
-        }
+        // P291e **2026-10-27 停用**（用户 m01721："画面存在抖动，时域消解没有起作用"）。
+        //
+        // 这条熔断的判据是"把 DLSS 的输出纹理读回 9 个像素、均值 <= 2 就认定全黑"，但那个读回
+        // 一直不可信：`readbackSamples36` 把 barrier 的 StateBefore 写死成 COMMON，而 DLSS 的
+        // 输出纹理在帧末停在 COPY_SOURCE（FG 关）或 UNORDERED_ACCESS（FG 开），按 COMMON 转过
+        // 去是状态不匹配的非法 barrier —— 读回来的是未定义内容，实测恒为 0。于是**每个会话都会
+        // 被判成黑帧**，一旦熔断，本帧以后的 prepareForGui 就永远走世界层线性 blit：
+        // DLSS 一帧都没上屏，用户看到的就是抖动 + 时域失效。
+        //
+        // 加上"已知起始状态"的读回（`mcdr_dx12ReadbackTexturePixelsIn` + `mcdr_dx12DlssOutputState`）
+        // 之后仍然不安全：这张纹理由 native 写入、之后又被本类的锐化/合成改状态，JVM 手里的状态
+        // 立刻过期，按过期状态发 barrier 会把设备送进 DXGI_ERROR_DEVICE_REMOVED（2026-10-27 两次
+        // 冒烟复现）。所以整条路径撤掉，不再用读回决定要不要关闭 DLSS。
+        //
+        // 现在判"DLSS 到底有没有在干活"靠：native evaluate 的返回值（1 = 真的评价了）、
+        // `[FG]`/`P108` 行、以及 `P291e` 之外的那几条 INFO。要恢复一个可信的黑帧判据，前提是先
+        // 有一套**我们自己的**纹理状态跟踪（唯一能把 StateBefore 说对的办法），那是独立议题。
+        return
     }
 
     private fun countEvaluateFailure() {
@@ -1687,9 +1734,9 @@ object DeepLearningSuperSampling {
                     + "for both; native only writes them into its own P108 diagnostic line")
             Illusion.LOGGER.info(
                 "[dxrmc] $PREFIX DLSS inputs fed - render {}x{} -> target {}x{} jitter=({}, {}) "
-                    + "mvScale=1.0 near={} far={} depthInverted=1 ngx={}",
+                    + "mvScale={} near={} far={} depthInverted=1 ngx={}",
                 renderWidth, renderHeight, targetWidth, targetHeight, jitterX, jitterY,
-                NEAR_Z, FAR_Z, ngxSummary)
+                MV_SCALE, NEAR_Z, FAR_Z, ngxSummary)
         }
         commitState(level, renderWidth, renderHeight, targetWidth, targetHeight, scalePercent,
             windowWidth, windowHeight)
@@ -1867,6 +1914,9 @@ object DeepLearningSuperSampling {
             }
             seg.set(F32, layout.byteOffset(PathElement.groupElement("jitterOffsetX")), slJitterX)
             seg.set(F32, layout.byteOffset(PathElement.groupElement("jitterOffsetY")), slJitterY)
+            // P303：Streamline 的 `mvecScale` 要的是**归一化比例**（像素空间 MV → `1/renderWidth`），
+            // 与输入包里的 `mvScaleX`（NGX 语义，像素空间填 1.0）是两个不同参数，
+            // 依据 `MCDR\external\streamline\docs\ProgrammingGuideDLSS.md:213-215`。
             seg.set(F32, layout.byteOffset(PathElement.groupElement("mvecScaleX")),
                 1.0f / renderWidth.toFloat())
             seg.set(F32, layout.byteOffset(PathElement.groupElement("mvecScaleY")),
@@ -2050,8 +2100,7 @@ object DeepLearningSuperSampling {
         evaluatedOnce = false
         // P291e：熔断与"已采样"都是**会话级**状态 —— 退出 DLSS（换后端 / 关掉 / 换世界后重建）时
         // 必须复位，否则一次采样到的黑帧会让之后每一次进世界都退化成线性放大。
-        defuseBlackOutput = false
-        outputSampleDone = false
+        resetOutputSampleSchedule()
         lastRenderWidth = -1
         lastRenderHeight = -1
         lastTargetWidth = -1

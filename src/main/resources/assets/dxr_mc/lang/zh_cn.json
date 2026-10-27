@@ -156,6 +156,10 @@
   "dxr_mc.video.sr.framegen_absent": "帧生成：这个后端尚未接入（v1 只有 DLSS-G）。",
   "dxr_mc.video.sr.noabi": "%s：native 库没有超分入口（ABI 版本过旧）",
   "dxr_mc.video.sr.unavailable": "%s 不可用 —— %s",
+  "dxr_mc.video.fg.available": "帧生成已就绪（%s）",
+  "dxr_mc.video.fg.unavailable": "帧生成不可用 —— %s",
+  "dxr_mc.video.fg.noabi": "帧生成：native 库没有帧生成入口（ABI 版本过旧）",
+  "dxr_mc.video.fg.rolled_back": "帧生成已被自动关闭（原因：%s）。解决原因后再手动打开。",
   "dxr_mc.video.tab.display": "显示",
   "dxr_mc.video.tab.illusion": "Illusion 设置",
   "dxr_mc.video.tab.preferences": "偏好设置",
@@ -232,5 +236,6 @@
   "options.sr.xess.tooltip": "Intel XeSS：与 FSR 同一个思路，由 Intel 的超分器重建。XeSS 每帧接收实际渲染分辨率，所以只要渲染比例低于 100%，任何值都能用。需要 libxess.dll 在 MCDR.dll 旁边，缺了置灰。\n\n与 FSR 互斥；帧生成会把 DLSS 留作超分器。",
   "options.video.illusion.header": "Illusion 设置",
   "dxr_mc.video.lock.sr_mask_unsupported": "只有 AMD FidelityFX 与 Intel XeSS 吃响应式遮罩",
+  "dxr_mc.video.lock.fg_unavailable": "这套组合下帧生成跑不起来 —— 原因见上面那行状态",
   "dxr_mc.video.sr.latency_absent": "低延迟：v1 只有 NVIDIA Reflex（DLSS）。"
 }

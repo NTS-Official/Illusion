@@ -2,7 +2,7 @@ package dev.nts.expdxr.misc.gui
 
 import dev.nts.expdxr.Illusion.Companion.MODID
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
-import dev.nts.expdxr.dxrmc.sr.dlss.DLSSFrameGeneration
+import dev.nts.expdxr.dxrmc.framegen.FrameGeneration
 import dev.nts.expdxr.SrBackend
 import dev.nts.expdxr.dxrmc.sr.SuperResolution
 import dev.nts.expdxr.misc.D3D12HdrPresentation
@@ -183,8 +183,20 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
                     Entry.Setting(DeepLearningSuperSampling.qualityOption()),
                     Entry.Setting(NvidiaReflex.option()),
                     // P213：帧生成只在 DLSS 启用时才有意义，这里的 listOfNotNull 会把它藏掉。
-                    if (DLSSFrameGeneration.isAvailable()) Entry.Setting(DLSSFrameGeneration.option()) else null,
-                    if (DLSSFrameGeneration.isAvailable()) Entry.Setting(DLSSFrameGeneration.framesOption()) else null,
+                    if (FrameGeneration.isAvailable()) Entry.Setting(FrameGeneration.option()) else null,
+                    if (FrameGeneration.isAvailable()) Entry.Setting(FrameGeneration.framesOption()) else null,
+                    // P300：状态行只说「为什么不能开 / 已就绪」；运行状态那行摊 native 的
+                    // `[fg] picked=… rebuilds=… tracks=…`，省得用户为了看它去翻日志。
+                    // 只在可用或已经开着时显示 —— 没有 DLSS 的机器上没必要挂一行"不可用"。
+                    if (FrameGeneration.isAvailable() || FrameGeneration.isEnabled()) {
+                        Entry.Note(FrameGeneration.statusLine(), !FrameGeneration.isAvailable())
+                    } else {
+                        null
+                    },
+                    if (FrameGeneration.isEnabled()) Entry.Note(FrameGeneration.runtimeLine()) else null,
+                    // P300：native 侧回滚了（例如开着帧生成把 SR 后端换成 FSR/XeSS），而行上还写着
+                    // 「开」—— 这种时候必须说出来，否则就是界面在说假话。返 null 时不占高度。
+                    FrameGeneration.rollbackLine()?.let { Entry.Note(it, warning = true) },
                     // 用户 m01923：SR 的两个非 NVIDIA 后端接在这两段里。开关共用门面里的
                     // 一个"当前后端"，点开一家另一家自动关（见 SuperResolution.requestBackend）。
                     // 每段的形状与上面 DLSS 段对齐：状态行 -> 开关 -> 质量档；下面再接三行
@@ -285,7 +297,7 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
         // P213 联动：帧生成生效时 Reflex 只允许 On(1) / On+Boost(2)，不许回到 Off(0)。
         val allowed: (() -> Set<Any>)? =
             if (option === NvidiaReflex.option()) {
-                { if (DLSSFrameGeneration.isEnabled()) setOf<Any>(1, 2) else setOf<Any>(0, 1, 2) }
+                { if (FrameGeneration.isEnabled()) setOf<Any>(1, 2) else setOf<Any>(0, 1, 2) }
             } else {
                 null
             }
@@ -324,7 +336,7 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
         }
         if (option === DeepLearningSuperSampling.option()) {
             // 帧生成的输入就是 DLSS 输出：关掉 DLSS 等于关掉帧生成。
-            if (DLSSFrameGeneration.isEnabled()) {
+            if (FrameGeneration.isEnabled()) {
                 return Component.translatable("dxr_mc.video.lock.dlss_framegen")
             }
             // DLAA 走的就是 DLSS 特性链路，开关与挡位由 DLAA 决定。
@@ -345,7 +357,7 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
         // 用户 m01923：两家非 NVIDIA 后端共用一个"当前后端"，所以另一家置灰；
         // 帧生成插值的是 DLSS 输出，开着它的时候也不能把超分器换成别人。
         if (option === SuperResolution.fsrOption() || option === SuperResolution.xessOption()) {
-            if (DLSSFrameGeneration.isEnabled()) {
+            if (FrameGeneration.isEnabled()) {
                 return Component.translatable("dxr_mc.video.lock.sr_framegen")
             }
             val other = if (option === SuperResolution.fsrOption()) SuperResolution.xessOption() else SuperResolution.fsrOption()
@@ -358,7 +370,7 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
         val fsrQuality = option === SuperResolution.fsrQualityOption()
         val xessQuality = option === SuperResolution.xessQualityOption()
         if (fsrQuality || xessQuality) {
-            if (DLSSFrameGeneration.isEnabled()) {
+            if (FrameGeneration.isEnabled()) {
                 return Component.translatable("dxr_mc.video.lock.sr_framegen")
             }
             val wanted = if (fsrQuality) SrBackend.FSR else SrBackend.XESS
@@ -369,6 +381,12 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
         // 遮罩是"谁吃谁用"的：DLSS 走 NGX，没有遮罩输入，拨了不会有效果。
         if (option === SuperResolution.maskOption() && !SuperResolution.maskSupported()) {
             return Component.translatable("dxr_mc.video.lock.sr_mask_unsupported")
+        }
+        // 帧生成：这台机器/这个组合根本跑不起来时别让人拨过去（P300：能力表说了不行就照说）。
+        // 已经开着的时候**不能**锁 —— 回滚把期望值清成 0 之后，用户得能把开关关掉、免得下次又被
+        // 静默重试；而且 `isEnabled()` 为真时行上的值本来就该能改。
+        if ((option === FrameGeneration.option() || option === FrameGeneration.framesOption()) && !FrameGeneration.isEnabled() && !FrameGeneration.isAvailable()) {
+            return Component.translatable("dxr_mc.video.lock.fg_unavailable")
         }
         if (option === DeepLearningSuperSampling.qualityOption() && dlaa) {
             return Component.translatable("dxr_mc.video.lock.dlss_dlaa")
