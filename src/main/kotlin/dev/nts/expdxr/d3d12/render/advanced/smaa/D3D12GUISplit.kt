@@ -9,6 +9,7 @@ import dev.nts.expdxr.d3d12.render.adapter.D3D12Device
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12RenderScale
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12VariableShadingRate
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuTexture
+import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuTextureView
 import net.minecraft.client.Minecraft
 
@@ -96,6 +97,10 @@ object D3D12GUISplit {
      */
     @Volatile
     private var worldLayerDoneThisFrame = false
+
+    /** P305c：上一次交给 native 的 UI 纹理句柄（同一张只推一次）+「老 DLL 没有这条导出」只警告一次。 */
+    private var pushedUiHandle: Long = 0L
+    private var warnedNoUiTexture: Boolean = false
 
     /** P108：见 [worldLayerDoneThisFrame]。 */
     @JvmStatic
@@ -202,11 +207,13 @@ object D3D12GUISplit {
                 created.resize(width, height)
                 target = created
                 logGeometry(minecraft, created, "active")
+                pushUiTextureToFrameGen(created)
                 created
             } else {
                 if (existing.width != width || existing.height != height) {
                     existing.resize(width, height)
                     logGeometry(minecraft, existing, "resized")
+                    pushUiTextureToFrameGen(existing)
                 }
                 existing
             }
@@ -223,6 +230,38 @@ object D3D12GUISplit {
                 mc.gameRenderer.resize(mc.window.width, mc.window.height)
             }.onFailure { degrade("render scale rollback failed: $it") }
             null
+        }
+    }
+
+    /**
+     * P305c：把 GPT 合成目标的颜色纹理当「UI 纹理」交给帧生成后端（用户 2026-10-27 裁决）。
+     *
+     * 包装型后端（XeSS-FG / FSR-FG）要把无 HUD 的世界层与 UI 分开插值，否则准星与文字会被插帧
+     * 拉扯。我们的 GUI 合成进这张窗口尺寸的目标，所以直接把它交出去 —— **只在目标创建/重建时推
+     * 一次**，不是每帧。`Int.MIN_VALUE` = 本地 DLL 没有这条导出（ABI 版本过旧），只记一次。
+     */
+    private fun pushUiTextureToFrameGen(target: RenderTarget) {
+        val texture = (target.colorTextureView as? D3D12GpuTextureView)?.texture() as? D3D12GpuTexture ?: return
+        val handle = texture.handle()
+        if (handle == pushedUiHandle) {
+            return
+        }
+        val status = try {
+            MCDR_ABI.D3D12FgSetUiTexture(handle)
+        } catch (t: Throwable) {
+            Illusion.LOGGER.warn("[dxrmc] P305c: could not hand the GUI target to frame generation: {}", t.toString())
+            return
+        }
+        when (status) {
+            1 -> {
+                pushedUiHandle = handle
+                Illusion.LOGGER.info("[dxrmc] P305c: handed the GUI target ({}) to frame generation as the UI texture", handle)
+            }
+            Int.MIN_VALUE -> if (!warnedNoUiTexture) {
+                warnedNoUiTexture = true
+                Illusion.LOGGER.info("[dxrmc] P305c: this native library has no frame-generation UI texture entry point; UI tagging stays off")
+            }
+            else -> Illusion.LOGGER.warn("[dxrmc] P305c: frame generation rejected the GUI target as UI texture (status={})", status)
         }
     }
 
@@ -355,4 +394,3 @@ object D3D12GUISplit {
         return target?.colorTextureView ?: fallback
     }
 }
-

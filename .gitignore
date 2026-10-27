@@ -5,7 +5,6 @@ build/
 !**/src/**/build/
 
 ### IntelliJ IDEA ###
-.idea/
 *.iws
 *.iml
 *.ipr
@@ -39,3 +38,6 @@ run/
 repo/
 !**/src/**/repo/
 /.kotlin
+
+### Others ###
+assets/mojangles_ascii.png

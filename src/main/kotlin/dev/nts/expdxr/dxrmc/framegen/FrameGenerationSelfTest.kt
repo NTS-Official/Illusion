@@ -1,6 +1,7 @@
 package dev.nts.expdxr.dxrmc.framegen
 
 import dev.nts.expdxr.Illusion
+import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.dxrmc.sr.SuperResolution
 import net.minecraft.client.Minecraft
 import net.neoforged.neoforge.client.event.ClientTickEvent
@@ -16,7 +17,7 @@ import net.neoforged.neoforge.common.NeoForge
  * 而且走的是**和玩家操作完全相同**的路径（`OptionInstance.set` → 门面的 `push()` → ABI）。
  *
  * <p>规格：[PROPERTY] 是 `动作@tick` 的逗号分隔表，tick 从**进入世界**那一刻开始算（20 tick = 1 s）。
- * 动作：`fg-on` / `fg-off` / `sr-dlss` / `sr-fsr` / `sr-xess` / `sr-none`。
+ * 动作：`fg-on` / `fg-off` / `sr-dlss` / `sr-fsr` / `sr-xess` / `sr-none` / `probe-fg`（打印三家能力表）。
  * 例：`-Pdxrmc.selfTest=fg-on@20,fg-off@400` = 进世界 1 s 后开帧生成，20 s 后关掉。
  *
  * <p>没设这个属性时 [install] 只做一次 `System.getProperty` 就返回，不注册任何监听器。
@@ -30,6 +31,7 @@ object FrameGenerationSelfTest {
     }
 
     private var installed: Boolean = false
+    private var forcedFrameGenBackend: Int = MCDR_ABI.FG_BACKEND_NONE
 
     /** 解析后的计划；空表 = 没启用（或规格写错）。 */
     private var plan: List<Step> = emptyList()
@@ -113,19 +115,88 @@ object FrameGenerationSelfTest {
         Illusion.LOGGER.info("[dxrmc] {} self test: {} at tick {}", PREFIX, step.action, ticks)
         try {
             when (step.action) {
-                "fg-on" -> FrameGeneration.option().set(1)
+                "fg-on" -> {
+                FrameGeneration.option().set(1)
+                // P305ab：门面在包装型后端 available=0 时会把 mode 传成 0，`fgSetMode` 走"关闭"早退，
+                // 于是强制 picked 也永远到不了包装。钩子这里直接把「开」发下去，绕开可用性推断。
+                pushFrameGenModeDirectly(1)
+            }
                 "fg-off" -> FrameGeneration.option().set(0)
                 "sr-dlss" -> SuperResolution.onDlssToggle(true)
                 "sr-none" -> SuperResolution.onDlssToggle(false)
                 "sr-fsr" -> SuperResolution.fsrOption().set(true)
                 "sr-xess" -> SuperResolution.xessOption().set(true)
+                // P304：把三家的能力表各打一行。只有自动化跑测试才会用到 —— 界面按
+                // "第一个可用" 提前返回，所以 FSR-FG / XeSS-FG 的探测结果平时看不到，
+                // 而"这台机器缺哪个 DLL、为什么不可用"恰恰是要取证的东西。
+                "probe-fg" -> probeFrameGeneration()
+                // P305d：强制指定 picked 后端。**只有自动化跑测试才用**：界面永远挑"第一个可用"的
+                // 后端，所以没有这条就没法让 XeSS-FG / FSR-FG 的代码路径真的跑起来。
+                "fg-backend-xess" -> pickFrameGenBackend(MCDR_ABI.FG_BACKEND_XESSFG)
+                "fg-backend-fsr" -> pickFrameGenBackend(MCDR_ABI.FG_BACKEND_FSRFG)
+                "fg-backend-dlssg" -> pickFrameGenBackend(MCDR_ABI.FG_BACKEND_DLSSG)
             }
         } catch (t: Throwable) {
             Illusion.LOGGER.warn("[dxrmc] {} self test: {} failed: {}", PREFIX, step.action, t.toString())
         }
     }
 
+    private fun pickFrameGenBackend(backend: Int) {
+        forcedFrameGenBackend = backend
+        val status = MCDR_ABI.D3D12FgPick(backend)
+        Illusion.LOGGER.info("[dxrmc] {} self test: pick frame-generation backend {} -> status {}", PREFIX, backend, status)
+    }
+
+    private fun probeFrameGeneration() {
+        for ((name, backend) in listOf(
+            "dlssg" to MCDR_ABI.FG_BACKEND_DLSSG,
+            "fsr-fg" to MCDR_ABI.FG_BACKEND_FSRFG,
+            "xess-fg" to MCDR_ABI.FG_BACKEND_XESSFG,
+        )) {
+            val caps = MCDR_ABI.queryFgCaps(backend)
+            if (caps == null) {
+                Illusion.LOGGER.info("[dxrmc] {} probe {}: no ABI v4 entry points", PREFIX, name)
+                continue
+            }
+            Illusion.LOGGER.info(
+                "[dxrmc] {} probe {}: available={} runtime={} device={} chainCompat={} needsReflex={} " +
+                    "needsUi={} needsHudless={} transitions={} maxGen={} chain={} latency={} note={}",
+                PREFIX, name, caps.available, caps.runtimeLoaded, caps.deviceSupported, caps.chainCompatible,
+                caps.needsReflex, caps.needsUiResource, caps.needsHudless, caps.transitionsInputs,
+                caps.maxGeneratedFrames, caps.chainOwner, caps.latencyProvider, caps.note,
+            )
+        }
+    }
+
     private const val PREFIX: String = "frame-generation"
 
-    private val ACTIONS: Set<String> = setOf("fg-on", "fg-off", "sr-dlss", "sr-fsr", "sr-xess", "sr-none")
+    private val ACTIONS: Set<String> = setOf(
+        "fg-on", "fg-off", "sr-dlss", "sr-fsr", "sr-xess", "sr-none", "probe-fg",
+        "fg-backend-xess", "fg-backend-fsr", "fg-backend-dlssg")
+
+    /**
+     * P305ab：直接调 `mcdr_dx12FgSetMode`（不经过门面的可用性推断）。
+     *
+     * 只给自动化用：包装型后端（FSR-FG / XeSS-FG）在 `available=0` 时门面不会选它，`nativeMode()` 也会
+     * 得 0，`fgSetMode` 于是早退，强制的 picked 永远走不到包装。这里显式要求「开」，让 native 把 provider
+     * 建起来、把链重建挂上。
+     */
+    private fun pushFrameGenModeDirectly(mode: Int) {
+        val backend = forcedFrameGenBackend
+        if (backend == MCDR_ABI.FG_BACKEND_NONE) {
+            return
+        }
+        try {
+            java.lang.foreign.Arena.ofConfined().use { arena ->
+                val desc = arena.allocate(dev.nts.expdxr.d3d12.extern.MCDRLayout.FG_DISPATCH)
+                val i32 = java.lang.foreign.ValueLayout.JAVA_INT
+                desc.set(i32, dev.nts.expdxr.d3d12.extern.MCDRLayout.FG_DISPATCH_BACKEND, backend)
+                desc.set(i32, dev.nts.expdxr.d3d12.extern.MCDRLayout.FG_DISPATCH_MODE, mode)
+                desc.set(i32, dev.nts.expdxr.d3d12.extern.MCDRLayout.FG_DISPATCH_NUM_FRAMES, 1)
+                MCDR_ABI.D3D12FgSetMode(desc)
+            }
+        } catch (t: Throwable) {
+            Illusion.LOGGER.warn("[dxr_mc] self-test could not push frame generation mode directly: {}", t.message)
+        }
+    }
 }

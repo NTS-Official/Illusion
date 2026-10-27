@@ -1859,6 +1859,32 @@ object DeepLearningSuperSampling {
             prevCamPos?.get(0) ?: posX, prevCamPos?.get(1) ?: posY, prevCamPos?.get(2) ?: posZ)
         val viewProj = D3D12Temporal.multiply(proj, worldView)
         val prevViewProj = D3D12Temporal.multiply(prevProj, prevWorldView)
+        // P305z：FG 自己的帧常量（XeSS-FG 契约 = row-major 且不含 jitter）。
+        // `proj` 是未抖动的关卡投影（jitter 只在 `onLevelProjectionUpload` 的返回值里加），
+        // `view` 也不含 jitter，所以这里只需转置成行主序。
+        try {
+            java.lang.foreign.Arena.ofConfined().use { arena ->
+                val fc = arena.allocate(dev.nts.expdxr.d3d12.extern.MCDRLayout.FG_CONSTANTS)
+                val f32 = java.lang.foreign.ValueLayout.JAVA_FLOAT
+                val viewRow = fgRowMajor(worldView)
+                val projRow = fgRowMajor(proj)
+                for (n in 0 until 16) {
+                    fc.set(f32, dev.nts.expdxr.d3d12.extern.MCDRLayout.FG_CONSTANTS_VIEW + n * 4L, viewRow[n])
+                    fc.set(f32, dev.nts.expdxr.d3d12.extern.MCDRLayout.FG_CONSTANTS_PROJECTION + n * 4L, projRow[n])
+                }
+                fc.set(f32, dev.nts.expdxr.d3d12.extern.MCDRLayout.FG_CONSTANTS_JITTER_X, jitterX)
+                fc.set(f32, dev.nts.expdxr.d3d12.extern.MCDRLayout.FG_CONSTANTS_JITTER_Y, jitterY)
+                // MV 是渲染像素空间（见 D3D12Velocity），所以缩放是 1.0 —— 与 SR 侧同一约定。
+                fc.set(f32, dev.nts.expdxr.d3d12.extern.MCDRLayout.FG_CONSTANTS_MV_SCALE_X, 1.0f)
+                fc.set(f32, dev.nts.expdxr.d3d12.extern.MCDRLayout.FG_CONSTANTS_MV_SCALE_Y, 1.0f)
+                fc.set(java.lang.foreign.ValueLayout.JAVA_INT,
+                    dev.nts.expdxr.d3d12.extern.MCDRLayout.FG_CONSTANTS_RESET_HISTORY, if (reset) 1 else 0)
+                fc.set(f32, dev.nts.expdxr.d3d12.extern.MCDRLayout.FG_CONSTANTS_FRAME_RENDER_TIME, 0.0f)
+                MCDR_ABI.D3D12FgSetConstants(fc)
+            }
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] push frame generation constants failed: $t")
+        }
         // P118：`view` 是**列主序**的世界->相机旋转（相机在原点，见 `D3D12Velocity`）。
         // 相机在**世界空间**的 right/up/fwd 是这张矩阵的**行**：列主序下 (row r, col c) 在 r + c*4。
         // 旧代码按行主序取成了列（right=(view[0],view[1],view[2])），给 SL 的是一组被转置的基。
@@ -2280,4 +2306,15 @@ object DeepLearningSuperSampling {
         // P291c：这是用户唯一能看到的「超分坏了」信号，必须在默认 ERROR 级别下可见。
         Illusion.LOGGER.error("[dxrmc] $PREFIX DLSS input feeding is disabled for this session: {}", reason)
     }
+}
+
+/** P305z：列主序 → 行主序（XeSS-FG 的 frame constants 要求 row-major）。 */
+private fun fgRowMajor(src: FloatArray): FloatArray {
+    val out = FloatArray(16)
+    for (r in 0 until 4) {
+        for (c in 0 until 4) {
+            out[r * 4 + c] = src[c * 4 + r]
+        }
+    }
+    return out
 }

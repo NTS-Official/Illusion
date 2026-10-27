@@ -403,6 +403,32 @@ object MCDRLayout {
     // 所以 0..23 这段没有隐式填充；末尾 `int32_t _pad2[2]` 是**两个** int32（8 B），
     // 漏掉一个就会让 java 侧算出 92 而 C 侧是 96 —— 这里用 length=2 的序列显式表示。
     @JvmField
+    /**
+     *
+     * 布局：view[16]、projection[16]、jitterX、jitterY、mvScaleX、mvScaleY、resetHistory(int32)、
+     * frameRenderTime(float) = 152 字节 / align 4。ABI 里它排在 `mcdr_fg_dispatch` 之前。
+     */
+
+    /** P305z：FG 自己的帧常量（`mcdr_fg_constants`，152 B / align 4）。 */
+    val FG_CONSTANTS: MemoryLayout = MemoryLayout.structLayout(
+        MemoryLayout.sequenceLayout(16L, F32).withName("view"),
+        MemoryLayout.sequenceLayout(16L, F32).withName("projection"),
+        F32.withName("jitterX"),
+        F32.withName("jitterY"),
+        F32.withName("mvScaleX"),
+        F32.withName("mvScaleY"),
+        I32.withName("resetHistory"),
+        F32.withName("frameRenderTime"),
+    ).withName("mcdr_fg_constants")
+
+    const val FG_CONSTANTS_VIEW: Long = 0L
+    const val FG_CONSTANTS_PROJECTION: Long = 64L
+    const val FG_CONSTANTS_JITTER_X: Long = 128L
+    const val FG_CONSTANTS_JITTER_Y: Long = 132L
+    const val FG_CONSTANTS_MV_SCALE_X: Long = 136L
+    const val FG_CONSTANTS_MV_SCALE_Y: Long = 140L
+    const val FG_CONSTANTS_RESET_HISTORY: Long = 144L
+    const val FG_CONSTANTS_FRAME_RENDER_TIME: Long = 148L
     val FG_DISPATCH: MemoryLayout = MemoryLayout.structLayout(
         I32.withName("displayWidth"),
         I32.withName("displayHeight"),
@@ -470,6 +496,7 @@ object MCDRLayout {
         // P295：FG 抽象层。两个数字都是 MSVC x64 实际 sizeof（改结构时两边一起改）。
         arrayOf<Any>("mcdr_fg_caps",             FG_CAPS,            80L),
         arrayOf<Any>("mcdr_fg_dispatch",         FG_DISPATCH,        96L),
+        arrayOf<Any>("mcdr_fg_constants",       FG_CONSTANTS,      152L),
         arrayOf<Any>("mcdr_abi_field",            ABI_FIELD,           24L),
     )
 
@@ -510,6 +537,9 @@ object MCDRLayout {
         // P295：FG 的两张表同理必须登记（native 的 layoutTable() 有它们的字段）。
         STRUCTS["mcdr_fg_caps"] = FG_CAPS
         STRUCTS["mcdr_fg_dispatch"] = FG_DISPATCH
+        STRUCTS["mcdr_fg_constants"] = FG_CONSTANTS
+        STRUCTS["mcdr_fg_constants"] = FG_CONSTANTS
+
     }
 
     /** Named top-level members of every mirrored struct, as `"Struct.field" -> {offset, size}`. */

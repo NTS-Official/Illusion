@@ -80,9 +80,11 @@ import java.util.concurrent.atomic.AtomicInteger
     private var MH_fgsetmode: MethodHandle? = null
     /** P295：上一次 Present 真正提交的帧数。 */
     private var MH_fgpresented: MethodHandle? = null
+    private var MH_fgsetconstants: MethodHandle? = null
     /** P295：一行状态文本。 */
     private var MH_fgstatus: MethodHandle? = null
     private var MH_fgstate: MethodHandle? = null
+    private var MH_fgsetuitexture: MethodHandle? = null
     /** P231：scope 型着色率下发（见 [D3D12SetShadingRateNow]）。 */
     private var MH_setshadingratenow: MethodHandle? = null
     /** P231：着色率组合器（见 [D3D12SetShadingRateCombiners]）。 */
@@ -1355,6 +1357,32 @@ import java.util.concurrent.atomic.AtomicInteger
      *
      * @return 帧数，[Int.MIN_VALUE] = 本地 DLL 没有该导出。
      */
+    /**
+     * P305z：把 FG 自己的帧常量（view/projection/jitter/mvScale/resetHistory/frameRenderTime）交给 native。
+     *
+     * 这条与 DLSS 的 `mcdr_dx12SetDlssConstants` 是两条独立通路：DLSS 的 constants 属 Streamline 私有状态，
+     * 翻它等于让 FG 依赖 SR 的实现细节。FG 用自己的一份，谁都能填。
+     *
+     * @param constants 已按 `MCDRLayout.FG_CONSTANTS` 填好的段（64 个 float + 1 个 int + 1 个 float = 272 B）。
+     * @return 1 = 已记录，-1 = 参数非法，[Int.MIN_VALUE] = 本地 DLL 没有这个导出。Never throws.
+     */
+    fun D3D12FgSetConstants(constants: MemorySegment): Int {
+        if (LOAD_FAILURE != null) return Int.MIN_VALUE
+        val handle = MH_fgsetconstants ?: return Int.MIN_VALUE
+        return try {
+            // native 是 `void mcdr_dx12FgSetConstants(const mcdr_fg_constants*)`，按 `fdv(PTR)`
+            // 绑定 —— 这里**不能**写 `as Int`：那会让这个签名多态调用按 `(MemorySegment)Integer`
+            // 生成描述符，而句柄的返回类型是 void，运行时抛 WrongMethodTypeException，被下面的
+            // catch 吞掉、只在 stderr 留一行。后果：帧常量永远到不了 native，XeSS-FG 每帧报
+            // `fgResult = -14 INCORRECT_INPUT_RESOURCES`（P305ap 实机抓到的 `consts=0`）。
+            handle.invokeExact(constants)
+            1
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12FgSetConstants failed: $t")
+            Int.MIN_VALUE
+        }
+    }
+
     fun D3D12FgPresented(): Int {
         if (LOAD_FAILURE != null) {
             return Int.MIN_VALUE
@@ -1406,6 +1434,27 @@ import java.util.concurrent.atomic.AtomicInteger
      *
      * @return 打包值；[Int.MIN_VALUE] = 本地 DLL 没有该导出（老 DLL）。
      */
+    /**
+     * P305c：把 GUI 合成目标当「UI 纹理」交给帧生成后端（用户 2026-10-27 裁决）。
+     *
+     * 包装型后端（XeSS-FG / FSR-FG）要把无 HUD 的世界层和 UI 分开插值，否则准星与文字会被插帧
+     * 拉扯。我们的 GUI 合成进 [dev.nts.expdxr.d3d12.render.advanced.smaa.D3D12GUISplit] 的同一张
+     * 目标，所以直接把那张目标当 UI 纹理交出去。**只在目标重建时调一次**；传 0 撤销。
+     *
+     * @param object `Dx12Object*` 句柄（`D3D12GpuTexture.handle()` 的值），0 = 撤销。
+     * @return 1 = 已登记，[Int.MIN_VALUE] = 本地 DLL 没有这个导出（ABI 版本过旧）。
+     */
+    fun D3D12FgSetUiTexture(objectHandle: Long): Int {
+        if (LOAD_FAILURE != null) return Int.MIN_VALUE
+        val handle = MH_fgsetuitexture ?: return Int.MIN_VALUE
+        return try {
+            handle.invokeExact(MemorySegment.NULL.takeIf { objectHandle == 0L } ?: MemorySegment.ofAddress(objectHandle))
+            1
+        } catch (t: Throwable) {
+            System.err.println("[backend-java] dx12FgSetUiTexture failed: $t")
+            Int.MIN_VALUE
+        }
+    }
     fun D3D12FgState(): Int {
         if (LOAD_FAILURE != null) {
             return Int.MIN_VALUE
@@ -3320,8 +3369,10 @@ import java.util.concurrent.atomic.AtomicInteger
         )
         MH_fgsetmode = skipOptional("mcdr_dx12FgSetMode", fd(MCDRLayout.I32, MCDRLayout.PTR))
         MH_fgpresented = skipOptional("mcdr_dx12FgPresented", fd(MCDRLayout.I32))
+        MH_fgsetconstants = skipOptional("mcdr_dx12FgSetConstants", fdv(MCDRLayout.PTR))
         MH_fgstatus = skipOptional("mcdr_dx12FgStatus", fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.I32))
         MH_fgstate = skipOptional("mcdr_dx12FgState", fd(MCDRLayout.I32))
+        MH_fgsetuitexture = skipOptional("mcdr_dx12FgSetUiTexture", fdv(MCDRLayout.PTR))
         // P108b：DLSS 自己的开关（可选导出）。它把 DLSS 与抗锯齿模式解耦，于是 native 侧可以同时
         // "先对低分辨率世界层做 SMAA、再让 DLSS 升采样"。旧 DLL 没有这个导出 ⇒ 调用返回 MIN_VALUE，
         // 由 JVM 侧的临时桥退回 `aaMode == 4`（见 dev.nts.expdxr.dxrmc.sr.dlss.DeepLearningSuperSampling）。
