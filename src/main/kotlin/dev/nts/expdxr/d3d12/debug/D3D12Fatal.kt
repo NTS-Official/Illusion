@@ -1,7 +1,7 @@
 package dev.nts.expdxr.d3d12.debug
 
 import com.mojang.blaze3d.platform.MessageBox
-import dev.nts.expdxr.misc.D3D12Settings
+import dev.nts.expdxr.misc.settings.D3D12Settings
 import dev.nts.expdxr.d3d12.backend.D3D12GraphicsApi
 import net.minecraft.CrashReport
 import net.minecraft.ReportedException
@@ -19,31 +19,14 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 
 /**
- * Direct3D 12 后端的失败策略（P73）。
- *
- * 背景：vanilla 的后端选择循环（`Minecraft.<init>`，遍历
- * `PreferredGraphicsApi.getBackendsToTry()` 的结果）对每个候选后端 `catch (BackendCreationException)`
- * 后继续试下一个。旧行为里 [PreferredGraphicsApiMixin] 为 DX12 返回 `{DX12, GL, Vulkan}`，于是任何
- * D3D12 失败都会**静默**变成一次 OpenGL 启动 —— 用户看到的是 GL 画面，设置里却仍然写着
- * "Direct3D 12"，除了日志没有任何提示（P69–P72 期间好几次自检失败就是这样"消失"的）。
- *
- * 现在的策略（用户要求，m02176）：
- * 1. [resetPreferredGraphicsApi] 把 `options.txt` 里的 `preferredGraphicsBackend` 还原成 vanilla
- *    默认值 `"default"` 并立刻保存 —— 与 vanilla 自己在"上次启动不干净"时的处理一致
- *    （`Minecraft.java:455-463`）。
- * 2. [crash] 抛出携带自定义 [CrashReport] 的 [ReportedException]。它不是
- *    `BackendCreationException`，所以 vanilla 的循环不会吞掉它：异常一路冒到 `Main.main` 的
- *    `catch (Throwable)`（`Main.java:285-292`），`CrashReport.forThrowable` 会复用我们这份报告
- *    （`CrashReport.java:215-216`），最后由 `Minecraft.crash(...)` 写出 `crash-reports/` 并弹出
- *    崩溃报告界面。失败因此变成一次**可见**的崩溃，而不是一次伪装成正常的降级。
+ * DXRMC 的失败策略：复位首选图形 API → 弹窗 → 抛带自定义报告的 [ReportedException]。
+ * 抛的**不能**换成 `BackendCreationException`：那样 vanilla 的后端循环会吞掉它，失败就退化成
+ * 一次静默的 OpenGL 启动。字段与顺序见 docs/misc/debug-and-crash.md §1.2、§2。
  */
 object D3D12Fatal {
     private val LOGGER = LoggerFactory.getLogger("backend")
 
-    /**
-     * 崩溃报告的 Description（也就是 `ReportedException.getMessage()`，见
-     * `ReportedException.java:20-22`）。中英各写一遍，方便用户读、也方便事后 grep 日志。
-     */
+    /** 报告 description（= `ReportedException.getMessage()`）。纯英文：它同时进 crash-reports 下的报告。 */
     private const val TITLE =
         "DXRMC: the Direct3D 12 backend failed to initialise; the preferred graphics API is back to default"
 
@@ -53,23 +36,13 @@ object D3D12Fatal {
     private const val MB_SETFOREGROUND = 0x00010000
     private const val MB_TOPMOST = 0x00040000
 
-    /**
-     * 等对话框的最长时间（毫秒）。到点后不再等，照常抛异常写崩溃报告 —— 弹窗只是"让人看见"，
-     * 不能变成"没人点就永远不出报告"。
-     */
+    /** 等弹窗的上限：到点不再等，照常写报告 —— 弹窗不能变成"没人点就永远不出报告"。 */
     private const val DIALOG_WAIT_MILLIS = 120_000L
 
     /**
-     * 把 `preferredGraphicsBackend` 还原成 `PreferredGraphicsApi.DEFAULT` 并保存 `options.txt`，
-     * 返回一句可直接放进崩溃报告的说明。
-     *
-     * 同时把 `options.startedCleanly` 标成 `true`（用户 m02902）：原版
-     * `Minecraft.<init>` 对"上次非正常退出"的处理会把 `graphicsApi != OPENGL` 改成 `OPENGL`
-     * （`Minecraft.java:451-477`）。DXRMC 的失败路径按设计直接崩游戏，若不标记，下一次启动
-     * 的回退目标就会从 `default` 变成 `opengl` —— 这正是用户要修掉的那个行为。
-     *
-     * 这里**绝不向外抛异常**：崩溃本身不能被"保存设置失败"这种次生问题顶掉，所以每一步失败都
-     * 只记日志并把原因写进返回值。
+     * 把 `preferredGraphicsBackend` 复位成 `default` 并保存 `options.txt`，返回一句可放进报告的说明。
+     * `startedCleanly = true` 是必须的：否则 vanilla 的"不洁关停"保护会把回退目标改写成 opengl。
+     * 本函数**绝不外抛**：崩溃不能被"保存设置失败"这种次生问题顶掉。
      */
     @JvmStatic
     fun resetPreferredGraphicsApi(reason: String): String {
@@ -84,13 +57,6 @@ object D3D12Fatal {
         }
 
         options.preferredGraphicsBackend().set(PreferredGraphicsApi.DEFAULT)
-        // 用户 m02902：别让原版的“非正常退出保护”把回退目标改写成 opengl。
-        // 原版 `Minecraft.<init>` 在 `options.startedCleanly == false` 时会
-        // `graphicsApi != OPENGL -> set(OPENGL)`（Minecraft.java:451-477），而我们的失败路径
-        // 按设计直接崩游戏，下一次启动必然被判定成非正常退出 —— 于是回退目标从 default 变成
-        // opengl，玩家在设置里看到的是“图形 API 变成了 OpenGL”。这里已经在写 options.txt，
-        // 顺手把这一局的 startedCleanly 标成 true（“设置已按崩溃复位处理干净”），原版就不再
-        // 强推 opengl：回退目标停在 default，实际后端顺序仍是 gl -> vulkan，与 opengl 相同。
         options.startedCleanly = true
         return try {
             options.save()
@@ -106,15 +72,8 @@ object D3D12Fatal {
     }
 
     /**
-     * `Minecraft` 还没构造出来时的兜底（用户 m02992）。
-     *
-     * 后端/设备失败可能发生在 [Minecraft.getInstance] 被赋值之前（例如 P241 那种
-     * `D3D12CreateDevice` 失败），这时没有 `Options` 对象可改，但 `options.txt` 就在
-     * `FMLPaths.GAMEDIR` 下 —— 直接改文件，语义与 [resetPreferredGraphicsApi] 的内存版一致：
-     * `preferredGraphicsBackend` 复位成 `default`，并把 `startedCleanly` 标成 `true`，
-     * 免得原版下一次启动把它强推成 `opengl`（`Minecraft.java:451-477`）。
-     *
-     * 只在当前值确实是 DXRMC 的 `d3d12` 时动手；文件不存在、值不是 `d3d12`、读写失败都只返回说明。
+     * `Minecraft` 实例还不存在时的同一件事：直接改 `options.txt`（复位 backend + `startedCleanly:true`）。
+     * 只在当前值确实是 `d3d12` 时动手；文件缺失、值不对、读写失败都只返回说明，不抛。
      */
     private fun resetOptionsFileDirectly(reason: String): String {
         val file = FMLPaths.GAMEDIR.get().resolve("options.txt")
@@ -157,10 +116,9 @@ object D3D12Fatal {
     }
 
     /**
-     * 还原设置，然后抛出带说明的崩溃报告 —— 本函数永不返回。
-     *
-     * @param what 人类可读的失败描述（进入崩溃报告的 `Failure` 字段）
-     * @param cause 原始异常；null 表示没有底层异常（例如 GLFW 直接报错）
+     * 复位设置 → 弹窗 → 抛报告，**永不返回**。
+     * @param what 进报告的 `Failure` 字段
+     * @param cause null 时临时包一个 `RuntimeException(what)`，让栈指向失败调用点
      */
     @JvmStatic
     fun crash(what: String, cause: Throwable?): Nothing {
@@ -175,6 +133,7 @@ object D3D12Fatal {
         showPopup(what, resetDetail)
         val report = CrashReport.forThrowable(cause ?: RuntimeException(what), TITLE)
         val category = report.addCategory("DXRMC / Direct3D 12")
+        // 五个字段各自回答什么问题见 docs/misc/debug-and-crash.md §2。
         category.setDetail("Failure", what)
         category.setDetail(
             "Fallback",
@@ -188,23 +147,14 @@ object D3D12Fatal {
                 "Direct3D 12, pick it again under Options > Video Settings")
         category.setDetail(
             "Where to look",
-            "logs/latest.log lines that mention the Direct3D 12 backend, and known_bugs.md")
+            "logs/latest.log lines that mention the Direct3D 12 backend, and docs/misc/debug-and-crash.md")
         throw ReportedException(report)
     }
 
     /**
-     * 弹一个**可见的**原生对话框，把失败原因直接摆到用户面前（用户要求，m02777）。
-     *
-     * 走 vanilla 自己的 [MessageBox]（`com.mojang.blaze3d.platform.MessageBox`，内部是
-     * `TinyFileDialogs.tinyfd_messageBox(...)`）—— 这正是 vanilla 在"所有后端都失败"时用的
-     * 那条路径（`Minecraft.java:522-526`：`MessageBox.error(errorMsg); throw new WindowInitFailed(...)`），
-     * 所以它可以在同一个位置、同一条线程上安全调用：此时还没有窗口，但它自己的实现也不依赖窗口。
-     *
-     * 它是**阻塞**的（用户点掉才返回），并且和 vanilla 一样在写崩溃报告之前弹出，因此：
-     * - 用户不需要去翻日志就能知道发生了什么；
-     * - 自动化运行（自检 / 回归）必须能关掉它，否则会一直挂着 —— 用配置 `[debug] noCrashPopup = true`。
-     *
-     * 任何异常（包括弹窗本身失败）都只记日志：弹窗不能顶掉崩溃报告。
+     * 阻塞弹窗，且在写报告**之前**（与 vanilla"所有后端都失败"的顺序一致）；弹窗自身异常只记日志。
+     * 走原生 `MessageBoxW` 而非 `MessageBox.error`：tinyfd 遇到引号会把整条消息换成
+     * `INVALID MESSAGE WITH QUOTES`，而复位说明天然带引号。见 docs/misc/debug-and-crash.md §3.1、§3.4。
      */
     private fun showPopup(what: String, resetDetail: String) {
         if (D3D12Settings.noCrashPopup) {
@@ -212,14 +162,7 @@ object D3D12Fatal {
             return
         }
 
-        // P74b：正文用**中英双语**，并且优先直接调 Win32 `user32!MessageBoxW`（见
-        // [showNativeMessageBox]）—— 绕开 tinyfd 之后，引号与中文都没有任何限制。
-        //
-        // 背景（两次踩坑）：`MessageBox.error` 走 tinyfd，而 tinyfd 只要在消息里发现一个引号，
-        // 就把**整条消息**替换成字面量 `INVALID MESSAGE WITH QUOTES` 再弹出来（该字符串确实存在于
-        // `lwjgl-tinyfd-3.4.1-natives-windows.jar` 的 `lwjgl_tinyfd.dll` 里，UTF-16 字面量，旁边还有
-        // `INVALID TITLE WITH QUOTES`）。而 options.txt 的还原说明天然带引号（`reset "backend" -> "default"`），
-        // 于是用户两次看到的都是那句占位符。tinyfd 只作为**兜底**保留，兜底文本才需要清洗引号。
+        // 正文中英双语（每条关键词两种语言都能 grep 到）；弹窗路径见 docs/misc/debug-and-crash.md §3.2。
         val message = buildString {
             append("Direct3D 12 后端启动失败。\n")
             append("Direct3D 12 failed to start.\n\n")
@@ -236,9 +179,7 @@ object D3D12Fatal {
         }
         val fallbackMessage = sanitizeForTinyfd(message)
 
-        // 对话框是**模态阻塞**的（MessageBoxW 在自己线程上跑消息循环）。放到守护线程里等，
-        // 这样即使没人在电脑前点它，崩溃报告也一定会写出来（自动化运行还会用配置 `[debug] noCrashPopup = true`
-        // 直接跳过）。守护线程不会阻止 JVM 退出。
+        // 守护线程：没人点也不会拖住 JVM；自动化用 [debug] noCrashPopup 直接跳过。
         LOGGER.info("showing fatal error dialog (set [debug] noCrashPopup = true to suppress)")
         val dialog = Thread({
             try {
@@ -264,24 +205,13 @@ object D3D12Fatal {
     }
 
     /**
-     * 直接调用 Win32 `user32!MessageBoxW`（P74b）。
-     *
-     * 为什么不用 vanilla 的 `MessageBox.error`：它内部是 tinyfd，而 tinyfd 对消息里的引号有
-     * "整条替换成 `INVALID MESSAGE WITH QUOTES`" 的行为（实测踩过两次），并且在 Windows 上
-     * 是否按 UTF-8/UTF-16 传递字符串难以确认。直接 FFM 调 `MessageBoxW` 用 **UTF-16LE** 传参：
-     * 中文、引号、换行全部原样显示，也不再依赖 tinyfd 的行为。
-     *
-     * `MessageBoxW` 是模态的（自己跑消息循环），不需要窗口或消息泵 —— 和 vanilla 在
-     * `Minecraft.<init>` 里弹窗的时机完全一致。
-     *
-     * @return true 表示对话框确实弹出来了并已返回（返回码 > 0 = 用户点了"确定"）；
-     *         false 表示这条路径不可用（非 Windows、符号查找失败等），调用方应回退到
-     *         [MessageBox.error]。
+     * FFM 调 `user32!MessageBoxW`：UTF-16LE 传参，中文/引号/换行原样显示。
+     * @return false = 这条路径不可用（非 Windows、符号缺失），调用方回退到 [MessageBox.error]
      */
     private fun showNativeMessageBox(text: String, caption: String): Boolean {
         val flags = MB_OK or MB_ICONERROR or MB_SETFOREGROUND or MB_TOPMOST
         return try {
-            // Arena 必须在对话框阻塞期间一直存活，所以用函数作用域而不是 confined 临时区。
+            // Arena 必须活过阻塞中的对话框：不能用 confined 临时区。
             Arena.ofShared().use { arena ->
                 val lookup = SymbolLookup.libraryLookup("user32", arena)
                 val address = lookup.find("MessageBoxW").orElse(null) ?: return false
@@ -314,12 +244,7 @@ object D3D12Fatal {
         return segment
     }
 
-    /**
-     * tinyfd 的引号陷阱（m02963 实测）：`tinyfd_messageBox` 只要在消息里发现一个引号，
-     * 就把整条消息替换成字面量 `INVALID MESSAGE WITH QUOTES`（标题同理，见
-     * `lwjgl_tinyfd.dll` 里的两个字面量）。所以**兜底**用的弹窗文本必须先过这一道：
-     * 两种引号都换成反引号（与 NeoForge `FatalErrorReporting` 的做法一致）。
-     */
+    /** tinyfd 兜底文本必须先清洗：两种引号都换成反引号，否则整条消息变占位符。 */
     private fun sanitizeForTinyfd(message: String): String {
         val sanitized = message.replace('"', '`').replace('\'', '`')
         if (sanitized != message) {

@@ -7,36 +7,15 @@ import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuTexture
 
 /**
- * P108z（用户 m11203 / 父 agent 的控制组结论）：**交给 NGX 写的输出纹理必须由 JVM 建**。
- *
- * <p>native 侧实测的硬结论是："native 自建的 `CreateCommittedResource` 纹理存不住写入，模块
- * `createTexture` 建的可以"。DLSS 的输出因此不能再用 native 私有的那张 UAV
- * （`MCDR\src\advanced\d3d12_dlss.cpp` 里的 `s.dlssOutput`），必须由这里建一张带
- * [D3D12GpuTexture.USAGE_STORAGE] 的纹理、经 `mcdr_dx12SetDlssOutput` 交给 native —— native 会把
- * `pInOutput` 直接指到它（`d3d12_dlss.cpp:1786-1832` 的 `s.externalOutput` 分支），于是 NGX 写进去的
- * 是模块建的资源，而不是它自己建的。
- *
- * <p>为什么必须 `USAGE_STORAGE`：native 的 `textureFlags()`（`MCDR\src\core\d3d12_device.cpp:1876-1892`）
- * 只有看到 `usage & 32` 才加 `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS`，而 NGX 只肯写进带
- * ALLOW_UNORDERED_ACCESS 的资源。位值 32 是原生 `GpuTexture` 四个常量之后的追加语义位，与
- * `D3D12Velocity` 用 16 之后的位置同一个约定（见 [D3D12GpuTexture.USAGE_STORAGE]）。
- *
- * <p>尺寸与生命周期：**target（窗口）尺寸**，与 `pInOutput` 那一档一致；窗口尺寸一变就重建；
- * 重建/退出时 `close()` 必须彻底（`D3D12GpuTexture.close()` → `ID3D12DestroyResource`，native 侧按
- * queue fence 延迟释放，所以这里立即 close 不会打断在飞命令列表）。
- *
- * <p>失败一律只降级、不打断渲染：设备还没建、尺寸非法、native 没有这条导出（[Int.MIN_VALUE]）
- * 都只是这一帧不交接，native 继续走它自己的私有 UAV 路径（`P108: DLSS private UAV output created`
- * 那条日志），行为与本改动之前完全一样。
+ * 交给 NGX 写的输出纹理**必须由 JVM 建**：native 自建的 `CreateCommittedResource` 纹理存不住写入，
+ * 只有模块 `createTexture` 建的能存住。这里建一张带 [D3D12GpuTexture.USAGE_STORAGE] 的纹理，经
+ * `mcdr_dx12SetDlssOutput` 交过去，native 会把它直接当 `pInOutput`。
+ * 缺 `USAGE_STORAGE`（位 32）时 native 不加 ALLOW_UNORDERED_ACCESS，NGX 就写不进去。见 docs/superresolution/dlss.md §8。
  */
 object DLSSOutput {
 
 
-    /**
-     * `format` 参数 = native `dx12CreateTexture` 的枚举序数。历史日志里
-     * `P108x: JVM target (pInOutput) fmt=28` 就是它（28 = DXGI_FORMAT_R8G8B8A8_UNORM），
-     * 与 `pInOutput` 那一档一致 —— 不要改成别的格式，否则 NGX 的输入输出格式不匹配。
-     */
+    /** 必须与 `pInOutput` 同格式（RGBA8_UNORM = DXGI_FORMAT 序数 28），否则 NGX 输入输出格式不匹配。 */
     private val FORMAT: GpuFormat = GpuFormat.RGBA8_UNORM
 
     /** 当前交给 native 的那张纹理；null = 还没建 / 已释放。 */
@@ -51,11 +30,7 @@ object DLSSOutput {
     /** 上一次报告的结论；只在变化时打一行，避免每帧刷屏。 */
     private var lastNote: String? = null
 
-    /**
-     * 本帧该用的输出纹理（没有就按需建）。**只在渲染线程调用。**
-     *
-     * @param targetWidth / targetHeight 窗口（= `pInOutput`）尺寸；<=0 时返回 null。
-     */
+    /** 本帧该用的输出纹理（没有就按需建）。**只在渲染线程调用**；`targetWidth/Height` <= 0 返回 null。 */
     @JvmStatic
     fun textureForFrame(targetWidth: Int, targetHeight: Int): D3D12GpuTexture? {
         if (targetWidth <= 0 || targetHeight <= 0) {
@@ -96,10 +71,8 @@ object DLSSOutput {
     }
 
     /**
-     * 把 [textureForFrame] 那张交给 native（幂等：同一张只交一次）。native 没有
-     * `mcdr_dx12SetDlssOutput` 时只打一次 INFO 并静默退回旧路径。
-     *
-     * @return true = native 接下了这张（`pInOutput` 会指到它）。
+     * 把 [textureForFrame] 那张交给 native（同一张只交一次）。native 没有这条导出时打一次 INFO 并退回旧路径。
+     * @return true = native 接下了（`pInOutput` 会指到它）。
      */
     @JvmStatic
     fun handOver(tex: D3D12GpuTexture): Boolean {
@@ -153,16 +126,8 @@ object DLSSOutput {
     }
 
     /**
-     * 释放当前纹理（窗口尺寸变化、DLSS 关掉、设备销毁）。
-     *
-     * <p><b>顺序至关重要（user m11757 崩溃的根因）</b>：必须**先把 native 的 override 清掉**，
-     * 再 `close()` 这张纹理。原实现是反的（先 `close()` 再 `dx12SetDlssOutput(0)`），于是中间
-     * 存在一个窗口：native 的 `s.externalOutput` 仍然指着**已经被 `ID3D12DestroyResource` 排进
-     * 延迟销毁队列**的那张资源，而下一帧的 DLSS evaluate 可能就拿着这个悬空指针去写 ——
-     * 实测症状是"拖渲染缩放（触发 resize → 这里 release → 重建）后进程直接消失、没有任何
-     * Java 异常"，与设备级故障（device removed / GPU hang）一致。
-     *
-     * <p>同一条推论也解释了为什么"只在 handover 模式"崩：只有那时 native 才持有我们的资源指针。
+     * **顺序至关重要**：先 `mcdr_dx12SetDlssOutput(0)` 让 native 松手，再 `close()` 这张纹理。
+     * 反过来 native 的 `externalOutput` 会指着已排进延迟销毁队列的资源，下一帧 evaluate 写它就是悬空指针（进程直接消失）。
      */
     @JvmStatic
     fun release() {

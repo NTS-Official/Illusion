@@ -12,15 +12,8 @@ import java.util.OptionalDouble
 import kotlin.math.log2
 
 /**
- * P220：**地形图集专用**的 mip LOD bias。
- *
- * <p>只有超分（DLSS 上采样 / DLAA）才需要负的 mip bias：渲染分辨率低于输出分辨率时，
- * 纹素覆盖的屏幕范围变大，不加 bias 会把纹理采样到更高的 mip，升采样后发糊。公式沿用
- * `known_bugs.md` P217 §二 记录的 `log2(render/display) - 0.5`。
- *
- * <p>**不使用超分时 bias 必须是 0**（用户 2026-10-25 要求）：普通渲染/仅改分辨率时，
- * 采样器与 vanilla 完全一致。bias 只挂在 `ChunkSectionsToRender` 的地形采样器参数上，
- * 不能改全局 sampler cache —— 否则 GUI、实体、字体一起糊。
+ * 地形图集专用的 mip LOD bias：`log2(renderScale) - 0.5` 夹到 [-16, 0]，只在超分开启时生效，否则必须为 0。
+ * 只挂地形采样器，不能改全局 sampler cache（GUI / 实体 / 字体会一起糊）。见 docs/mesh&vrs/README.md §4.1。
  */
 object D3D12TerrainSampler {
     private data class Key(
@@ -36,16 +29,10 @@ object D3D12TerrainSampler {
     private var cachedKey: Key? = null
     private var cachedSampler: GpuSampler? = null
 
-    /**
-     * 旧采样器不能立刻 close：上一帧的命令列表可能还在 GPU 上引用它的描述符槽位。
-     * bias 变化很罕见，先留着，等设备关闭时统一释放。
-     */
+    /** 旧采样器不能立刻 close：上一帧的命令列表可能还在引用它的描述符槽位。 */
     private val retired = ArrayList<GpuSampler>()
 
-    /**
-     * 把 vanilla 的地形采样器换成带 bias 的版本；不需要 bias 时**原样返回** [original]
-     * （对象身份不变，vanilla 的 sampler cache/生命周期继续生效）。
-     */
+    /** 换成带 bias 的采样器；不需要 bias 时原样返回 [original]（对象身份不变）。 */
     @JvmStatic
     fun wrap(original: GpuSampler?): GpuSampler? {
         if (original == null) return null
@@ -80,8 +67,7 @@ object D3D12TerrainSampler {
     @JvmStatic
     fun currentBias(): Float {
         if (D3D12AdapterInfo.current == null) return 0f
-        // P282：闸门从"DLSS 开着"扩到"任何一家超分开着" —— FSR / XeSS 的输入同样是降分辨率
-        // 渲染的世界层，不加 bias 一样会在升采样后发糊。
+        // 闸门是"任何一家超分"而不是只有 DLSS：FSR / XeSS 的输入同样是降分辨率的世界层。
         if (!SuperResolution.isEnabled()) return 0f
         val scale = D3D12RenderScale.current() / 100.0
         if (!(scale > 0.0 && scale <= 1.0)) return 0f

@@ -4,22 +4,9 @@ import java.io.FileWriter
 import kotlin.collections.iterator
 
 /**
- * P12b: global exit watchdog.
- *
- * When Minecraft shuts down but the render thread (= main thread) is already
- * gone while the process is still alive — for example a non-daemon worker
- * blocked in one of our backend's fence waits — the JVM hangs forever, and the
- * launcher (PCL2) waits on it as the parent process, which looks like "the
- * launcher is completely frozen". This daemon thread notices the render thread
- * disappearing, grants a 20-second grace period, and if the JVM is still alive
- * dumps every thread stack to stderr and to %TEMP%\backend-java.log and then
- * forces System.exit(1). That guarantees the launcher recovers while still
- * leaving evidence of the hang behind.
- *
- * Ported unchanged from the Fabric build's `Dx12Mod.startExitWatchdog()`; it is
- * modloader-agnostic. One safety guard was added: the watchdog only arms after
- * it has seen the render thread at least once, so a slow startup can never be
- * mistaken for a shutdown hang.
+ * 退出卡死看守：见 docs/misc/debug-and-crash.md §1.5。
+ * 只在**见过一次** `Render thread` 之后才判退出，否则慢启动会被误判成关停卡死。
+ * 判定成立时必须 `System.exit(1)`，否则启动器作为父进程会一直等下去。
  */
 object D3D12ExitWatchdog {
     private const val RENDER_THREAD_NAME = "Render thread"
@@ -44,18 +31,17 @@ object D3D12ExitWatchdog {
                         sawRenderThread = true
                         continue
                     }
-                    // Never observed -> we are still starting up, not shutting down.
+                    // 没见过 = 还在启动，不是关停卡死。
                     if (!sawRenderThread) continue
 
-                    // The render thread is gone: a normal shutdown exits the JVM
-                    // almost immediately, so grant a further 15 seconds.
+                    // 正常关停几乎立刻退出 JVM，所以再宽限 15 s 复核。
                     Thread.sleep(GRACE_MS)
                     if (!renderThreadAlive()) {
                         dumpAndExit()
                     }
                 }
             } catch (e: InterruptedException) {
-                // daemon thread — nothing to clean up
+                // 守护线程，无需清理
             }
         }, "backend-exit-watchdog")
         watchdog.isDaemon = true
@@ -83,7 +69,7 @@ object D3D12ExitWatchdog {
             val path = System.getProperty("java.io.tmpdir") ?: "."
             FileWriter("${path}\\backend-java.log", true).use { it.write("${msg}\n") }
         } catch (ignored: Exception) {
-            // best effort only
+            // best effort：写不了文件也照样退出
         }
         System.err.println("WATCHDOG: System.exit(1)")
         System.exit(1)

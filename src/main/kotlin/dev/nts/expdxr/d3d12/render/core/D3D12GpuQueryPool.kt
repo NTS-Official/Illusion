@@ -5,11 +5,7 @@ import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import java.util.*
 
 /**
- * D3D12-backed {@link GpuQueryPool} (timestamp queries).
- *
- * Native counterpart: {@code dx12CreateQueryPool} / {@code dx12ReadQueryValue} /
- * {@code dx12ReadQueryValues}. Reads are blocking: the native side resolves the
- * heap into a readback buffer, submits it and waits for completion.
+ * D3D12 时间戳查询池。读取是阻塞的：native 把堆 resolve 进回读缓冲，submit 后等完成。
  */
 class D3D12GpuQueryPool(size: Int) : GpuQueryPool {
     private val handle: Long

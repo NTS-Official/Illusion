@@ -9,13 +9,7 @@ import net.minecraft.sounds.SoundEvents
 import net.minecraft.util.ARGB
 import net.minecraft.util.FormattedCharSequence
 
-/**
- * 26.3 的 [GuiGraphicsExtractor] 只提供“立刻画”的 `fill` / `text`，没有画笔状态，也没有 alpha 栈；淡入淡出
- * 要么每处自己乘 alpha，要么在这一层收口。这里照 wgpu-mc（Neolectrum）的 `WidgetRenderer` 做一个最小实现：
- * 所有绘制都经它转一手，内部把颜色 alpha 乘上当前栈值。
- *
- * @author DXRMC
- */
+/** [GuiGraphicsExtractor] 没有画笔状态也没有 alpha 栈：所有绘制都经这里转一手，颜色 alpha 乘上当前栈值。 */
 class D3D12WidgetRenderer(private val extractor: GuiGraphicsExtractor) {
     private val alphas: ArrayDeque<Double> = ArrayDeque()
 
@@ -85,13 +79,9 @@ class D3D12WidgetRenderer(private val extractor: GuiGraphicsExtractor) {
 }
 
 /**
- * 自绘控件的基类：只有位置、尺寸与鼠标回调，绘制统一走 [render]。
+ * 自绘控件基类：位置、尺寸与鼠标回调都在这里，绘制统一走 [render]。
  *
- * <p>26.3 的 [net.minecraft.client.gui.components.AbstractWidget] 走 `renderables` + 提取器那一套，控件必须
- * 注册到 `Screen` 上才会被画；这里不需要注册——`Screen.extractRenderState` 里直接遍历自己的控件列表，
- * 顺序与裁剪都由屏幕控制。
- *
- * @author DXRMC
+ * 不注册到 `Screen` 的 `renderables`：`Screen.extractRenderState` 直接遍历自己的控件列表，顺序与裁剪由屏幕控制。
  */
 abstract class D3D12Widget(x: Int, y: Int, width: Int, height: Int) {
     var x: Int = x
@@ -109,7 +99,6 @@ abstract class D3D12Widget(x: Int, y: Int, width: Int, height: Int) {
     fun isMouseOver(mouseX: Double, mouseY: Double): Boolean =
         mouseX >= x && mouseX < x + width && mouseY >= y && mouseY < y + height
 
-    /** 渲染回调里的鼠标坐标是整数，省掉每个调用点写 .toDouble()。 */
     fun isMouseOver(mouseX: Int, mouseY: Int): Boolean = isMouseOver(mouseX.toDouble(), mouseY.toDouble())
 
     fun setPosition(x: Int, y: Int) {
@@ -152,24 +141,21 @@ abstract class D3D12Widget(x: Int, y: Int, width: Int, height: Int) {
         const val WHITE: Int = -1
         val DISABLED: Int = ARGB.color(160, 160, 160, 255)
 
-        /** 分组标题条：比行底更黑一档，才能把“组”和“行”分开（用户 m06045：高亮条颜色太淡）。 */
+        /** 分组标题条：必须比行底更黑一档，否则"组"和"行"分不开。 */
         val HEADING_BG: Int = ARGB.color(205, 0, 0, 0)
 
-        /** 主题色：紫。 */
         val ACCENT: Int = ARGB.color(225, 176, 124, 255)
-        /** 警示色：真正的红。参数序是 a,r,g,b —— 旧值把红分量写成 25、蓝写成 255，画出来是蓝紫（用户 m06437）。 */
+        /** 警示色。参数序是 a,r,g,b —— 顺序写错会得到蓝紫而不是红。 */
         val RED: Int = ARGB.color(255, 255, 85, 85)
 
-        /** 提示块底色：比行底更实一点，保证文字在亮背景上也读得清。 */
-        /** 锁定提示的表头色（亮黄，用户 m10226）。 */
+        /** 锁定提示的表头色。 */
         val WARNING: Int = ARGB.color(255, 255, 214, 64)
 
         val TOOLTIP_BG: Int = ARGB.color(232, 0, 0, 0)
 
-        /** 悬浮提示的细边框。 */
         val TOOLTIP_BORDER: Int = ARGB.color(120, 255, 255, 255)
 
-        /** 线性插值两个 ARGB 颜色（逐通道），用于选中/悬停的过渡。 */
+        /** 逐通道线性插值两个 ARGB 颜色。 */
         fun blend(from: Int, to: Int, amount: Double): Int {
             val t = amount.coerceIn(0.0, 1.0)
 

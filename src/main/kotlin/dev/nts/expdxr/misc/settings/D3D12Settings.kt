@@ -1,4 +1,4 @@
-package dev.nts.expdxr.misc
+package dev.nts.expdxr.misc.settings
 
 import dev.nts.expdxr.CommandBundleMode
 import dev.nts.expdxr.DlssFrameGeneration
@@ -9,32 +9,20 @@ import dev.nts.expdxr.SrBackend
 import dev.nts.expdxr.IllusionConfig
 import dev.nts.expdxr.MeshDiagnostics
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
+import dev.nts.expdxr.misc.IllusionLogger
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * The one place a renderer switch is resolved: NeoForge config first, legacy source second.
+ * 渲染开关的唯一解析处：NeoForge 配置优先，旧来源（环境变量 / `-D` 属性 / marker 文件）只作弃用逃生口。
  *
- * <p>Every switch used to be an environment variable, a JVM `-D` property or a marker file in
- * the working directory (`DXR_MC_GL_CONTEXT`, `gl_context.flag`, `DX12_ASYNC`,
- * `DX12_BUNDLE_MODE`, `dxrmc.temporal`, ...). Those are now options in
- * `config/dxr_mc-client.toml` ([IllusionConfig]); the old source still works, but only as a
- * deprecated escape hatch, and only when the config left the option at its default. A one-time
- * warning says which option was overridden that way, so it can be migrated.
- *
- * <p>Resolution is cached: the renderer reads these on per-frame paths, and a config lookup is
- * not free. The cache is dropped by [reload] from the config load/reload events, and a snapshot
- * built *before* the config file was read is never cached (the renderer starts before NeoForge
- * loads the toml).
- *
- * <p>Threading: the snapshot is immutable and published through a `@Volatile` field, so the
- * render thread and the recording workers may read it concurrently.
+ * <p>快照不可变、经 `@Volatile` 发布，渲染线程与录制 worker 并发读；[reload] 由配置加载/重载事件调用。
+ * 读配置在每帧路径上，所以必须缓存 —— 但在配置读进来**之前**建的快照绝不缓存（渲染器比 toml 早启动）。
+ * 见 docs/misc/settingscreen/README.md §3。
  */
 object D3D12Settings {
-    /** Env var that used to select the DLSS backend. */
     private const val LEGACY_DLSS_IMPL = "MCDR_DLSS_IMPL"
 
-    /** Env var that used to enable Streamline wholesale. */
     private const val LEGACY_STREAMLINE = "MCDR_STREAMLINE"
 
     private class Snapshot(
@@ -71,16 +59,16 @@ object D3D12Settings {
         val pixDirectory: String,
         val hdrMode: Int,
 
-        /** P251：是否允许 ALLOW_TEARING 交换链 / 是否强制建在自建呈现子窗口上。 */
+        /** ALLOW_TEARING 交换链 / 是否强制建在自建呈现子窗口上。 */
         val allowTearing: Boolean,
         val presentChildWindow: Boolean,
 
 
-    /** P213：帧生成（0=off 1=on 2=dynamic）与每帧生成张数。 */
+    /** 帧生成（0=off 1=on 2=dynamic）与每帧生成张数。 */
     val dlssgMode: Int,
     val dlssgFrames: Int,
 
-    /** P117：光追可见性分层（0=off 1=ao 2=ao_shadows 3=full）。 */
+    /** 光追可见性分层（0=off 1=ao 2=ao_shadows 3=full）。 */
     val rtMode: Int,
     )
 
@@ -92,34 +80,26 @@ object D3D12Settings {
 
     private val warned: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
-    /** Keep a real GL context alive instead of asking GLFW for `GLFW_NO_API`. */
+    /** 保留一个真 GL 上下文（否则向 GLFW 要 `GLFW_NO_API`）；设备创建前读。 */
     val glContext: Boolean get() = snapshot().glContext
 
-    /** Record command lists on the worker pool. */
     val asyncCommandLists: Boolean get() = snapshot().asyncCommandLists
 
-    /** Worker threads for [asyncCommandLists]. */
     val asyncWorkers: Int get() = snapshot().asyncWorkers
 
-    /** Serial vs parallel command-bundle recording. */
     val commandBundles: CommandBundleMode get() = snapshot().commandBundles
 
-    /** Post-sharpen strength for DLAA/DLSS. */
     val sharpenAmount: Float get() = snapshot().sharpenAmount
 
-    /** Post-sharpen strength for TAA. */
     val taaSharpenAmount: Float get() = snapshot().taaSharpenAmount
 
-    /** NGX or Streamline. */
     val dlssImplementation: DlssImplementation get() = snapshot().dlssImplementation
 
-    /** The JVM owns DLSS's output texture. */
     val dlssOutputHandover: Boolean get() = snapshot().dlssOutputHandover
 
-    /** `[sr] backend` - P282: which super-resolution backend the abstraction layer drives. */
+    /** `[sr] backend` —— 超分抽象层当前驱动哪一家。 */
     val srBackend: SrBackend get() = snapshot().srBackend
 
-    /** `[sr] sharpness` - sharpening strength handed to the backend itself (0 = off). */
     val srSharpness: Float get() = snapshot().srSharpness
 
     val srMask: Boolean get() = snapshot().srMask
@@ -128,82 +108,58 @@ object D3D12Settings {
     /** `[mesh] terrain` — 地形走 mesh 管线（已无 IMR 回退，这是唯一的地形光栅化路径）。 */
     val meshTerrain: Boolean get() = snapshot().meshTerrain
 
-    /** P217：`[mesh] terrainCull` —— 用 AS 剔除地形 meshlet（依赖 `[mesh] terrain`）。*/
+    /** `[mesh] terrainCull` —— 用 AS 剔除地形 meshlet（依赖 `[mesh] terrain`）。 */
     val meshTerrainCull: Boolean get() = snapshot().meshTerrainCull
 
-    /** `[debug] dumpHlsl` — 把翻译后的 HLSL 落盘（`dxrmc/hlsl/`）。 */
     val dumpHlsl: Boolean get() = snapshot().dumpHlsl
 
-    /** Attach the D3D12 debug layer. */
     val debugLayer: Boolean get() = snapshot().debugLayer
 
-    /** Frame/batch timing instrumentation. */
     val profiling: Boolean get() = snapshot().profiling
 
-    /** Turn the leftover GL surface's `present()` into a no-op. */
+    /** 只在 `glContext` 开着时有意义：别让残留的 GL surface 去 swap 一个不属于它的窗口。 */
     val skipGlSwap: Boolean get() = snapshot().skipGlSwap
 
-    /** Run the dedicated render thread. */
     val asyncRenderThread: Boolean get() = snapshot().asyncRenderThread
 
-    /** Force the temporal chain on with no AA selected (developer switch). */
     val temporalChain: Boolean get() = snapshot().temporalChain
 
-    /** Inject the sub-pixel jitter. */
     val temporalJitter: Boolean get() = snapshot().temporalJitter
 
-    /** Run the swap-chain self-test. */
+    /** 自检链会抢走 RTSS/Afterburner 绑定的第一条呈现交换链，所以默认关。 */
     val selfTestSurface: Boolean get() = snapshot().selfTestSurface
 
-    /** Run the mesh-shader self-test. */
     val selfTestMesh: Boolean get() = snapshot().selfTestMesh
 
-    /** P234：启动时跑一次 compute 自检（cs_6_8 → compute PSO → Dispatch → 回读）。 */
     val selfTestCompute: Boolean get() = snapshot().selfTestCompute
 
-    /** Fail device creation on purpose. */
     val failDevice: Boolean get() = snapshot().failDevice
 
-    /** The mesh read-back isolation test. */
     val meshDiagnostics: MeshDiagnostics get() = snapshot().meshDiagnostics
 
-    /** Suppress the fatal-error dialog. */
     val noCrashPopup: Boolean get() = snapshot().noCrashPopup
 
-    /** Mirror the native log into this file (empty = console only). */
     val nativeLogFile: String get() = snapshot().nativeLogFile
 
 
-    /**
-     * Have the game drive a PIX timing capture itself (`[debug] pixTimingCapture`).
-     *
-     * PIX's own continuous recording never reaches the disk, so a capture only appears under
-     * `run/pix` when the process calls PIXBeginCapture/PIXEndCapture on its own.
-     */
+    /** 由游戏自己驱动 PIX 捕获：PIX 的连续录制从不落盘，只有进程内调 PIXBeginCapture 才写进 `run/pix`。 */
     val pixTimingCapture: Boolean get() = snapshot().pixTimingCapture
 
-    /** Frames the self-driven PIX timing capture records (`[debug] pixCaptureFrames`). */
+    /** 一次按键捕获录多少帧（按下热键那一刻读，属热切换）。 */
     val pixCaptureFrames: Int get() = snapshot().pixCaptureFrames
 
-    /**
-     * Where PIX is installed, or one of its capture DLLs; empty means "look in the default
-     * install locations" (`[debug] pixDirectory`).
-     */
+    /** PIX 安装目录或其中一个捕获 DLL；空 = 用默认安装位置。 */
     val pixDirectory: String get() = snapshot().pixDirectory
 
-    /** Drop the cached snapshot; the next read re-resolves every option. */
+    /** 丢掉缓存快照，下一次读重新解析全部开关。 */
     fun reload() {
         snapshot = null
         pushed = null
     }
     /**
-     * Hand the native-side switches to the DLL.
+     * 把开关交给 DLL。幂等：比较用的字符串必须包含每一个推下去的值，漏一个就漏推。
      *
-     * <p>The native layer reads a handful of values from the process environment at device
-     * creation. Rather than growing an export per value, [MCDR_ABI.D3D12SetEnvironment] sets the
-     * variable inside the process right before that, so the config is the only place a user has
-     * to look while the native code keeps its plain `getenv` reads. Idempotent, and safe to call
-     * before the config file has been read (the defaults are the shipped behaviour).
+     * <p>配置加载时 ABI 可能还不可用（那次推送被丢掉），所以设备建好后要再调一次。见 docs/misc/settingscreen/README.md §3.5。
      */
     fun pushToNative() {
         if (!MCDR_ABI.isAvailable()) return
@@ -233,21 +189,14 @@ object D3D12Settings {
             if (s.dlssImplementation == DlssImplementation.STREAMLINE) "1" else null,
         )
         MCDR_ABI.D3D12SetEnvironment("DX12_NATIVE_LOG_FILE", s.nativeLogFile.ifEmpty { null })
-        // PIX 的 dll 位置走专用 ABI（P131 起同类需求都没有环境变量入口了）：配置是唯一来源，
-        // 空值 = 让 native 回到自动检测。
+        // 下面这些走专用 ABI：配置是唯一来源，没有环境变量入口（见 docs/misc/settingscreen/README.md §3.6）。
         MCDR_ABI.D3D12SetPIXDirectory(s.pixDirectory)
-        // P131：Reflex 的限帧器没有环境变量入口 —— 直接走 ABI，配置是唯一来源。
         MCDR_ABI.D3D12SetReflexFrameLimit(s.reflexFrameLimitUs)
-        // P197：HDR 模式同理（0/1/2 = AUTO/FORCE_ON/FORCE_OFF），下次建链时生效。
+        // 0/1/2 = AUTO/FORCE_ON/FORCE_OFF。HDR 与交换链选项都是建链参数，下一次建链才有用。
         MCDR_ABI.D3D12SetHdrMode(s.hdrMode)
-        // P251：交换链建链选项（下一次建链生效）。
         MCDR_ABI.D3D12SetSwapchainOptions(s.allowTearing, s.presentChildWindow)
-        // P117：光追模式（0..3）。设备创建前就要知道，后续 G-Buffer 创建看它。
         MCDR_ABI.D3D12SetRaytracingMode(s.rtMode)
-        // P213：帧生成。选项在渲染线程的下一次 present 生效（Reflex 必须开着）。
-        
-        // 与 GUI 选项保持同一套语义：模式 2（动态）只能配 1 张额外帧，具体张数由驱动决定；
-    // 固定倍率配置里若写成 1 张（2×）也照旧下发。
+        // 动态模式（2）只能配 1 张额外帧，实际张数由驱动决定 —— ABI 约束，不是界面逻辑。
     MCDR_ABI.D3D12SetDlssgMode(s.dlssgMode, if (s.dlssgMode == 2) 1 else s.dlssgFrames)
     }
 
@@ -259,8 +208,7 @@ object D3D12Settings {
         fun <T> config(fallback: T, read: () -> T): T = try {
             read()
         } catch (t: Throwable) {
-            // Called before NeoForge loaded the toml (mod construction, DLL init): use the
-            // shipped default and do not cache the result.
+            // 配置还没读进来（模组构造、DLL 初始化）：用出厂默认值，且**不写回缓存**。
             configAvailable = false
             fallback
         }
@@ -366,16 +314,13 @@ object D3D12Settings {
             pixTimingCapture = config(false) { IllusionConfig.PIX_TIMING_CAPTURE.get() },
             pixCaptureFrames = config(600) { IllusionConfig.PIX_CAPTURE_FRAMES.get() },
             pixDirectory = config("") { IllusionConfig.PIX_DIRECTORY.get() },
-            // P197：0 = AUTO / 1 = FORCE_ON / 2 = FORCE_OFF（native 只认序号）。
+            // 0 = AUTO / 1 = FORCE_ON / 2 = FORCE_OFF：native 只认序号，不要在这里重排。
             hdrMode = config(HdrMode.AUTO) { IllusionConfig.HDR.get() }.ordinal,
-            // P251：交换链建链选项（下一次建链生效）。
             allowTearing = config(true) { IllusionConfig.ALLOW_TEARING.get() },
             presentChildWindow = config(false) { IllusionConfig.PRESENT_CHILD_WINDOW.get() },
             rtMode = config(RtMode.OFF) { IllusionConfig.RAYTRACING_MODE.get() }.ordinal,
-            // P213：0 = OFF / 1 = ON / 2 = DYNAMIC（native 只认序号）。
             dlssgMode = config(DlssFrameGeneration.OFF) { IllusionConfig.DLSS_FRAME_GENERATION.get() }.ordinal,
             dlssgFrames = config(1) { IllusionConfig.DLSS_FRAME_GENERATION_FRAMES.get() },
-            // P282: super-resolution backend and sharpness (read here so the cache path is shared).
             srBackend = config(SrBackend.DLSS) { IllusionConfig.SR_BACKEND.get() },
             srSharpness = config(0.0) { IllusionConfig.SR_SHARPNESS.get() }.toFloat(),
         srMask = config(false) { IllusionConfig.SR_MASK.get() },
@@ -387,10 +332,7 @@ object D3D12Settings {
         return s
     }
 
-    /**
-     * True when the pre-config source asked for [key]; warns once so the stale script or JVM
-     * argument can be migrated to `config/dxr_mc-client.toml`.
-     */
+    /** 旧来源命中时 warn 一次；调用点只在配置仍是出厂默认值时看它（见 docs/misc/settingscreen/README.md §3.7）。 */
     private inline fun legacy(key: String, check: () -> Boolean): Boolean {
         if (!check()) return false
         if (warned.add(key)) {

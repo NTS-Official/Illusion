@@ -11,13 +11,8 @@ import org.lwjgl.util.spvc.SpvcHlslVertexAttributeRemap
 import org.lwjgl.util.spvc.SpvcReflectedResource
 
 /**
- * 镜像官方 `com.mojang.blaze3d.vulkan.glsl.IntermediaryShaderModule`。
- *
- * 持有 shaderc 编译出的 SPIR-V 字节码 + spvc 反射出的绑定信息：
- * uniform buffer（SPVC 资源类型 1）、sampled image（7）、输出（4）、输入（3）。
- * [rebind] 按管线绑定顺序把 SPIR-V 中的 binding/location decoration 重写；
- * [toHlsl] 用 spvc 的 HLSL 后端（SM5.1）把重写后的 SPIR-V 转成 HLSL，
- * 交给原生层 D3DCompile 出 DXBC。
+ * 一个着色器模块：SPIR-V 字节码 + 反射快照（UBO/sampler/in-out 的 decoration 字节偏移）。
+ * 改写规则与寄存器约定见 docs/shaders/README.md §6、§10
  */
 class D3D12IntermediaryShaderModule(
     private val name: String,
@@ -28,14 +23,14 @@ class D3D12IntermediaryShaderModule(
     private val inputs: List<SpvVariable>
 ) : AutoCloseable {
 
-    /** SPIR-V 中 uniform buffer 块（bindingOffset 指向 binding decoration 的字节偏移）。 */
+    /** bindingOffset 是 SPIR-V 内的字节偏移（不是字下标）。 */
     class SpvUniformBuffer(private val name: String, private val bindingOffset: Int) {
         fun name(): String = name
 
         fun bindingOffset(): Int = bindingOffset
     }
 
-    /** SPIR-V 中 combined image sampler（dimensions: 1=2D, 3=Cube, 5=Buffer）。 */
+    /** dimensions: 1=2D、3=Cube、5=Buffer。 */
     class SpvSampler(private val name: String, private val bindingOffset: Int, private val dimensions: Int) {
         fun name(): String = name
 
@@ -44,7 +39,6 @@ class D3D12IntermediaryShaderModule(
         fun dimensions(): Int = dimensions
     }
 
-    /** SPIR-V 中输入/输出变量（locationOffset 指向 location decoration 的字节偏移）。 */
     class SpvVariable(private val name: String, private val locationOffset: Int) {
         fun name(): String = name
 
@@ -70,9 +64,8 @@ class D3D12IntermediaryShaderModule(
     }
 
     /**
-     * 按管线绑定顺序重写 SPIR-V 中的绑定/位置：
-     * 输入变量按 vertex format 属性名顺序编 attribLocation；UBO/sampler 按
-     * [entries] 顺序编 binding。剩余未匹配的资源会抛异常（官方行为）。
+     * 原地改写 decoration：location 按 [inputVariables] 顺序编号、binding 直接取 [entries] 下标 i；
+     * 同名多 location（矩阵）共享起始点后连续递增；未被消耗的反射项一律抛异常。
      */
     @Throws(ShaderCompileException::class)
     fun rebind(inputVariables: List<String>, entries: List<D3D12BindGroupEntry>) {
@@ -154,13 +147,8 @@ class D3D12IntermediaryShaderModule(
     }
 
     /**
-     * 用 spvc HLSL 后端（SPVC_BACKEND_HLSL=2）把（已 rebind 的）SPIR-V 转成
-     * HLSL，**源码形态**固定 shader model 5.1（SPVC_COMPILER_OPTION_HLSL_SHADER_MODEL=51，
-     * SPIRV-Cross 的 HLSL 后端只有这一档）。
-     *
-     * 注意这只是**源码语法**：原生层拿到这段 HLSL 后用 DXC 编成 `vs_6_9`/`ps_6_9` 的 DXIL
-     * （2026-10-25 起硬要求 SM 6.9，`vs_5_1`/`ps_5_1` 那条 D3DCompile 路径已删除，见 P216）。
-     * 5.1 语法的源码在 6.9 profile 下仍然合法 —— 地形 VS 能被原样包进 mesh shader 也靠这一点。
+     * spvc HLSL 后端生成源码：`HLSL_SHADER_MODEL = 51` 只是语法档（DXIL 由 DXC 按 6_9 编），
+     * 两个 `POINT_*_COMPAT` 必须开，否则 vanilla `debug_point` 编译失败 → 资源包被移除、UI 黑屏。
      */
     @Throws(ShaderCompileException::class)
     fun toHlsl(isVertex: Boolean): String {
@@ -184,12 +172,6 @@ class D3D12IntermediaryShaderModule(
                 val options = pointer.get(0)
                 throwIfError(Spvc.spvc_compiler_options_set_uint(options,
                     Spvc.SPVC_COMPILER_OPTION_HLSL_SHADER_MODEL, 51), "Couldn't set HLSL shader model")
-                // P6 修复：GLSL 的 gl_PointSize / gl_PointCoord 在 SPIRV-Cross HLSL
-                // 后端默认不支持（SPVC_ERROR_UNSUPPORTED_SPIRV）。vanilla
-                // debug_point 管线（ShaderManager 必需）在 debug_point.vsh 里写
-                // gl_PointSize = LineWidth，若不启用兼容选项则编译失败 → ShaderManager
-                // apply() 抛异常 → 资源包全部移除 → UI 黑屏。启用后 spvc 会把点大小
-                // 输出映射到 SV_PointSize / PSIZE 语义，点坐标映射为 PSIZE/语义。
                 throwIfError(Spvc.spvc_compiler_options_set_uint(options,
                     Spvc.SPVC_COMPILER_OPTION_HLSL_POINT_SIZE_COMPAT, 1),
                     "Couldn't set HLSL point size compat")
@@ -198,21 +180,13 @@ class D3D12IntermediaryShaderModule(
                     "Couldn't set HLSL point coord compat")
                 throwIfError(Spvc.spvc_compiler_install_compiler_options(compiler, options),
                     "Couldn't install compiler options")
-                // Fix S2：为顶点着色器输入注入 D3D12 语义，避免 spvc 后端不生成正确语义导致
-                // CreateGraphicsPipelineState E_INVALIDARG。location 0 → POSITION，其余 → TEXCOORD<n>。
                 if (isVertex && this.inputs.isNotEmpty()) {
                     var inputIdx = 0
                     var prevLoc = -1
                     for (input in this.inputs) {
                         val loc = spv.asIntBuffer().get(input.locationOffset())
                         if (loc != prevLoc) {
-                            // BUG-02 fix: 语义按 SPIR-V location 分配（rebind 后 location 与顶点
-                            // 格式元素顺序一致：0→POSITION, n→TEXCOORD(n-1)），与 D3D12Device
-                            // buildVertexInputElements 的 attribLocation 对齐。原实现按反射顺序
-                            // （GLSL 声明顺序）分配，text.vsh 声明 Position,Color,UV0（格式为
-                            // Position,UV0,Color）→ Color 得 TEXCOORD0、UV0 得 TEXCOORD1，
-                            // 与 input layout 互换：TEXCOORD0 读 UV0 数据、TEXCOORD1 读 Color
-                            // 数据 → 字形采样坐标错误（GUI 文字消失/错乱）。
+                            // 语义按 SPIR-V location 分配（0→POSITION，n→TEXCOORD(n-1)），与顶点声明顺序无关。
                             val semantic = if (loc == 0) "POSITION" else "TEXCOORD${loc - 1}"
                             val remap = SpvcHlslVertexAttributeRemap.calloc(stack)
                             remap.location(loc)
@@ -226,16 +200,13 @@ class D3D12IntermediaryShaderModule(
                 }
                 val compileResult = Spvc.spvc_compiler_compile(compiler, pointer)
                 if (compileResult != 0) {
-                    // P6 诊断：附加 SPIRV-Cross 内部错误描述（如具体哪个 builtin/指令不支持），
-                    // 便于定位剩余管线编译失败的具体原因。
+                    // 附上 SPIRV-Cross 的错误描述，便于定位是哪个 builtin/指令不支持。
                     val detail = Spvc.spvc_context_get_last_error_string(context)
                     throwIfError(compileResult, "Couldn't compile HLSL"
                         + (if (detail != null && detail.isNotEmpty()) ": ${detail}" else ""))
                 }
                 val address = pointer.get(0)
                 val hlsl = MemoryUtil.memUTF8(address)
-                // Fix S2：语义通过 spvc_compiler_hlsl_add_vertex_attribute_remap 在编译前注入，
-                // 确保 spvc HLSL 后端输出正确的 D3D12 语义（POSITION/TEXCOORD<n>）。
                 val result = hlsl
                 result
             } finally {
@@ -271,11 +242,7 @@ class D3D12IntermediaryShaderModule(
         return null
     }
 
-    /**
-     * 为单次编译创建 SPIR-V 工作副本。
-     * rebind() 会原地修改 SPIR-V 的 decoration 字段，必须克隆后操作，
-     * 否则同一缓存模块被多次 rebind() 后互相污染。
-     */
+    /** SPIR-V 工作副本：rebind 是原地改写，缓存里的原始模块永不修改。 */
     fun cloneForCompile(): D3D12IntermediaryShaderModule {
         if (this.spirv == null) return this
         val dup = MemoryUtil.memCalloc(this.spirv.remaining())
@@ -285,18 +252,15 @@ class D3D12IntermediaryShaderModule(
     }
 
     companion object {
-        /** 无有效 SPIR-V 的占位模块（官方 INVALID）。 */
+        /** 无效模块占位（`spirv == null`）；对它 [rebind]/[toHlsl] 抛异常。 */
         @JvmField
         val INVALID: D3D12IntermediaryShaderModule =
             D3D12IntermediaryShaderModule("invalid", null, listOf(), listOf(), listOf(), listOf())
 
-        /** static 关键字后允许的字符集合（区分 static float4 与 static_cast）。 */
+        /** static 之后允许的字符（区分 `static float4` 与 `static_cast`）。 */
         private val AFTER_STATIC_ALLOWED: Set<Char> = setOf(' ', '\t', '\n', '\r')
 
-        /**
-         * 用 spvc 解析 SPIR-V 并反射出 UBO/sampler/输出/输入绑定信息，
-         * 随后把输出变量 location 打平为 0..n-1（与官方行为一致）。
-         */
+        /** 反射 UBO/sampler/output/input，并把输出变量的 location 打平为 0..n-1。 */
         @JvmStatic
         @Throws(ShaderCompileException::class)
         fun createFromSpirv(filename: String, spirv: ByteBuffer): D3D12IntermediaryShaderModule {
@@ -399,7 +363,7 @@ class D3D12IntermediaryShaderModule(
             }
         }
 
-        /** 读取 SPIR-V 二进制中某 decoration（33=BINDING / 30=LOCATION）的字节偏移。 */
+        /** decoration 的字节偏移（33=BINDING、30=LOCATION）。 */
         @Throws(ShaderCompileException::class)
         private fun getDecorationOffset(compiler: Long, resource: SpvcReflectedResource,
             decoration: Int, returnBuffer: IntBuffer): Int {

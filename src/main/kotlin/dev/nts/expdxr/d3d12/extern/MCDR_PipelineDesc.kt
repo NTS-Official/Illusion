@@ -7,47 +7,23 @@ import java.lang.foreign.ValueLayout
 import java.nio.charset.StandardCharsets
 
 /**
- * Structured replacement for the hand-packed little-endian `ByteBuffer` that the JNI
- * bridge used to carry `dx12CreateGraphicsPipeline`'s descriptor.
+ * Builder for `mcdr_pipeline_desc` — fill the lists with the fluent `with*` helpers, then [pack] it
+ * into an arena that outlives the downcall. Mirror layout: [MCDRLayout.PIPELINE_DESC]
+ * (docs/misc/ffm-abi.md §2.5).
  *
- * <p>The old path serialised ~100 lines of `putInt`/`putU8` on the Java side and
- * re-parsed them with a mirrored `readI32`/`readU8` reader plus a manual
- * `remaining -= …` byte budget on the C++ side. Nothing tied the two together, so a
- * field added on one side silently shifted every field after it. Here both sides share
- * [MCDRLayout.PIPELINE_DESC], and [MCDRLayout.verify] compares the offsets
- * against the running DLL at load time.
- *
- * <p>Two improvements over the serialised form, both of which remove a real bug class:
- * <ul>
- *   <li>`semanticName` rides on its own [InputElement] instead of living in a
- *       separate `semanticCount` section that was re-associated positionally — the
- *       old reader did `if (i < inputElements.size()) inputElements[i].semanticName = sn`,
- *       which silently mis-assigns when the two counts differ.</li>
- *   <li>An unused colour slot is `format = -1` (`DXGI_FORMAT_UNKNOWN`) rather
- *       than a separate `withUnusedColorTargetState` sentinel — the native side
- *       already treats `-1` that way.</li>
- * </ul>
- *
- * <p>Instances are single-use builders: fill the lists, then hand the object to
- * [MCDR_ABI.D3D12CreateGraphicsPipeline].
- *
- * 互操作：`ColorTarget` / `InputElement` / `Binding` 是**嵌套类**（Kotlin 默认即 Java 的
- * static nested class，不能写成 `inner class`），调用方按 `McdrPipelineDesc.ColorTarget(...)`
- * 这种静态形式使用；`MAX_*` 上限用 `const val`（object 中会生成寄宿类的静态字段），
- * 供 Java 侧 `McdrPipelineDesc.MAX_COLOR_TARGETS` 直接读取。
+ * 互操作：`ColorTarget` / `InputElement` / `Binding` 是**嵌套类**（Kotlin 默认即 Java 的 static
+ * nested，不能写成 `inner class`），`MAX_*` 用 `const val` 以便 Java 侧静态读取。
  */
 class MCDRPipelineDesc {
 
     companion object {
-        /** Upper bounds mirrored from the native validator (the old unpacker enforced the same). */
+        /** Upper bounds mirrored from the native validator. */
         const val MAX_COLOR_TARGETS = 8
         const val MAX_INPUT_ELEMENTS = 64
         const val MAX_BINDINGS = 64
         const val MAX_SEMANTIC_NAME_BYTES = 64
 
-        // ------------------------------------------------------------------
-        // Field offsets, resolved once from the shared layout.
-        // ------------------------------------------------------------------
+        // Field offsets, resolved once from the shared layout; never literals.
 
         private val OFF_VS_DATA: Long = off(MCDRLayout.PIPELINE_DESC, "vsData")
         private val OFF_VS_LEN: Long = off(MCDRLayout.PIPELINE_DESC, "vsLen")
@@ -123,7 +99,7 @@ class MCDRPipelineDesc {
             return this
         }
 
-        /** Mirrors the original `blendFunction().isPresent()` gate: absent means no blend. */
+        /** Sets `blendEnabled`; a deferred pipeline without a blend block means no blend. */
         fun blend(srcColor: Int, dstColor: Int, colorOp: Int,
             srcAlpha: Int, dstAlpha: Int, alphaOp: Int): ColorTarget {
             this.blendEnabled = true
@@ -169,9 +145,7 @@ class MCDRPipelineDesc {
     val inputElements: MutableList<InputElement> = ArrayList()
     val bindings: MutableList<Binding> = ArrayList()
 
-    // ------------------------------------------------------------------
-    // Fluent builders (kept close to the original call site's shape).
-    // ------------------------------------------------------------------
+    // Fluent builders.
 
     fun shaders(vertexHlslUtf8: ByteArray?, fragmentHlslUtf8: ByteArray?): MCDRPipelineDesc {
         this.vsBytes = vertexHlslUtf8
@@ -214,10 +188,8 @@ class MCDRPipelineDesc {
     }
 
     /**
-     * Lay the whole descriptor out in `arena` and return the `mcdr_pipeline_desc`
-     * address. Every nested array and C string is allocated in the same arena, so the result
-     * stays valid exactly as long as the arena does — the caller passes it straight into the
-     * downcall inside a try-with-resources.
+     * Lay the descriptor out in `arena` and return the `mcdr_pipeline_desc` address. Every nested
+     * array and C string lives in the same arena, so the result expires with it.
      */
     fun pack(arena: Arena): MemorySegment {
         require(colorTargets.size <= MAX_COLOR_TARGETS) { "too many colour targets: ${colorTargets.size}" }
@@ -311,9 +283,8 @@ class MCDRPipelineDesc {
     }
 
     /**
-     * Copy `data` into `arena`. An empty shader still gets a one-byte allocation
-     * so the pointer is never NULL: the native validator rejects a NULL pointer paired with a
-     * non-zero length, and a NULL pointer with length 0 is legal but needlessly delicate.
+     * Copy `data` into `arena`; an empty shader still gets a one-byte allocation so the pointer is
+     * never NULL (native rejects NULL paired with a non-zero length).
      */
     private fun blob(arena: Arena, data: ByteArray?): MemorySegment {
         if (data == null || data.size == 0) {

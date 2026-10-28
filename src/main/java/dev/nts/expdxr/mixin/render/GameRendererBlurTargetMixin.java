@@ -9,15 +9,10 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 
 /**
- * P106：GUI 背景模糊要作用在 GUI 自己的目标上。
+ * GUI 背景模糊要作用在 GUI 自己的目标上。
  *
- * GameRenderer.processBlurEffect()（GameRenderer.java:232-237）直接用字段 this.mainRenderTarget
- * 跑 BLUR 后处理链 —— 拆分启用后主渲染目标里只有世界层，界面已经搬到 GUI 目标上了，于是
- * 「模糊背景 + 叠加界面」的那种界面（物品栏、暂停菜单）会看不到模糊。
- *
- * PostChain.process(RenderTarget, ...) 会把传进去的目标当作 "main" 导入
- * （PostChain.java:164-165）、尺寸也取它的，所以直接把字段读的结果换成 GUI 目标是正确的：
- * 模糊就地作用在「世界层副本 + 模糊前界面」上，随后模糊后的界面元素再叠加。
+ * <p>拆分启用后主渲染目标里只有世界层；不换这里的字段读取，物品栏 / 暂停菜单这类「模糊背景 + 叠加
+ * 界面」的界面就看不到模糊。`PostChain.process` 会把传入目标当作 "main" 导入、尺寸也取它的。
  */
 @Mixin(GameRenderer.class)
 public class GameRendererBlurTargetMixin {

@@ -4,12 +4,8 @@ import com.mojang.renderpearl.api.GpuFormat
 import org.jspecify.annotations.Nullable
 
 /**
- * 镜像官方 {@code com.mojang.blaze3d.vulkan.VulkanBindGroupLayout.Entry}。
- *
- * 记录着色器实际声明的绑定资源（按 addToBindGroup 顺序），rebind 阶段会把
- * SPIR-V 中对应资源的 binding decoration 按此顺序重写为 0..n-1：
- * UBO -> cbuffer b{index}（D3D12 CBV），sampled image -> t{index}（SRV），
- * texel buffer -> t{index}（SRV）。
+ * 绑定资源的声明顺序。rebind 按 addToBindGroup 顺序把 SPIR-V 的 binding decoration 重写为
+ * 0..n-1（UBO→b{index}，sampled image / texel buffer→t{index}），顺序错了绑定整体错位。
  */
 data class D3D12BindGroupEntry(
     val type: Type,

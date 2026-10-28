@@ -5,18 +5,11 @@ import net.minecraft.network.chat.Component
 import org.slf4j.LoggerFactory
 
 /**
- * Runtime holder for the fourth [PreferredGraphicsApi] state that DXRMC adds:
- * the 3-state vanilla cycle button (Default / OpenGL / Vulkan) becomes a 4-state
- * one with Direct3D 12 last, i.e. right after Vulkan.
+ * DXRMC 追加的第四个 [PreferredGraphicsApi] 状态（Direct3D 12，排在 Vulkan 之后）。
  *
- * Vanilla cannot be extended by adding a source-level enum constant - the mod
- * ships compiled against the same enum and `$VALUES` is already baked into
- * `<clinit>`. So [dev.nts.expdxr.mixin.options.PreferredGraphicsApiMixin] constructs the
- * constant reflectively through an `@Invoker("<init>")` accessor, republishes it
- * from `values()` and rebuilds the static `CODEC`.
- *
- * Everything here is looked up at runtime, so [constant] is null until the
- * enum's `<clinit>` has run through the mixin.
+ * 枚举不能在源码层扩展（`$VALUES` 已烙进 vanilla 的 `<clinit>`），由
+ * [dev.nts.expdxr.mixin.options.PreferredGraphicsApiMixin] 用 `@Invoker("<init>")` 反射构造后
+ * 重发 `values()` 并重建 `CODEC`。故这里一切都在运行时查：[constant] 在 `<clinit>` 跑完前是 null。
  */
 object D3D12GraphicsApi {
     const val SERIALIZED_NAME = "d3d12"
@@ -35,11 +28,7 @@ object D3D12GraphicsApi {
     @JvmStatic fun install(value: PreferredGraphicsApi) { installed = value }
 
 
-    /**
-     * Records the resulting cycle-button size. Called by the mixin right after `CODEC`
-     * has been rebuilt, because that rebuild is what makes the appended entry survive a
-     * round trip through `options.txt`.
-     */
+    /** 由 mixin 在 `CODEC` 重建后调用：只有重建过，追加项才能经 options.txt 往返存活。 */
     @JvmStatic
     fun logInstalled(stateCount: Int) {
         LOGGER.info(
@@ -50,12 +39,10 @@ object D3D12GraphicsApi {
     }
 
     /**
-     * True only for the DXRMC constant; every vanilla value returns false.
+     * 只对 DXRMC 的常量返回 true，vanilla 值一律 false。
      *
-     * [value] is deliberately `Any?` rather than [PreferredGraphicsApi]: the tooltip
-     * injection point is the shared `OptionInstance` constructor, so call sites pass
-     * every options type the game has, and an erased lambda parameter would insert a
-     * checkcast that throws ClassCastException on, say, an Integer.
+     * [value] 刻意是 `Any?` 而不是 [PreferredGraphicsApi]：注入点是共享的 `OptionInstance` 构造器，
+     * 调用点会传各种 options 类型，erased lambda 参数会插 checkcast 而在 Integer 上抛 ClassCastException。
      */
     @JvmStatic
     fun isDx12(value: Any?): Boolean {

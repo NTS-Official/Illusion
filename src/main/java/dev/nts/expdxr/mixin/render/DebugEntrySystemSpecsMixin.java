@@ -13,19 +13,10 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * Appends DXRMC's own rows to the F3 "system specs" block.
+ * 往 F3 的 "system specs" 块追加本模组的行（分辨率 + VRAM、后端标识）。
  *
- * <p>Vanilla's block already carries the four GPU/display parameters - the
- * window resolution with the device vendor, the device name with its
- * integrated/discrete tag, and the backend with its driver string - and those are
- * now truthful for the D3D12 backend because {@code D3D12Device} builds its
- * {@code DeviceInfo} from the native adapter query. What vanilla has nowhere to put
- * is the resolution-plus-VRAM line and the mod's backend-identity line, so those are
- * added here, directly below, in the same group.
- *
- * <p>Nothing is added while the game renders through OpenGL or Vulkan:
- * {@code D3D12AdapterInfo.current} is null then, which is how the two backends' own
- * F3 output is left completely untouched.
+ * <p>非 D3D12 时 `D3D12AdapterInfo.current` 为 null，返回空列表，其它后端自己的 F3 输出保持原样。
+ * 见 docs/misc/mixins-and-earlywindow.md §3.8
  */
 @Mixin(DebugEntrySystemSpecs.class)
 public abstract class DebugEntrySystemSpecsMixin {

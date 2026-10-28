@@ -3,29 +3,25 @@ package dev.nts.expdxr.mixin.core;
 import com.mojang.blaze3d.platform.Window;
 import com.mojang.renderpearl.api.device.GpuBackend;
 import dev.nts.expdxr.d3d12.backend.D3D12Backend;
-import dev.nts.expdxr.misc.EarlyWindowSurface;
+import dev.nts.expdxr.misc.fmlelw_control.EarlyWindowSurface;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
- * P268: let Minecraft adopt the SDL window that our early window provider already created instead of spawning a
- * second one. Without this the early loading window and the game window are two different windows.
+ * 接管 provider 已建好的 SDL 窗口，否则加载窗与游戏窗会是两个窗口。
  *
- * <p>The provider runs in the loader's early-service class loader, so it cannot share classes with the game.
- * The window handle therefore travels through a JVM wide system property (removed again as soon as it is
- * consumed, so a later window cannot adopt a stale handle).</p>
- *
- * <p>P269: only for our Direct3D 12 backend. On OpenGL / Vulkan the vanilla path must create the window itself
- * (it needs its own GL attributes / surface flags), so the handle is dropped and the provider hides its window.</p>
+ * <p>句柄只能走系统属性（provider 在 early-service 类加载器里，与游戏不共享静态），读后必须立刻清除；
+ * 非 D3D12 后端必须保留不清，因为每个后端尝试都会建一次窗口。
+ * 见 docs/misc/mixins-and-earlywindow.md §5.4</p>
  */
 @Mixin(Window.class)
 public abstract class WindowAdoptCreatedMixin {
-    /** Written by {@code DxrmcEarlyWindowProvider.initialize()} (early-service jar). */
+    /** provider 写入；被接管时清除。 */
     private static final String HANDLE_PROPERTY = "dxrmc.earlywindow.handle";
 
-    /** Set here so the provider knows its window was taken over instead of being abandoned. */
+    /** 告知 provider 窗口已被接管而非丢弃。 */
     private static final String ADOPTED_PROPERTY = "dxrmc.earlywindow.adopted";
 
     @Inject(method = "createWindow", at = @At("HEAD"), cancellable = true)
@@ -36,9 +32,7 @@ public abstract class WindowAdoptCreatedMixin {
             return;
         }
         if (!(backend instanceof D3D12Backend)) {
-            // P269: vanilla creates (and shows) its own window; the provider hides ours on hand-over.
-            // Keep the property: the game creates the window once per backend attempt, so our backend may
-            // still come up second. The provider clears the property on hand-over either way.
+            // 不能清属性：每个后端尝试都会建一次窗口，我们的后端可能第二次才起来。
             return;
         }
         System.clearProperty(HANDLE_PROPERTY);

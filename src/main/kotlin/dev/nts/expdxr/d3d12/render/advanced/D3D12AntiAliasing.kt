@@ -14,31 +14,19 @@ import net.minecraft.client.gui.screens.options.OptionsSubScreen
 import net.minecraft.network.chat.Component
 
 /**
- * The Direct3D 12 backend's antialiasing mode, exposed as an ordinary vanilla
- * video setting instead of a mod-config entry.
+ * The D3D12 backend's antialiasing mode, exposed as a vanilla video setting (`options.txt`).
  *
- * The Direct3D 12 renderer reads the selection through [current] and hands it to the native backend
- * through [MCDR_ABI.D3D12SetAntiAliasing] ([push]). SMAA is implemented natively (three
- * full-screen passes right before the final blit); TAA and DLAA are still placeholders and are
- * downgraded to OFF by the native side. No restart is needed — the mode takes effect on the next
- * blit.
+ * Read through [current], pushed to native via [MCDR_ABI.D3D12SetAntiAliasing]; takes effect on the
+ * next blit. See docs/antialiasing/README.md §2.
  */
 object D3D12AntiAliasing {
-    // Antialiasing mode. Note that TAA and DLAA are not yet implemented.
-    // 公开（不是 private）：DLSS 那边（dev.nts.expdxr.dxrmc.dlss）在"旧 DLL 兼容桥"里要把抗锯齿
-    // 还原成 SMAA/OFF，而且这几个值本就是这套选项的公开取值域。
+    // Public (not private): the DLSS bridge restores these values, and they are this option's domain.
     const val OFF = 0
     const val SMAA = 1
     const val TAA = 2
     const val DLAA = 3
 
-    /**
-     * Cycle order of the video-settings button.
-     *
-     * <p>P108b（用户 m10920）：DLSS **不再占第 4 档** —— 它是自己那一项设置（`options.dlss` /
-     * `dxrMcDlss`，见 `dev.nts.expdxr.dxrmc.dlss.D3D12Dlss`），这一栏回到 0..3。两者互相独立：
-     * 都开时 native 先对低分辨率世界层做 SMAA，再让 DLSS 升采样。
-     */
+    /** Cycle order of the button (0..3); DLSS is a separate setting, not a 4th slot. */
     @JvmField
     val MODES: List<Int> = listOf(OFF, SMAA, TAA, DLAA)
 
@@ -50,18 +38,13 @@ object D3D12AntiAliasing {
         {
             Tooltip.create(Component.translatable("options.antiAliasing.tooltip"))
         },
-        // Only the value is returned here: the options is a cycle button, and
-        // vanilla's CycleButton already prefixes the caption itself
-        // (CommonComponents.optionNameValue in CycleButton.Builder.create),
-        // so including it here renders the label twice.
+        // Value only: CycleButton prefixes the caption itself, so passing it here renders it twice.
         { _, value ->
             Component.translatable(modeKey(value))
         },
         OptionInstance.Enum<Int>(MODES, Codec.INT),
         OFF,
-        // P104: every change (a click on the video-settings button, or the value restored from
-        // options.txt) is pushed straight to the native renderer. The native side only records
-        // the mode and applies it on the next blit, so no restart is involved.
+        // Any change is pushed straight to native, which records it and applies it on the next blit.
         { value -> push(value); markPresetCustom() }
     )
 
@@ -81,43 +64,30 @@ object D3D12AntiAliasing {
     /** 预设正在写这个选项（或正在从 options.txt 恢复）：此时不要把画质预设打成"自定义"。 */
     private var suppressPresetCustom = false
 
-    // ------------------------------------------------------------------
-    // DLSS 开启期间的锁定
-    // ------------------------------------------------------------------
+    // DLSS lock: while on, this option is forced to OFF and greyed out in the UI.
 
     /**
-     * DLSS 是否正占着这个选项（由 [dev.nts.expdxr.dxrmc.sr.dlss.DeepLearningSuperSampling] 推过来）。
-     *
-     * 这里**故意不 import** DLSS：依赖只能单向。DLSS 打开时把 AA 锁成 [OFF]，本类据此
-     * ①拒掉预设/回推对取值的改写、②让界面把按钮置灰。
-     *
-     * **为什么不写 KDoc 链接**：`[DeepLearningSuperSampling]` 算不出 KDoc 链接会直接**编译失败**
-     * （K2 的 `Unresolved reference in KDoc` 是 error），所以这些注释一律用全限定名。
+     * Whether DLSS currently owns this option (pushed from the DLSS side; no import here — the
+     * dependency is one-way). KDoc must use fully-qualified names: an unresolved link fails K2.
      */
     @Volatile
     private var dlssLock = false
 
-    /** 加锁的是不是"本类自己"：是才说明有快照可还原。 */
+    /** True only when the lock came from this class, i.e. there is a snapshot to restore. */
     private var dlssLockApplied = false
 
-    /** P108aa：DLAA 抢占 DLSS 的"这行日志只打一次"。 */
+    /** "DLAA already owns DLSS" log, reported once. */
     @Volatile
     private var dlaaOwnsDlssReported = false
 
-    /** 加锁前玩家自己选的模式，解冻时还回去；[OFF] 表示当初没必要存快照。 */
+    /** Mode the player picked before the lock; [OFF] means there was nothing to snapshot. */
     private var dlssModeSnapshot = OFF
 
-    /**
-     * DLSS 开关变化时由 DLSS 侧调用：开 => 本选项锁成 [OFF]，关 => 还原玩家原先的选择。
-     *
-     * 幂等，且每次开关切换只打一行日志（不会每帧刷屏）。
-     */
+    /** Called by the DLSS side when its toggle changes: on => lock to [OFF], off => restore the pick. */
     @JvmStatic
     fun setDlssLock(locked: Boolean) {
-        // P108aa（用户 m11796）：DLAA 由抗锯齿选项**自己**接管 DLSS，绝不能被"DLSS 开关打开就
-        // 把抗锯齿锁成 OFF"这条规则清掉 —— 实测过：`options.txt` 里 AA=DLAA、DLSS=true 时，
-        // DLSS 那条 TAIL 注入晚于 AA 那条，于是刚 engaged 的 DLAA 在 3 秒后被改成 OFF
-        //（`anti-aliasing = OFF` + `DLSS 已开启：抗锯齿锁为 OFF`），缩放随之从 100 掉回 90。
+        // DLAA owns the DLSS feature itself, so it must not be locked to OFF (the DLSS injection runs
+        // after the AA one and used to undo a DLAA that had just engaged).
         if (locked && OPTION.get() == DLAA) {
             if (!dlaaOwnsDlssReported) {
                 dlaaOwnsDlssReported = true
@@ -130,7 +100,7 @@ object D3D12AntiAliasing {
         dlssLock = locked
         if (locked) {
             if (!dlssLockApplied) {
-                // 玩家本来就停在 OFF 上时不留快照：解冻时"还回 OFF"与"没动过"是同一结果。
+                // Snapshot only when it is not already OFF: "restore OFF" equals "untouched".
                 dlssModeSnapshot = if (OPTION.get() == OFF) OFF else OPTION.get()
                 if (OPTION.get() != OFF) {
                     setModeQuietly(OFF)
@@ -151,11 +121,11 @@ object D3D12AntiAliasing {
         }
     }
 
-    /** 界面据此把按钮置灰。 */
+    /** The UI greys the button out on this. */
     @JvmStatic
     fun isLockedByDlss(): Boolean = dlssLock
 
-    /** 写取值但不惊动画质预设、也不回推 native（[push] 在写完后再显式调一次）。 */
+    /** Writes the value without touching the quality preset or re-pushing to native. */
     private fun setModeQuietly(mode: Int) {
         suppressPresetCustom = true
         try {
@@ -166,15 +136,8 @@ object D3D12AntiAliasing {
     }
 
     /**
-     * 画质预设 -> 抗锯齿：流畅(fast)=关、高品质(fancy)=SMAA、极佳(fabulous)=TAA，自定义不动。
-     * 由 [dev.nts.expdxr.mixin.options.OptionsGraphicsPresetMixin] 在 GraphicsPreset.apply 之后调用。
-     *
-     * 两条判据都写在这里，调用方不需要再猜：
-     * 1. **只有真的在 D3D12 后端下渲染时才动**（[isAvailable]，也就是
-     *    `D3D12AdapterInfo.current != null`）。走 GL/Vulkan 时这一项在原版界面里只是个置灰的
-     *    摆设，此时改它会顺手改掉 `options.txt` 里的取值 —— 下次切回 D3D12 就变成"预设替玩家
-     *    做了决定"。所以后端不对就一个字节都不碰。
-     * 2. DLSS 锁定期内整个跳过：切画质预设不能把被锁住的选项改回去。
+     * Quality preset -> antialiasing: fast=OFF, fancy=SMAA, fabulous=TAA, anything else untouched.
+     * Skip unless on the real D3D12 backend ([isAvailable]), and skip while DLSS holds the lock.
      */
     @JvmStatic
     fun applyFromPreset(serializedName: String) {
@@ -191,23 +154,16 @@ object D3D12AntiAliasing {
             else -> return
         }
         setModeQuietly(mode)
-        // 换值不会自己刷新界面上的按钮，见 [refreshScreenWidget]。
+        // Changing the value does not repaint the widget by itself.
         refreshScreenWidget()
     }
 
     /**
-     * 让视频设置界面上的那个循环按钮重新读一次当前取值。
-     *
-     * [OptionInstance.set] 只改值、只回调 `onValueUpdate`，**不碰** `OptionsList` 里的 widget：
-     * 每个选项按钮是一个 `CycleButton`，自己缓存着 `value` / `index`，只有
-     * `ResettableOptionWidget.resetValue()`（`OptionsList.resetOption` 转调它）才会重新读
-     * `OptionInstance.get()` 并重画标签。vanilla 的 `GraphicsPreset.set` 对它清单里的原版选项
-     * 逐个调了 `screen.resetOption(...)`，抗锯齿不在那份清单里，所以必须自己补 —— 否则切完预设，
-     * 按钮还停在旧档位（看起来就是"预设没应用到抗锯齿"），玩家接着点它还会从旧的缓存档位继续循环。
+     * Makes the cycle button re-read the value: [OptionInstance.set] never touches the widget, only
+     * `OptionsList.resetOption` -> `ResettableOptionWidget.resetValue()` repaints the caption.
      */
     private fun refreshScreenWidget() {
-        // `gui` 在窗口/界面还没建好时可能是 null（原版 GraphicsPreset.apply 也先判空），
-        // 而预设只会在视频设置界面里被改 —— 用 runCatching 兜住，和 [markPresetCustom] 一致。
+        // `gui` can be null before a screen exists; presets only change from the video-settings screen.
         runCatching {
             val screen = Minecraft.getInstance().gui.screen()
             if (screen is OptionsSubScreen) {
@@ -216,7 +172,7 @@ object D3D12AntiAliasing {
         }
     }
 
-    /** 玩家自己改了抗锯齿 -> 画质预设变"自定义"，与 vanilla 选项同一行为。 */
+    /** A player edit marks the quality preset "custom", like any vanilla option. */
     private fun markPresetCustom() {
         if (suppressPresetCustom) {
             return
@@ -227,7 +183,7 @@ object D3D12AntiAliasing {
         }
     }
 
-    /** Short name used in the log lines (the lang keys are for the UI). */
+    /** Short name for log lines (lang keys are for the UI). */
     private fun modeName(mode: Int): String = when (mode) {
         OFF -> "OFF"
         SMAA -> "SMAA"
@@ -237,30 +193,17 @@ object D3D12AntiAliasing {
     }
 
     /**
-     * P104: hands the selected mode to the native renderer.
-     *
-     * The native layer keeps the mode in its device context and re-issues the SMAA passes on every
-     * blit (TAA keeps its own history there and is resolved by `mcdr_dx12ApplyTaaToTexture`), so
-     * this needs neither a device nor a restart. A missing export means the loaded `MCDR.dll`
-     * predates this feature; that is reported once per call and otherwise ignored.
+     * Hands the mode to native (no device, no restart); a missing export means an old `MCDR.dll`.
      */
     private fun push(mode: Int) {
-        // DLSS 锁定期内这是**回推 native** 的路径，不是"玩家改了设置"的路径：必须仍然下发，
-        // 否则 native 的设备上下文会停在旧模式上（尤其关掉 DLSS、还原玩家选择的这一次）。
-        // 玩家能不能改由界面置灰 + [validateLocked] 负责。
-        //
-        // P108aa（用户 m11796）：**DLAA 由 DLSS 特性实现，不走抗锯齿通道** —— native 的
-        // `mcdrSetAntiAliasing` 里 3 没有实现（接受但降级成 OFF 并 WARN）。所以这里把 DLAA
-        // 映射成 OFF 再下发；真正的 DLAA 由 `DeepLearningSuperSampling` 那条链路
-        //（render == target + 挡位 3 + handover）接管，它每帧从 [current] 读到这个 3。
+        // This is the "re-push" path, not a player edit: it must still be sent or native keeps the
+        // old mode. DLAA is implemented by the DLSS feature, not the AA channel, so push OFF for it.
         val pushed = if (mode == DLAA) OFF else mode
-        // 返回值契约（`d3d12_mc::setAntiAliasing`）：成功时**返回生效的模式本身**（0=OFF 也合法），
-        // 3（DLAA）会被降级成 OFF 并返回 0，非法值返回 -1。所以"0"必须按模式区分 ——
-        // 对 OFF 而言 0 就是成功（旧代码会误报 "OFF is not implemented yet"）。
+        // Contract: the effective mode on success (0 == OFF is legal), 3 downgraded to 0, -1 invalid.
         val status = MCDR_ABI.D3D12SetAntiAliasing(pushed)
         when {
             status == pushed -> Illusion.LOGGER.info("anti-aliasing = {}", modeName(mode))
-            status == 0 && pushed != OFF -> Illusion.LOGGER.warn(
+            status == 0 -> Illusion.LOGGER.warn(
                 "anti-aliasing {} is not implemented yet; the renderer falls back to OFF",
                 modeName(mode),
             )
@@ -271,16 +214,13 @@ object D3D12AntiAliasing {
         }
     }
 
-    /** Re-pushes the stored selection; kept for callers that need to force a sync. */
+    /** Re-pushes the stored selection, for callers that need a forced sync. */
     @JvmStatic
     fun applyCurrent() {
         push(OPTION.get())
     }
 
-    /**
-     * Restores the mode from vanilla's `options.txt`. Called at the tail of
-     * [Options.load]; the line format is vanilla's own `key:jsonValue`.
-     */
+    /** Restores the mode from `options.txt` at the tail of [Options.load]; format is `key:jsonValue`. */
     @JvmStatic
     fun load(file: File) {
         if (!file.isFile) {
@@ -293,9 +233,8 @@ object D3D12AntiAliasing {
                 }
                 val mode = line.substring(OPTIONS_KEY.length + 1).trim().toIntOrNull()
                 if (mode != null && MODES.contains(mode)) {
-                    // 从 options.txt 恢复不算"玩家手改"，否则会把刚载入的画质预设立刻打成自定义。
-                    // DLSS 锁定期内则整个忽略：这条注入与 DLSS 自己那条同在 `Options.load` 的 TAIL
-                    // 上，先后顺序不由我们决定，照单全收就会把"DLSS 开着 => 抗锯齿 OFF"的约定破坏掉。
+                    // A restore is not a player edit, so it must not mark the preset custom; while the
+                    // DLSS lock is on the line is ignored outright — both injections share one TAIL.
                     if (dlssLock) {
                         Illusion.LOGGER.info(
                             "DLSS is on; ignoring the anti-aliasing mode {} restored from {}",
@@ -316,17 +255,11 @@ object D3D12AntiAliasing {
             Illusion.LOGGER.warn("could not read {} from {}", OPTIONS_KEY, file, t)
             return
         }
-        // 文件里没有这一行时（首次运行 / 用户删过）也要推一次，让 native 与界面取值一致。
+        // Push anyway when the line is missing (first run / user deleted it): UI and native must agree.
         push(OPTION.get())
     }
 
-    /**
-     * Writes the mode back into vanilla's `options.txt`.
-     *
-     * Vanilla rewrites that file from scratch on every save, so the line has to
-     * be re-added afterward; a stale copy is dropped first so repeated saves
-     * cannot pile up duplicates.
-     */
+    /** Writes the mode back into `options.txt`, which vanilla rewrites from scratch on every save. */
     @JvmStatic
     fun save(file: File) {
         if (!file.isFile) {

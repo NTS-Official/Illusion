@@ -9,7 +9,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-/** P51：可见性与遮挡图每帧更新耗时。 */
+/** 可见性与遮挡图每帧更新的耗时。 */
 @Mixin(SectionOcclusionGraph.class)
 public class SectionOcclusionGraphProfMixin {
     @Inject(method = "update", at = @At("HEAD"), remap = false)

@@ -8,19 +8,11 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * Persists DXRMC's antialiasing mode in vanilla's own {@code options.txt}.
+ * 把抗锯齿模式写进原版 {@code options.txt}。
  *
- * <p>The options is a real {@code OptionInstance} (see {@link D3D12AntiAliasing})
- * but it is not a field of {@code Options}, so vanilla's
- * {@code processDumpedOptions} pass cannot see it. Rather than reach into that
- * pass - its argument type, {@code Options.OptionAccess}, is a private nested
- * interface - the value is written next to vanilla's own options at the tail of
- * {@code save} and read back at the tail of {@code load}, using the same
- * {@code key:jsonValue} line format and the same file.
- *
- * <p>{@code load} returns early when the file does not exist; the TAIL
- * injection therefore only runs on the normal path, and {@code load} itself
- * tolerates a missing file.
+ * <p>它不是 {@code Options} 的字段，原版 {@code processDumpedOptions} 看不到；而那个 pass 的参数类型
+ * {@code Options.OptionAccess} 是私有嵌套接口，所以只能在 {@code load} / {@code save} 的 TAIL 用同一份
+ * {@code key:jsonValue} 格式自己读写。见 docs/misc/mixins-and-earlywindow.md §3.7</p>
  */
 @Mixin(Options.class)
 public abstract class OptionsAntiAliasingMixin {

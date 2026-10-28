@@ -4,57 +4,38 @@ import com.mojang.renderpearl.api.device.DeviceType
 import java.util.*
 
 /**
- * Real adapter facts reported by the native backend through
- * [dev.nts.expdxr.d3d12.extern.ID3D12GetAdapterInfo] (`mcdr_dx12GetAdapterInfo` in `mcdr_abi.h`).
+ * native 上报的真实适配器信息（`mcdr_dx12GetAdapterInfo`）。
  *
- * Before this class existed [D3D12Device] hardcoded `"D3D12"` / `"D3D12 driver"` /
- * [DeviceType.DISCRETE], so the F3 system block showed the same three strings on
- * every machine. The native side now reports what DXGI - and, when it is
- * available, DXCore - actually says.
- *
- * [current] is the instance belonging to the live D3D12 device. It stays `null`
- * while the game renders through GL/Vulkan, which is exactly the signal the F3
- * mixin uses to decide whether to append the DXRMC lines at all.
+ * [current] 属于当前活的 D3D12 设备；GL/Vulkan 渲染时为 null —— F3 mixin 正是靠它决定是否追加 DXRMC 行。
  */
 class D3D12AdapterInfo private constructor(
-    /** DXGI `DXGI_ADAPTER_DESC1.Description`, UTF-8. */
+    // 字符串域取值：featureLevel ∈ "12_2"|"12_1"|"12_0"|"11_1"|"11_0"|"unknown"，
+    // deviceType ∈ "integrated"|"discrete"|"virtual"|"cpu"|"other"；driverVersion 空 = 无 DXCore。
     val name: String,
-    /** Vendor display name, mapped natively from the PCI vendor id. */
     val vendor: String,
     val vendorId: Int,
     val deviceId: Int,
-    /** `"12_2"` / `"12_1"` / `"12_0"` / `"11_1"` / `"11_0"` / `"unknown"`. */
     val featureLevel: String,
     val featureLevelValue: Int,
-    /** DXCore driver version, `"a.b.c.d"`; empty when DXCore is unavailable. */
     val driverVersion: String,
     val driverDescription: String,
-    /** `"integrated"` / `"discrete"` / `"virtual"` / `"cpu"` / `"other"`. */
     val deviceType: String,
     val vramBytes: Long,
     val sharedBytes: Long,
     val dedicatedSystemBytes: Long,
-    /** `"%08X%08X"` of the adapter LUID (LowPart first), as the native side writes it. */
     val luid: String,
     val isHardware: Boolean,
     val isDetachable: Boolean,
-    /** Whether D3DCore contributed [driverVersion] and [deviceType]. */
     val d3dcore: Boolean,
 
-    /** VRS tier reported by `D3D12_FEATURE_DATA_D3D12_OPTIONS6` (0 = no variable rate shading). */
+    // VRS：tier 0 = 不支持；tileSize 0 = 没有 tier 2（SRI）；additional = 支持 2X4/4X2/4X4。
     val shadingRateTier: Int = 0,
 
-    /** Shading-rate-image tile edge in pixels (0 when the device has no tier 2). */
     val shadingRateTileSize: Int = 0,
 
-    /** Whether the device also supports 2X4 / 4X2 / 4X4 ("additional shading rates"). */
     val additionalShadingRates: Boolean = false
 ) {
-    /**
-     * Vanilla-style driver string, i.e. what [com.mojang.blaze3d.systems.DeviceInfo.driverInfo]
-     * carries: `"<feature level> <driver version>"` (mirrors the Vulkan backend's
-     * `"%s %s %s"` composition of version / driver name / driver info).
-     */
+    /** vanilla 风格驱动串：`"<feature level> <driver version>"`。 */
     fun driverInfo(): String {
         val parts = arrayListOf<String>()
         if (featureLevel.isNotEmpty() && featureLevel != "unknown") {
@@ -69,10 +50,10 @@ class D3D12AdapterInfo private constructor(
         return parts.joinToString(" ")
     }
 
-    /** Backend name shown in the F3 backend/driver line. */
+    /** F3 的 backend/driver 行显示的 backend 名。 */
     fun backendName(): String = "Direct3D 12"
 
-    /** Vendor name, with a placeholder when the native mapping had nothing to say. */
+    /** 厂商名；native 映射不出来时给占位符。 */
     fun vendorName(): String = if (vendor.isNotEmpty()) vendor else "unknown"
 
     fun deviceTypeEnum(): DeviceType = when (deviceType.lowercase(Locale.ROOT)) {
@@ -87,22 +68,19 @@ class D3D12AdapterInfo private constructor(
 
     fun sharedMiB(): Long = sharedBytes shr 20
 
-    /** One-line summary for the startup log. */
+    /** 启动日志用的一行摘要。 */
     fun summary(): String = "${name} [${vendorName()} ${deviceType}]" +
         " backend=${backendName()} driver=${driverInfo()}" +
         " vram=${vramMiB()}MiB shared=${sharedMiB()}MiB" +
         " luid=${luid} d3dcore=${d3dcore}"
 
     companion object {
-        /**
-         * The adapter belonging to the live D3D12 device, or `null` when the game
-         * is rendering through GL/Vulkan. Read by the F3 mixin.
-         */
+        /** 当前活的 D3D12 设备的适配器；GL/Vulkan 渲染时为 null（F3 mixin 读它）。 */
         @JvmField
         @Volatile
         var current: D3D12AdapterInfo? = null
 
-        /** Never-null placeholder used when the native call returned nothing usable. */
+        /** native 没给出可用内容时的占位（永不为 null）。 */
         @JvmField
         val UNKNOWN: D3D12AdapterInfo = D3D12AdapterInfo(
             "", "", 0, 0, "unknown", 0, "", "", "other", 0L, 0L, 0L, "",
@@ -138,13 +116,8 @@ class D3D12AdapterInfo private constructor(
         }
 
         /**
-         * Parse the JSON **array** returned by `mcdr_dx12EnumerateAdapters`
-         * (`[{"name":…}, …]`), one element at a time through [parse].
-         *
-         * That export walks DXGI in preference order and lists every adapter that can create a
-         * D3D12 12_0 device, each entry carrying `feature_level` / `feature_level_value`
-         * (probed with a throw-away device). It is what [dev.nts.expdxr.Illusion] reads at mod
-         * construction, i.e. before the live device exists.
+         * 解析 `mcdr_dx12EnumerateAdapters` 返回的 JSON **数组**：按 DXGI 优先序，列出所有能建
+         * D3D12 12_0 设备的适配器。Illusion 在模组构造期（活设备尚不存在时）读它。
          */
         fun parseList(json: String?): List<D3D12AdapterInfo> {
             if (json == null) {
@@ -161,10 +134,8 @@ class D3D12AdapterInfo private constructor(
         }
 
         /**
-         * Flat `{"key": value, ...}` reader. The native side never emits nested
-         * objects or arrays, so a single scan is enough; handling it here instead
-         * of pulling in Gson keeps this usable from the mod's standalone
-         * `ktc.ps1` compile check, whose ad-hoc classpath has no Gson.
+         * 扁平 `{"key": value}` 读取：native 从不发嵌套结构，单趟扫描即可。自己写而不引 Gson，
+         * 是因为 `ktc.ps1` 独立编译检查的 ad-hoc classpath 里没有 Gson。
          */
         private fun parseFlatObject(json: String?): Map<String, String> {
             if (json == null) {

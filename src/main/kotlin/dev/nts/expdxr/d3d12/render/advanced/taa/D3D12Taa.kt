@@ -10,46 +10,22 @@ import net.minecraft.client.Minecraft
 import org.slf4j.LoggerFactory
 
 /**
- * P77 → P152：TAA（时域抗锯齿）的 JVM 侧入口。
+ * TAA 的 JVM 侧薄壳：resolve 与历史纹理都在 native（`DeviceContext::applyTaaToTexture`），
+ * 这里每帧只算 jitter / 上一帧 jitter / 历史代数 / 锐化量。
  *
- * 这条链路原先整条都录在 JVM 侧（历史纹理、参数块、PSO、HLSL 全在这里），P152 起 **resolve 本体
- * 搬进 native**（`MCDR\src\core\d3d12_device.cpp` 的 `applyTaaToTexture`）：
- *
- * - 历史纹理的乒乓、RTV 堆、根签名与 PSO、参数块、两趟 pass（resolve → 回填主目标）都由
- *   `DeviceContext` 持有，跨帧存活；
- * - 本类只负责**每帧算出 native 需要的那几个值**（jitter、历史代数是否变了、后置锐化量），
- *   然后把它们连同主目标与运动矢量的句柄交给 [MCDR_ABI.dx12ApplyTaaToTexture]。
- *
- * 这样做的直接好处是历史纹理不再走 `D3D12GpuTexture` 的创建/销毁路径：那条路径在传送、改窗口
- * 尺寸时会于**上一帧的命令列表还在飞**的时候销毁资源（见旧版 `reset()` 的注释，实测能把设备打
- * 掉），而 native 的重建发生在录制新一帧的时候，天然安全。
- *
- * ## 调用时机
- * 世界层画完、GUI 还没画的那一刻（`GameRendererSmaaWorldMixin` → [applyIfEnabled]）。这与 SMAA
- * 的策略一致：抗锯齿只作用在世界层，UI 文字与面板保持锐利。
- *
- * ## 运动矢量的方向约定
- * [D3D12Velocity] 产出的 mv 是 **`prevPos - curPos`**（像素单位，NVIDIA DLSS 指南的约定），所以
- * 历史位置 = `本像素 + mv`（native 的 PS 里就是 `historyUv = (coord + 0.5 + mv) * RcpScreenSize`）。
- * 方向反了会让 TAA 沿运动方向拖一条永不收敛的残影。
+ * 挂点：世界层画完、GUI 未画。运动矢量方向 = `prevPos - curPos`（像素单位）。
+ * 见 docs/antialiasing/README.md §1、§3.2。
  */
 object D3D12TAA {
 
     private val LOGGER = LoggerFactory.getLogger("dxrmc-taa")
 
-    /**
-     * 本帧权重：`out = mix(history, current, BLEND)`。
-     *
-     * 1/16 即 16 帧的时间常数。偏大（1/8）收敛快但降噪弱、动态场景更糊；偏小（1/32）更平滑
-     * 但运动边缘容易残留。0.0625 是常见起点，实机看效果再调。
-     */
+    /** 本帧权重 `out = mix(history, current, BLEND)`；1/16 即 16 帧时间常数。 */
     private const val BLEND = 0.0625f
 
     private const val FRAME_NONE = -1L
 
-    // ------------------------------------------------------------------
-    // 状态（GPU 资源全在 native，这里只剩每帧的记账）
-    // ------------------------------------------------------------------
+    // 状态（GPU 资源全在 native，这里只剩每帧记账）
 
     /** `beginFrame()` 推进的帧号，与 [recordedFrame] 配对，保证每帧只录一次。 */
     private var frameIndex = 0L
@@ -61,11 +37,8 @@ object D3D12TAA {
     /** 非空表示自我关闭（只记第一次的原因，避免每帧刷屏/重复尝试）。 */
     private var disabledReason: String? = null
 
-    // ------------------------------------------------------------------
     // 对外入口
-    // ------------------------------------------------------------------
 
-    /** 玩家是否选了 TAA（本类的总开关）。 */
     @JvmStatic
     fun isSelected(): Boolean = D3D12AntiAliasing.current() == D3D12AntiAliasing.TAA
 
@@ -74,10 +47,7 @@ object D3D12TAA {
     fun isActive(): Boolean = isSelected() && disabledReason == null
 
     /**
-     * 世界层画完、GUI 还没画的那一刻调用一次（`GameRendererSmaaWorldMixin`）。
-     *
-     * 任何一步不满足（没进世界、没选 TAA、本帧还没有运动矢量、拿不到编码器）都只是安静跳过：
-     * 表现就等于"没有 TAA"，不会让这一帧渲染不出来。
+     * 世界层画完、GUI 未画时调用一次；任何一步不满足都安静跳过（等同没有 TAA）。
      */
     @JvmStatic
     fun applyIfEnabled() {
@@ -100,12 +70,7 @@ object D3D12TAA {
     }
 
     /**
-     * 每帧一次时域数据采集（`LevelRendererMainPassDepthMixin` 在帧图 main pass 的 RETURN 调用）。
-     *
-     * 那一刻世界几何刚画完、任何一次 `clearDepthTexture` 之前，深度里正是本帧的世界。DLSS 关闭
-     * 时 [DeepLearningSuperSampling.captureMotionVectors] 第一行就返回，所以"只开 TAA"的玩家没有
-     * 任何人录运动矢量 —— 这里补上：相机矩阵从 CPU 渲染状态取（UBO 字节实测是垃圾），再录一次
-     * 速度 pass。DLSS 开着时它自己会录，直接让路。
+     * 每帧一次时域采集（main pass RETURN，必须在 `clearDepthTexture` 之前）；DLSS 开着时让路。
      */
     @JvmStatic
     fun captureTemporalData() {
@@ -124,19 +89,11 @@ object D3D12TAA {
         encoder.recordVelocityPass()
     }
 
-    // ------------------------------------------------------------------
     // 录制
-    // ------------------------------------------------------------------
 
     /**
-     * 把本帧的 TAA 交给 native（列表必须已经打开，见
-     * `D3D12CommandEncoderBackend.recordTaaPass`）。
-     *
-     * native 拿到的 [reset] 为 true 时只把当前帧写进历史、不与上一帧混合（首帧、传送、换世界、
-     * 改分辨率这些历史毫无意义的时刻）；`sharpenAmount > 0` 时回填那一趟走 5-tap unsharp
-     * （[D3D12PostSharpen.taaAmount]），否则直通 blit。
-     *
-     * @return true = 这一帧真的做了 TAA（历史已更新、主目标已被回填）。
+     * 把本帧的 TAA 交给 native（命令列表必须已打开）。`reset` = 只写当前帧、不与历史混合；
+     * `taaAmount > 0` 时回填那一趟走 5-tap unsharp。true = 这一帧真的做了 TAA。
      */
     fun record(ctx: Long, device: D3D12Device?, scene: D3D12GpuTexture): Boolean {
         if (disabledReason != null || !isSelected()) {
@@ -170,7 +127,7 @@ object D3D12TAA {
         // 本帧投影实际用了多大的亚像素偏移；历史取样必须按它换回未抖动网格。
         val jitterX = D3D12Temporal.currentJitterX.toFloat()
         val jitterY = D3D12Temporal.currentJitterY.toFloat()
-        // P134：上一帧 jitter 也要一起给 —— MV 现在是真实运动，historyUv 用 (PrevJitter - Jitter) 补偿。
+        // 上一帧 jitter 也要给：historyUv 用 (PrevJitter - Jitter) 补偿。
         val prevJitterPair = D3D12Temporal.previousJitter()
 
         val result = MCDR_ABI.dx12ApplyTaaToTexture(
@@ -201,13 +158,7 @@ object D3D12TAA {
     }
 
     /**
-     * 作废跨帧状态（退出世界 / 传送 / 换分辨率 / 关设备时调用）。
-     *
-     * 不再需要在这里释放任何 GPU 资源：历史纹理归 native 的 `DeviceContext` 所有，重建发生在
-     * 录制新一帧的时候（尺寸对不上时由 `taaEnsureHistory` 负责），因此不会出现"上一帧命令列表还
-     * 在飞、JVM 侧就把纹理 close 掉"的设备崩溃（旧版 `reset()` 的注释记录过那次实测）。
-     *
-     * 代数清零的效果是下一帧 [record] 会带 `reset = true`，让 native 只写当前帧、不与旧历史混合。
+     * 作废跨帧状态：不释放 GPU 资源（历史归 native），代数清零让下一帧 [record] 带 reset。
      */
     @Synchronized
     fun reset() {

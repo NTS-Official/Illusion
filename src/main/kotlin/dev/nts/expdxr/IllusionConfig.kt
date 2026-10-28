@@ -6,117 +6,83 @@ import net.neoforged.neoforge.common.ModConfigSpec
 
 /** `[renderer] commandBundles` — how one multi-draw batch is split across command bundles. */
 enum class CommandBundleMode {
-    /** Pick per batch: one bundle for small batches, parallel recording for large ones. */
     AUTO,
 
-    /** Always record one bundle (single command list, maximum compatibility). */
     SERIAL,
 
-    /** Always split across the worker pool (lowest CPU cost when there are spare cores). */
     PARALLEL,
 }
 
 /** `[dlss] implementation` — which upscaler backend the native DLL drives. */
 enum class DlssImplementation {
-    /** NVIDIA NGX (the default, in-process DLSS). */
     NGX,
 
-    /** Streamline (sl.dlss — the newer, layer-based path). */
     STREAMLINE,
 }
 
 /** `[dlss] frameGeneration` — DLSS-G (frame generation). */
 enum class DlssFrameGeneration {
-    /** No generated frames. */
     OFF,
 
-    /** Fixed multiplier (`frameGenerationFrames` per rendered frame). */
     ON,
 
-    /** Dynamic multi-frame: the driver picks the count to hit the display rate (595.41+). */
     DYNAMIC,
 }
 
 /**
- * `[sr] backend` — 超分抽象层选哪一家（P271 的 `mcdr_sr_caps.backend`）。
- *
- * <p>DLSS 是默认值：它把活原样交给 `DeepLearningSuperSampling`，行为与 P282 之前完全一致。
- * FSR / XESS 走新的 `mcdr_dx12Sr*` 通路（`SuperResolution` 自己打包 `mcdr_sr_dispatch`）。
- * NONE 表示三项都不跑。
+ * `[sr] backend` — which super-resolution backend the abstraction layer drives; `id` is the number
+ * handed to native, so do not renumber.
  */
 enum class SrBackend(val id: Int) {
-    /** 不超分（与"关掉 DLSS"等价）。 */
     NONE(0),
 
-    /** NVIDIA DLSS / DLAA，走既有 `DeepLearningSuperSampling` 实现。 */
     DLSS(1),
 
-    /** AMD FidelityFX Super Resolution（`d3d12_fsr.cpp`，P277）。 */
     FSR(2),
 
-    /** Intel XeSS（`d3d12_xess.cpp`，P278）。 */
     XESS(3),
 }
 
-/**
- * `[renderer] hdr` — native HDR (scRGB) presentation.
- *
- * AUTO follows the display's advanced-colour state (the same DXGI output query Windows
- * itself uses), FORCE_ON is for testing the HDR path on an SDR display, FORCE_OFF keeps the
- * 8-bit SDR swapchain even when the display is in HDR mode.
- */
+/** `[renderer] hdr` — native HDR (scRGB) presentation; AUTO follows Windows advanced colour. */
 enum class HdrMode {
-    /** Follow the display: HDR when advanced colour is on, SDR otherwise. */
     AUTO,
 
-    /** Always create the scRGB (R16G16B16A16_FLOAT) swapchain. */
     FORCE_ON,
 
-    /** Always create the 8-bit SDR swapchain. */
     FORCE_OFF,
 }
 
 /**
- * P117：光追可见性分层总开关。OFF 时不建 G-Buffer、不进光追分支（零行为变化）。
- * 非光追设备上即使设成别的值也会被 native 忽略，并在日志里说明原因。
+ * `[raytracing] mode` — visibility layering. OFF builds no G-buffer and takes no ray-tracing
+ * branch; devices below SamplerFeedbackTier 1 ignore every value but OFF.
  */
 enum class RtMode {
-    /** 关闭。 */
     OFF,
 
-    /** 只做屏幕空间/光追 AO。 */
     AO,
 
-    /** AO + 光追阴影。 */
     AO_SHADOWS,
 
-    /** 全量：AO + 阴影 + 反射。 */
     FULL,
 }
 
 /** `[debug] meshDiagnostics` — one-shot isolation test for "texture write vs read-back". */
 enum class MeshDiagnostics {
-    /** Off (default). */
     NONE,
 
-    /** Clear the target through a mesh dispatch, then read it back. */
     CLEAR,
 
-    /** Run the full mesh pass, then read the target back. */
     PASS,
 }
 
 /**
- * Everything the player can change lives here, in `config/dxr_mc-client.toml`.
+ * Every switch the player can change, in `config/dxr_mc-client.toml`; `D3D12Settings` resolves them
+ * into one immutable snapshot.
  *
- * <p>The switches that used to be environment variables, JVM `-D` properties or a marker file in
- * the working directory (`DXR_MC_GL_CONTEXT`, `gl_context.flag`, `DX12_ASYNC`,
- * `DX12_BUNDLE_MODE`, `dxrmc.selfTestMesh`, `dxrmc.temporal`, …) now have an option here. Those
- * old sources still work as a deprecated escape hatch for scripts, but the config is the
- * documented way — see [dev.nts.expdxr.misc.D3D12Settings], which resolves every switch.
- *
- * <p>Values are read once per session (a few of them say `gameRestart` because the renderer
- * cannot change them later); nothing here is per-frame.
+ * <p>**Changing a default means changing three places**: the `define*` default here, the `Snapshot`
+ * fallback, and the `config(fallback)` argument in `build()`. `.gameRestart()` follows one rule:
+ * read at the moment of use = hot-switchable, read before the device or swapchain exists = restart.
+ * See docs/misc/settingscreen/README.md §2.4 / §5.1.
  */
 object IllusionConfig {
     private val BUILDER = ModConfigSpec.Builder()
@@ -127,10 +93,6 @@ object IllusionConfig {
     /** `[logging] nativeVerbose` — force the DLL to its DEBUG level on its own. */
     val NATIVE_VERBOSE: ModConfigSpec.BooleanValue
 
-    /**
-     * `[logging] shutdownTrace`（P184）：关停路径的 native 进度标记
-     * （`[P184] destroySurface/destroyDevice stage: …`，INFO 级）是否**无视 logLevel 恒定输出**。
-     */
     val SHUTDOWN_TRACE: ModConfigSpec.BooleanValue
 
     /** `[logging] nativeLogFile` — also mirror the native log into this file (`""` = off). */
@@ -142,41 +104,26 @@ object IllusionConfig {
     /** `[renderer] asyncCommandLists` — record command lists on the worker pool. */
     val ASYNC_COMMAND_LISTS: ModConfigSpec.BooleanValue
 
-    /** `[renderer] asyncWorkers` — worker count for [ASYNC_COMMAND_LISTS]. */
     val ASYNC_WORKERS: ModConfigSpec.IntValue
 
-    /** `[renderer] commandBundles` — serial vs parallel bundle recording. */
     val COMMAND_BUNDLES: ModConfigSpec.EnumValue<CommandBundleMode>
 
-    /** `[renderer] hdr` — native HDR (scRGB) presentation mode. */
     val HDR: ModConfigSpec.EnumValue<HdrMode>
 
-    /**
-     * `[renderer] allowTearing` — 是否允许建 `FLIP_DISCARD + ALLOW_TEARING` 的交换链。
-     *
-     * <p>关掉后链只能进 DWM 合成翻页：某些覆盖率工具（RTSS / Afterburner 的 OSD）只在
-     * 合成翻页下画得出来，independent flip 下会整块消失。下一次建链时生效。
-     */
+    /** `[renderer] allowTearing` — allow a `FLIP_DISCARD + ALLOW_TEARING` swapchain. */
     val ALLOW_TEARING: ModConfigSpec.BooleanValue
 
-    /**
-     * `[renderer] presentChildWindow` — 把交换链建在自建呈现子窗口上（P196 之前的行为）。
-     *
-     * <p>默认建在 SDL 顶层窗口上（独占全屏需要）。子窗口永远是 DWM 合成翻页，遇到
-     * 覆盖层/OBS 抓不到画面的问题时可以打开对照。下一次建链时生效。
-     */
+    /** `[renderer] presentChildWindow` — build the swapchain on a self-owned child window. */
     val PRESENT_CHILD_WINDOW: ModConfigSpec.BooleanValue
 
-    /** P117：`[raytracing] mode` — 光追可见性分层总开关。 */
+    /** `[raytracing] mode` — see [RtMode]. */
     val RAYTRACING_MODE: ModConfigSpec.EnumValue<RtMode>
 
     /** `[renderer] sharpenAmount` — post-sharpen strength for DLAA/DLSS. */
     val SHARPEN_AMOUNT: ModConfigSpec.DoubleValue
 
-    /** `[renderer] taaSharpenAmount` — post-sharpen strength for TAA. */
     val TAA_SHARPEN_AMOUNT: ModConfigSpec.DoubleValue
 
-    /** `[dlss] implementation` — NGX or Streamline. */
     val DLSS_IMPLEMENTATION: ModConfigSpec.EnumValue<DlssImplementation>
 
     /** `[dlss] outputHandover` — the JVM owns DLSS's output texture. */
@@ -185,9 +132,8 @@ object IllusionConfig {
     /** `[dlss] reflexFrameLimitUs` — Reflex's own frame-rate limiter, microseconds per frame. */
     val DLSS_REFLEX_FRAME_LIMIT_US: ModConfigSpec.IntValue
 
-    /** `[dlss] frameGeneration` — DLSS frame generation (DLSS-G). */
     val DLSS_FRAME_GENERATION: ModConfigSpec.EnumValue<DlssFrameGeneration>
-    /** `[sr] backend` — P282：超分抽象层选哪一家。改完下一帧生效（不重启游戏）。 */
+    /** `[sr] backend` — which backend runs; a switch takes effect on the next frame, no restart. */
     val SR_BACKEND: ModConfigSpec.EnumValue<SrBackend>
 
     /** `[sr] sharpness` — 后端自带的锐化强度（0 = 关）。FSR / XeSS 直接吃这个值。 */
@@ -198,39 +144,21 @@ object IllusionConfig {
     val DLSS_FRAME_GENERATION_FRAMES: ModConfigSpec.IntValue
 
     /**
-     * `[debug] pixCapture` — load Microsoft PIX's GPU capture layer at startup.
-     *
-     * Marked with [ModConfigSpec.Builder.gameRestart]: PIX's capture layer hooks Direct3D 12
-     * from inside its own DLL, so it can only attach to devices created *after* it is loaded.
+     * `[debug] pixCapture` — load PIX's GPU capture layer at startup. It hooks D3D12 from inside
+     * its own DLL, so it can only attach to devices created after it is loaded.
      */
     val PIX_CAPTURE: ModConfigSpec.BooleanValue
 
-    /**
-     * `[debug] pixTimingCapture` — arm the key binding that drives a PIX timing capture.
-     *
-     * Press it in game and the process itself calls PIXBeginCapture, so the file lands under
-     * `run/pix/` with a name and a length we choose; PIX's own continuous recording never reaches
-     * the disk, and the capture PIX starts itself writes to `%TEMP%`. No restart is involved: the
-     * native side loads the timing runtime lazily on the first press, and the frame budget is read
-     * at the moment of the press.
-     */
     val PIX_TIMING_CAPTURE: ModConfigSpec.BooleanValue
 
     /** `[debug] pixCaptureFrames` — frames recorded by one key-press capture. */
     val PIX_CAPTURE_FRAMES: ModConfigSpec.IntValue
 
-    /**
-     * `[debug] pixDirectory` — where PIX is installed (its directory, or one of its DLLs).
-     *
-     * Empty means "look where PIX normally installs itself". There is deliberately no environment
-     * variable for this: a switch that only exists as an env var is a switch nobody finds.
-     */
+    /** `[debug] pixDirectory` — empty means the default install locations; no env var (docs §5.3). */
     val PIX_DIRECTORY: ModConfigSpec.ConfigValue<String>
 
-    /** `[debug] debugLayer` — create the device with the D3D12 debug layer. */
     val DEBUG_LAYER: ModConfigSpec.BooleanValue
 
-    /** `[debug] profiling` — per-frame/per-batch timing instrumentation (`DX12_PROF`). */
     val PROFILING: ModConfigSpec.BooleanValue
 
     /** `[debug] skipGlSwap` — make the GL surface's `present()` a no-op. */
@@ -248,37 +176,33 @@ object IllusionConfig {
     /** `[debug] selfTestSurface` — run the swap-chain self-test (steals the RTSS OSD binding). */
     val SELF_TEST_SURFACE: ModConfigSpec.BooleanValue
 
-    /** `[debug] selfTestMesh` — run the mesh-shader self-test (compiles HLSL with DXC). */
     val SELF_TEST_MESH: ModConfigSpec.BooleanValue
 
-    /** `[debug] selfTestCompute` — run the compute self-test (P234: root UAV + root constants). */
+    /** `[debug] selfTestCompute` — run the compute self-test (root UAV + root constants). */
     val SELF_TEST_COMPUTE: ModConfigSpec.BooleanValue
 
-    /** `[debug] failDevice` — make device creation fail on purpose (P73 policy testing). */
+    /** `[debug] failDevice` — make device creation fail on purpose (failure-policy test). */
     val FAIL_DEVICE: ModConfigSpec.BooleanValue
 
-    /** `[debug] meshDiagnostics` — the one-shot mesh read-back isolation test. */
     val MESH_DIAGNOSTICS: ModConfigSpec.EnumValue<MeshDiagnostics>
 
-    /** `[debug] noCrashPopup` — suppress the fatal-error dialog (automation). */
     val NO_CRASH_POPUP: ModConfigSpec.BooleanValue
 
-    /** `[debug] dumpHlsl` — write each translated HLSL pair into `dxrmc/hlsl/` for inspection. */
     val DUMP_HLSL: ModConfigSpec.BooleanValue
 
     /** `[mesh] terrain` — the only terrain rasterization path (the IMR fallback was removed). */
     val MESH_TERRAIN: ModConfigSpec.BooleanValue
 
-    /** `[mesh] terrainCull` — cull terrain meshlets with the amplification shader (P217). */
+    /** `[mesh] terrainCull` — cull terrain meshlets in the amplification shader. */
     val MESH_TERRAIN_CULL: ModConfigSpec.BooleanValue
 
-    /** `[vrs] terrainNearBlocks` — terrain closer than this always shades at 1X1 (P233). */
+    /** `[vrs] terrainNearBlocks` — terrain closer than this always shades at 1X1. */
     val VRS_TERRAIN_NEAR_BLOCKS: ModConfigSpec.DoubleValue
 
-    /** `[vrs] terrainFarBlocks` — distance where the farthest shading-rate band starts (P233). */
+    /** `[vrs] terrainFarBlocks` — distance where the farthest shading-rate band starts. */
     val VRS_TERRAIN_FAR_BLOCKS: ModConfigSpec.DoubleValue
 
-    /** `[vrs] sri` — generate the Tier 2 shading-rate image every frame (P235/P237). */
+    /** `[vrs] sri` — generate the Tier 2 shading-rate image every frame. */
     val VRS_SRI: ModConfigSpec.BooleanValue
 
     /** `[vrs] sriEdgePermille` — depth contrast that keeps a tile at 1X1, in per-mille. */
@@ -287,10 +211,6 @@ object IllusionConfig {
     /** `[vrs] sriMotionPixels` — screen-space motion above which a tile stays 1X1. */
     val VRS_SRI_MOTION_PIXELS: ModConfigSpec.IntValue
 
-    /**
-     * `[vrs] sriTemporalClamp` — never let a tile get coarser than it was in the previous
-     * frame's shading-rate image (P236). Costs one extra ping-pong image.
-     */
     val VRS_SRI_TEMPORAL_CLAMP: ModConfigSpec.BooleanValue
 
     init {
@@ -407,8 +327,8 @@ object IllusionConfig {
 
         PRESENT_CHILD_WINDOW = BUILDER
             .comment(
-                "Build the swapchain on a self-owned child window that never touches OpenGL",
-                "(P267 SeamlessWindowHost).",
+                "Build the swapchain on a self-owned child window (SeamlessWindowHost) that never",
+                "touches OpenGL.",
                 "ON (default) is what overlays such as RTSS/Afterburner need to draw their OSD: the",
                 "child window always goes through DWM composition and can never enter independent",
                 "flip. It is also what keeps the D3D12 surface physically isolated from the GLFW",
@@ -475,9 +395,9 @@ object IllusionConfig {
 
         DLSS_FRAME_GENERATION = BUILDER
             .comment(
-                "P213: DLSS frame generation (DLSS-G). OFF, ON = fixed multiplier or DYNAMIC.",
+                "DLSS frame generation (DLSS-G). OFF, ON = fixed multiplier or DYNAMIC.",
                 "Needs Reflex enabled and the sl.dlss_g runtime next to MCDR.dll; the DLL reports",
-                "the feature state in the log at startup ([P213] DLSS-G probe).",
+                "the feature state in the log at startup (the DLSS-G probe line).",
             )
             .translation("dxr_mc.configuration.dlss.frameGeneration")
             .defineEnum("frameGeneration", DlssFrameGeneration.OFF)
@@ -493,9 +413,9 @@ object IllusionConfig {
         BUILDER.pop()
 
         BUILDER.comment(
-            "P282/P283: which super-resolution backend the native DLL drives.",
+            "Which super-resolution backend the native DLL drives.",
             "DLSS keeps the existing DeepLearningSuperSampling path byte-for-byte; FSR and XESS go",
-            "through the P271 abstraction layer (mcdr_dx12Sr*). Changing this needs no restart:",
+            "through the shared SR abstraction (mcdr_dx12Sr*). Changing this needs no restart:",
             "the next frame picks it up (switching to FSR/XeSS waits for the GPU once).",
             "FSR / XeSS only upscale when the render scale is below 100% (they need separate",
             "input and output textures), so pair the backend with a render scale below 100%.",
@@ -524,7 +444,7 @@ object IllusionConfig {
             .defineInRange("sharpness", 0.0, 0.0, 1.0)
     SR_MASK = BUILDER
         .comment(
-            "P276: feeds a reactive (FSR) / responsive (XeSS) mask made from the OIT transmittance buffer.",
+            "Feeds a reactive (FSR) / responsive (XeSS) mask made from the OIT transmittance buffer.",
             "Off by default: it is a quality refinement, not a requirement of any of the three SDKs."
         )
         .translation("dxr_mc.configuration.sr.mask")
@@ -533,7 +453,7 @@ object IllusionConfig {
         BUILDER.pop()
 
         BUILDER.comment(
-            "P117: ray-traced visibility layering (G-Buffer + sampler feedback).",
+            "Ray-traced visibility layering (G-Buffer + sampler feedback).",
             "OFF keeps the raster path untouched. AO / AO_SHADOWS / FULL progressively add",
             "ray-traced AO, shadows and reflections on tiles that the sampler feedback says are",
             "actually visible. Machines below D3D12 SamplerFeedbackTier 1 ignore this setting."
@@ -580,7 +500,7 @@ object IllusionConfig {
         BUILDER.pop()
 
         BUILDER.comment(
-            "Distance bands for the per-primitive terrain shading rate (P233).",
+            "Distance bands for the per-primitive terrain shading rate.",
             "The mesh shader gives every terrain meshlet a shading rate taken from its distance:",
             "closer than terrainNearBlocks stays 1X1, the band below terrainFarBlocks shades 1X2,",
             "and everything beyond it shades 2X2.",
@@ -608,7 +528,7 @@ object IllusionConfig {
 
         VRS_SRI = BUILDER
             .comment(
-                "P235/P237: generate the Tier 2 screen-space shading rate image every frame.",
+                "Generate the Tier 2 screen-space shading rate image every frame.",
                 "The image is what keeps the horizon stable: it judges every 16x16 tile from the",
                 "previous frame's depth (plus motion vectors when the velocity pass exists) and",
                 "only lets the terrain go coarser where the tile is flat. With this off, the",
@@ -788,9 +708,9 @@ object IllusionConfig {
 
         SELF_TEST_COMPUTE = BUILDER
             .comment(
-                "Run the compute self-test (P234: compile cs_6_8, create a compute PSO, dispatch",
+                "Run the compute self-test (compile cs_6_8, create a compute PSO, dispatch",
                 "one thread group into a storage texture and read it back).",
-                "Proves the compute path that the shading-rate image (P235) and NRC build on;",
+                "Proves the compute path that the shading-rate image and NRC build on;",
                 "it compiles HLSL on the spot, so it does not belong on the startup critical path."
             )
             .translation("dxr_mc.configuration.debug.selfTestCompute")

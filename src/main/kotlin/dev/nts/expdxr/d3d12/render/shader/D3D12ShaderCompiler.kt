@@ -5,7 +5,7 @@ import com.mojang.renderpearl.api.pipeline.RenderPipeline
 import com.mojang.renderpearl.api.pipeline.ShaderType
 import com.mojang.renderpearl.api.pipeline.UniformType
 import com.mojang.renderpearl.util.ShaderCompileException
-import dev.nts.expdxr.misc.D3D12Settings
+import dev.nts.expdxr.misc.settings.D3D12Settings
 import dev.nts.expdxr.misc.IllusionLogger
 import dev.nts.expdxr.d3d12.backend.D3D12BindGroupEntry
 import net.minecraft.client.renderer.ShaderDefines
@@ -16,10 +16,8 @@ import java.util.*
 import java.util.regex.Pattern
 
 /**
- * DX12 着色器编译器：GLSL -> SPIR-V（shaderc）-> 反射 + rebind（spvc）->
- * HLSL SM5.1（spvc）。镜像官方 {@code com.mojang.blaze3d.vulkan.glsl.GlslCompiler}，
- * 仅把最后的 "创建 Vulkan shader module" 换成 "输出 HLSL 字符串"（DXBC 编译在
- * 原生层 D3DCompile 完成）。
+ * 着色器编译器：GLSL →(shaderc) SPIR-V →(spvc) 重编号 + HLSL 文本 + 绑定条目，再按 pass 打 Y / lightmap / blit 补丁；
+ * DXIL 由原生层 DXC 生成。链路、判据与失败分级见 docs/shaders/README.md §2、§5~§9、§12
  */
 class D3D12ShaderCompiler : AutoCloseable {
     private val shaderCompiler = Shaderc.shaderc_compiler_initialize()
@@ -35,25 +33,12 @@ class D3D12ShaderCompiler : AutoCloseable {
         this.globalDefines = ShaderDefines.builder()
             .define("gl_VertexID", "gl_VertexIndex")
             .define("gl_InstanceID", "gl_InstanceIndex")
-            // P226：本后端是 D3D12 ⇒ 深度是 **0..1 区间**（且 26.3 是 reversed-Z：近=1、远=0）。
-            // vanilla 的 `oit_common.glsl` 靠这个宏决定要不要把设备深度当成 GL 的 [-1,1]：
-            //   #ifndef RENDERPEARL_DEPTH_IS_ZERO_TO_ONE
-            //       deviceDepth = (deviceDepth - 0.5) * 2.0;
-            // 官方 `GlslCompiler.createBaseShaderOptions()` 就是在 `isZeroToOne` 为真时加这个宏，
-            // 而本类此前只加了上面两个 ⇒ OIT 三个 stage 都按 GL 又映射了一遍，`deviceToLinearDepth`
-            // 被压成"几乎常数"（zn=0.05/zf=1000 下 >1 格全部落到 ≈ +0.05），depth bin / transmittance
-            // 小波全塌到一处 —— 半透明看着发闷、层叠顺序也不对（known_bugs P226）。
-            // 旁证：`oit_depth_sample.glsl` 里 `OIT_HIGH_PRECISION_DEPTH_THRESHOLD = 10.0` 是**方块**
-            // 为单位，只有线性深度是"方块"时才有意义，而那只在 0..1 分支成立。
-            // 这个宏全树只有 `oit_common.glsl` 用到，所以影响面严格限于 OIT（不含地形/云/实体的其它路径）。
+            // D3D12 深度是 0..1 且 26.3 用 reversed-Z；vanilla `oit_common.glsl` 靠这个宏决定是否再按 GL 的 [-1,1] 映射一次。
             .define("RENDERPEARL_DEPTH_IS_ZERO_TO_ONE")
             .build()
     }
 
-    /**
-     * GLSL -> SPIR-V（shaderc），并立即用 spvc 反射出绑定信息。
-     * 对应官方 {@code GlslCompiler.createIntermediary}。
-     */
+    /** GLSL → SPIR-V（shaderc），并立即用 spvc 反射出绑定信息。 */
     @Throws(ShaderCompileException::class)
     fun createIntermediary(filename: String, source: String, type: ShaderType,
                            includeResolver: ((Identifier) -> String?)? = null): D3D12IntermediaryShaderModule {
@@ -71,14 +56,11 @@ class D3D12ShaderCompiler : AutoCloseable {
         try {
             val status = Shaderc.shaderc_result_get_compilation_status(result)
             if (status != 0) {
-                // 失败现场落盘：26.3 的 include 展开 + defines 注入都是文本级的，没有原文件对照
-                // 时只能看 shaderc 给的行号，先把真正送进编译器的源码留下来。
+                // 失败现场：把实际送进编译器的源码落盘，否则只剩 shaderc 行号可查。
                 runCatching {
                     val dir = java.nio.file.Path.of(System.getProperty("user.dir"), "dxrmc")
                     java.nio.file.Files.createDirectories(dir)
-                    // 顶点/片元同名着色器会在不同线程同时编译，文件名里必须带 stage 和线程，
-                    // 否则两个线程互相截断/覆盖同一个文件，落盘内容会出现乱码字节（P197 排查时
-                    // 一度被误认成 include 读取越界）。
+                    // 文件名必须带 stage 与线程：顶点/片元并发编译同名会互相覆盖、截断。
                     val safe = filename.replace('/', '_').replace(':', '_')
                     val stage = if (type == ShaderType.FRAGMENT) "frag" else "vert"
                     val unique = "${safe}.${stage}.${Thread.currentThread().threadId()}.failed.glsl"
@@ -99,23 +81,22 @@ class D3D12ShaderCompiler : AutoCloseable {
         }
     }
 
-    /**
-     * 组装一条管线的着色器：收集绑定（addToBindGroup）-> rebind（重写
-     * SPIR-V binding/location）-> 输出 HLSL。
-     * 对应官方 {@code GlslCompiler.compile}。
-     */
+    /** 收集绑定 → 克隆并重编号 → 生成 HLSL → 打 Y/lightmap/blit 补丁。 */
     @Throws(ShaderCompileException::class)
     fun compile(pipeline: RenderPipeline, vertex: D3D12IntermediaryShaderModule,
                 fragment: D3D12IntermediaryShaderModule, flipY: Boolean): D3D12CompiledShader {
+        // 顶点 → 片元各调一次：调用顺序就是 entries 下标，也就是 SPIR-V binding 与寄存器号。
         val entries = mutableListOf<D3D12BindGroupEntry>()
         addToBindGroup(entries, vertex, pipeline)
         addToBindGroup(entries, fragment, pipeline)
 
         val vertexOutputNames = mutableListOf<String>()
+        // 顶点输出名（反射时 location 已打平）作为片元输入的重绑定名单。
         for (variable in vertex.outputs()) {
             vertexOutputNames.add(variable.name())
         }
         val vertexInputNames = mutableListOf<String>()
+        // 按 vertexFormatBindings 的元素顺序收集 → 重编号后 location 与顶点格式元素下标一致。
         for (vertexFormat in pipeline.vertexFormatBindings) {
             if (vertexFormat == null) continue
             for (attribute in vertexFormat.elements) {
@@ -130,8 +111,7 @@ class D3D12ShaderCompiler : AutoCloseable {
 
         var vertexHlsl = vertexWork.toHlsl(true)
         var fragmentHlsl = fragmentWork.toHlsl(false)
-        // P127 临时探针：把生成的 HLSL 落盘，用于评估"把 VS 包进 MS"的可行性。
-        // 环境变量 MCDR_DUMP_HLSL=1 开启，最多 60 对文件（避免刷盘）。
+        // 诊断：HLSL 落盘（配置项 dumpHlsl 或 MCDR_DUMP_HLSL=1），最多 60 对。
         if (D3D12Settings.dumpHlsl || System.getenv("MCDR_DUMP_HLSL") == "1") {
             val dir = java.io.File("dxrmc/hlsl")
             dir.mkdirs()
@@ -142,49 +122,24 @@ class D3D12ShaderCompiler : AutoCloseable {
                 java.io.File(dir, "ps_$stamp.hlsl").writeText(fragmentHlsl)
             }
         }
-        // P31 / P101b：在 GUI 离屏 pass（flipY=true，即 usage==13 且带深度附件的
-        // GuiItemAtlas / PictureInPicture 图集）中，pass 的正交投影是 invertY=true
-        // （GL 底左约定），而 D3D12 的 NDC Y 向上、纹理 v=0 在顶部 ⇒ 该 pass 里渲染的
-        // **任何**几何都会被多镜像一次。因此判据必须是"整个 pass 一起翻"，而不是按
-        // 管线名逐个打补丁：needsYFlip = isAtlasBake || flipY。
-        // P101 实测（2026-10-14，`[P101] pass census` 13 条 + `[P28]` 注入日志）：
-        // 物品栏里的玩家模型走 minecraft:pipeline/entity_translucent
-        // （PlayerModel.java:36 `super(root, RenderTypes::entityTranslucent)`），
-        // 旧的 entity_cutout|item_cutout 白名单漏掉它 ⇒ 该 pass 里模型上下颠倒，
-        // 正是用户报的"头在底下 腿在上面"。needsYFlip 是单个布尔，与 isAtlasBake
-        // 同时命中时也只注入一次（不会翻两次回到原样）。
-        // 这些管线在 flipY=false 时保持原始着色器，主世界 3D 渲染方向不受影响。
-        //
-        // Fix ATLAS-BAKE-VFLIP（图集烘制 Y 镜像）：ANIMATE_SPRITE_BLIT /
-        // ANIMATE_SPRITE_INTERPOLATE 仅在 TextureAtlas.uploadInitialContents /
-        // SpriteContents.drawToAtlas 使用，即把每个 sprite 的 scratch 贴图经
-        // ortho2D(0, W, 0, H) 渲染进 TextureAtlas 的 mipViews（usage=15，**无深度附件**）。
-        // 根因与 lightmap / P31 相同：GL/Vulkan 下 ortho2D 的 y=0 落在纹理 v=0，而 D3D12
-        // 相反（v=0 在顶部）→ 整张图集内容整体 Y 镜像。此后所有按 sprite UV 采样图集的
-        // GUI 图标/按钮/血条、方块与物品纹理都会"串图 / 错位 / 缺失"。
-        // 该 pass 无深度附件，被 P31 的 flipY 判定（usage==13 且带深度）排除，故对这两个
-        // 仅用于图集烘制的管线**无条件**注入 gl_Position.y 翻转。
+        // needsYFlip = isAtlasBake || flipY：flipY 的 pass 里「所有」管线都要翻（按管线名白名单必漏）；
+        // animate_sprite 图集烘制无深度附件、被 flipY 判据排除，故无条件翻。见 §8.1
         val pipelineLocation = pipeline.location.toString()
         val isAtlasBake = pipelineLocation.contains("animate_sprite")
-        // P101b：flipY 的 pass 里**所有**管线都要翻（白名单是历史遗留的补丁式写法，
-        // 已实证漏掉 entity_translucent ⇒ 玩家模型颠倒）。
         val needsYFlip = isAtlasBake || flipY
         if (needsYFlip) {
             val before = vertexHlsl
             vertexHlsl = injectVertexYFlip(vertexHlsl)
             if (before == vertexHlsl) {
+                // 注入点没命中只 warn，管线照旧编译（失败分级见 §12.1）。
                 IllusionLogger.warnMessage("no gl_Position assignment found in ${pipelineLocation}"
                     + " vertex HLSL, Y-flip NOT injected")
             }
         }
-        // Fix LIGHTMAP-VFLIP（正式修复，替代已确认的 lmflip 探针）：16×16 readback 证明
-        // 光贴图内容亮暗渐变正确，但 sky=15 亮行写在与 terrain 采样端相反的一侧，导致白天
-        // 方块采样到暗行（lightmapviz 实测 ≈26-46、whitelight 探针可恢复明亮、uv2viz 证明
-        // UV2 无误）。根因同 P28/P31：GL bottom-up 约定在 D3D12 无自动翻转，而本 pass 无
-        // 深度附件被 P31 的 flipY 判定（usage=13 且带深度）排除。修复：在 lightmap 更新 pass
-        // 的 frag_main 入口把 texCoord.y 镜像（sky 轴整体反转），与 terrain 采样方位对齐；
-        // 探针实测白天地形恢复明亮。用 !flipY 排除潜在 P31 变体的重复注入。
+        // lightmap 更新 pass 在 frag_main 入口镜像 texCoord.y，与 terrain 采样方位对齐；`!flipY` 防止重复翻。
+        // 见 §8.2
         if (pipelineLocation.contains("lightmap") && !flipY) {
+            // needle 依赖 spvc 的输出格式，模板一变就永远不命中（只 warn、不注入）。
             val needle = "void frag_main()\n{"
             val repl = "$needle\n    texCoord.y = 1.0f - texCoord.y;"
             if (fragmentHlsl.contains(needle)) {
@@ -194,23 +149,13 @@ class D3D12ShaderCompiler : AutoCloseable {
                     + pipeline.location)
             }
         }
-        // P224：全屏 blit（`core/screenquad`）**采样 raster 目标** 时必须镜像 V。
-        //
-        // 本后端的 raster 目标第 0 行 = 画面**顶部**：主 pass 用 vanilla 的 GL clip 空间 + 正向
-        // D3D 视口光栅化，最终呈现由 native blit 补偿（`kBlitVS` 的顶点表 v 是翻的：
-        // 屏幕底 → v=1）。而 vanilla 的 `texCoord` 约定是 v=0 在底部 ⇒ 「把一张 raster 目标按
-        // texCoord 拷进另一张 raster 目标」在 GL 下是**原地拷贝**，在这里却是**上下镜像**：
-        //   * `blit_depth(_during_depth_bounds)` 写的是 **depth 附件**，随后由光栅器按**同一行**
-        //     做深度比较 ⇒ 云按镜像后的地形深度被剔除，画面表现为「云上出现上下翻转的地形空洞、
-        //     洞里露出天空」（known_bugs P224）；
-        //   * `blit_depth_bounds` / `entity_outline_blit` 属同一类颜色拷贝（此前镜像一直没被发现）。
-        // 只在非 flipY 的全屏 pass 里做：flipY pass 已经在顶点端翻过，再翻 texCoord 会抵消。
-        // lightmap 是特例（它拿 texCoord 当**数据**生成光贴图，不是采样），上面已单独处理。
+        // 全屏 blit 用 texCoord 采样 raster 目标时必然上下镜像（raster 第 0 行 = 画面顶部）；
+        // 只对「用 texCoord 采样」的片元翻转、`!flipY`，lightmap 是拿 texCoord 当数据，已在上面单独处理。见 §8.3
         val isScreenQuad = pipeline.shaders[ShaderType.VERTEX]?.toString() == SCREEN_QUAD_SHADER
         if (isScreenQuad && !flipY && !pipelineLocation.contains("lightmap")
             && SAMPLES_WITH_TEXCOORD.containsMatchIn(fragmentHlsl)) {
             val needle = "void frag_main()\n{"
-            val repl = "$needle\n    texCoord.y = 1.0f - texCoord.y;  // P224：raster 目标行序上下颠倒"
+            val repl = "$needle\n    texCoord.y = 1.0f - texCoord.y;  // raster 目标行序上下颠倒"
             if (fragmentHlsl.contains(needle)) {
                 fragmentHlsl = fragmentHlsl.replace(needle, repl)
             } else {
@@ -218,9 +163,7 @@ class D3D12ShaderCompiler : AutoCloseable {
                     + pipelineLocation)
             }
         }
-        // Fix S2：语义名称由 toHlsl() 通过 spvc_compiler_hlsl_add_vertex_attribute_remap 注入，
-        // 基准 é vertex.inputs() (SPIR-V unique inputs após rebind), não vertexInputNames (formato).
-        // BUG-01 fix: usar vertex.inputs().size() garante alinhamento com spvc remap count.
+        // 基准是 SPIR-V unique inputs 数量（与上一步的 remap 条目数对齐），不是 vertexInputNames。
         val semanticNames = mutableListOf<String>()
         for (i in 0 until vertex.inputs().size) {
             semanticNames.add(if (i == 0) "POSITION" else ("TEXCOORD${i - 1}"))
@@ -234,21 +177,14 @@ class D3D12ShaderCompiler : AutoCloseable {
     }
 
     private companion object {
-        /** P224：vanilla 全屏 pass（`screenquad.vsh`，3 顶点无顶点缓冲）的着色器 location。 */
+        /** vanilla 全屏 pass（`screenquad.vsh`，3 顶点无顶点缓冲）的着色器 location。 */
         private const val SCREEN_QUAD_SHADER = "minecraft:core/screenquad"
 
-        /**
-         * P224：片元 HLSL 里"用 texCoord 采样纹理"的特征。只认这种形态 —— `gl_FragCoord` /
-         * `texelFetch` 的写法本身就是按像素取的（天然是原地拷贝），不能翻。
-         */
+        /** 「用 texCoord 采样」的特征：只认这种形态，`gl_FragCoord` / `texelFetch` 是逐像素原地取，翻了反而错。 */
         private val SAMPLES_WITH_TEXCOORD =
             Regex("Sample(?:Level|Bias|Grad|Cmp(?:Level)?)?\\s*\\([^)]*\\btexCoord\\b")
 
-        /**
-         * P28：在 spvc 生成的顶点 HLSL 中，于每个 {@code gl_Position = ...;} 赋值后插入
-         * {@code gl_Position.y = -gl_Position.y;}，把 GL bottom-up NDC 修正为 D3D12
-         * top-down NDC（图集 blit 专用；ortho 下 w=1，clip 空间直接翻转 Y 即正确）。
-         */
+        /** 在每个 `gl_Position = …;` 赋值后插入 `gl_Position.y = -gl_Position.y;`（GL bottom-up NDC → D3D12 top-down）。 */
         private fun injectVertexYFlip(hlsl: String): String {
             val m = Pattern
                 .compile("(?m)^([ \\t]*gl_Position\\s*=\\s*[^;]+;)$")
@@ -264,6 +200,7 @@ class D3D12ShaderCompiler : AutoCloseable {
                 last = m.end()
                 count++
             }
+            // 一个都没命中时原样返回，由调用方 warn。
             if (count == 0) {
                 return hlsl
             }
@@ -271,7 +208,7 @@ class D3D12ShaderCompiler : AutoCloseable {
             return sb.toString()
         }
 
-        /** 镜像官方 addToBindGroup：按 shader 声明的 UBO/sampler 顺序收集绑定。 */
+        /** 按 shader 声明的 UBO/sampler 顺序收集绑定，同名去重（先到先得）。 */
         @Throws(ShaderCompileException::class)
         private fun addToBindGroup(entries: MutableList<D3D12BindGroupEntry>,
                                    shader: D3D12IntermediaryShaderModule, pipeline: RenderPipeline) {
@@ -294,10 +231,8 @@ class D3D12ShaderCompiler : AutoCloseable {
                 val name = sampler.name()
                 uniformDescription = BindGroupLayout.flattenUniforms(pipeline.bindGroupLayouts).stream()
                     .filter { d -> d.name() == name }.findFirst()
-                // 26.3：flattenUniforms 会返回**所有** uniform（含 COMBINED_IMAGE_SAMPLER），
-                // 而 26.2 的语义是「出现在这里 = texel buffer」（采样器走 flattenSamplers）。
-                // 所以判据必须从「名字存在」改成「类型是 TEXEL_BUFFER」，否则 Sampler0 这类
-                // 组合采样器会被当成 UTB，dim=1 直接抛 "must have type of SpvDimBuffer"。
+                // 26.3 的 flattenUniforms 返回所有 uniform（含 COMBINED_IMAGE_SAMPLER），
+                // 故「是不是 texel buffer」只能看 UniformType，不能看名字是否存在。
                 val isTexelBuffer = uniformDescription.isPresent &&
                     uniformDescription.get().type() == UniformType.TEXEL_BUFFER
                 if (isTexelBuffer) {
@@ -317,8 +252,7 @@ class D3D12ShaderCompiler : AutoCloseable {
                     )
                     continue
                 }
-                // 26.3 删掉了 BindGroupLayout.flattenSamplers：采样器统一由 flattenUniforms 给出，
-                // 用 UniformType.COMBINED_IMAGE_SAMPLER 过滤出采样器/纹理对的名字。
+                // 26.3 没有 flattenSamplers：采样器也从 flattenUniforms 按 COMBINED_IMAGE_SAMPLER 过滤。
                 val samplerNames = BindGroupLayout.flattenUniforms(pipeline.bindGroupLayouts)
                 if (samplerNames.stream().noneMatch { u ->
                         u.type() == UniformType.COMBINED_IMAGE_SAMPLER && u.name() == name
@@ -344,14 +278,7 @@ class D3D12ShaderCompiler : AutoCloseable {
     }
 }
 
-/**
- * 26.3 删掉了 `com.mojang.blaze3d.preprocessor.GlslPreprocessor`：defines 不再由 blaze3d
- * 注入，而是由 [ShaderDefines.asSourceDirectives] 生成 `#define` 行、各后端自己决定怎么用
- * （官方 shaderc 后端走编译宏，我们把它们写进源码 —— 零额外状态，落盘的 GLSL 也自解释）。
- *
- * 插入位置必须在 `#version` 之后：GLSL 规定 `#version` 是第一条指令，写在它前面 shaderc
- * 会直接报 parse error。
- */
+/** 注入 `#define`；必须插在 `#version` 之后 —— 写在它前面 shaderc 直接 parse error。 */
 internal fun injectShaderDefines(source: String, defines: ShaderDefines): String {
     if (defines.isEmpty) return source
     var directives = defines.asSourceDirectives()
@@ -364,24 +291,19 @@ internal fun injectShaderDefines(source: String, defines: ShaderDefines): String
     return source.substring(0, lineEnd + 1) + directives + source.substring(lineEnd + 1)
 }
 
-/** `#include <minecraft:fog.glsl>`（26.3 的唯一形式；`#moj_import` 已不存在）。 */
+/** `#include <minecraft:fog.glsl>`（26.3 的唯一形式）。 */
 private val GLSL_INCLUDE_PATTERN =
     Pattern.compile("^[ \\t]*#[ \\t]*include[ \\t]+<([^>\\r\\n]+)>[ \\t]*\\r?$", Pattern.MULTILINE)
 
-/** 展开深度上限：normal 链最长 core 着色器到叶子 include 约 4~6 层，留足余量。 */
+/** 展开深度上限：正常链约 4~6 层，留足余量。 */
 private const val MAX_INCLUDE_DEPTH = 16
 
-/** 展开后源码上限（字符）：防止 include 互相引用导致无限膨胀。 */
+/** 展开后源码的字符上限，防止 include 互引无限膨胀。 */
 private const val MAX_EXPANDED_CHARS = 8 * 1024 * 1024
 
 /**
- * 26.3 把 GLSL include 解析从 `GlslPreprocessor` 挪到了官方 `GlslCompiler` 的 shaderc
- * include 回调（`shaderc_compile_options_set_include_callbacks` + `ShaderSource.getInclude`），
- * 我们这条自建的 GLSL→SPIR-V 路径没有回调，因此必须在送进 shaderc 之前**文本展开**。
- *
- * 逐行匹配 `#include <id>`，用 [includeResolver] 取回被包含源码后递归展开；取不到时
- * 原样保留指令（shaderc 会报 "unexpected include directive"，错误信息仍指向真实行号）。
- * 不做条件编译感知 —— vanilla 的 include 文件都自带 `#ifndef` 守卫，重复/越界包含是幂等的。
+ * 送进 shaderc 前文本展开 `#include <id>`；解析不到的指令原样保留，让 shaderc 报错并指向真实行号。
+ * 不做条件编译感知（vanilla include 自带 `#ifndef` 守卫，重复展开幂等）；展开处包 `// >>> include` 便于对照行号。
  */
 internal fun expandShaderIncludes(source: String, includeResolver: (Identifier) -> String?): String {
     return expandIncludesRecursive(source, includeResolver, 0)
@@ -397,6 +319,7 @@ private fun expandIncludesRecursive(source: String, includeResolver: (Identifier
     do {
         out.append(source, last, matcher.start())
         val idText = matcher.group(1)!!.trim()
+        // 解析失败按「取不到」处理：日志 debug、指令原样保留。
         val included = try {
             includeResolver(Identifier.parse(idText))
         } catch (e: Exception) {
@@ -411,6 +334,7 @@ private fun expandIncludesRecursive(source: String, includeResolver: (Identifier
             out.append("// <<< include ").append(idText).append('\n')
         }
         last = matcher.end()
+        // 超过上限就截断并停止展开（其余源码原样接在后面）。
         if (out.length > MAX_EXPANDED_CHARS) {
             IllusionLogger.warnFormat("shader include expansion exceeded %d chars, truncated", MAX_EXPANDED_CHARS)
             break

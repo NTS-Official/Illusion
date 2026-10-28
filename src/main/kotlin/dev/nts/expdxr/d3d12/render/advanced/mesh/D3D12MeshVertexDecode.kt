@@ -1,18 +1,11 @@
 package dev.nts.expdxr.d3d12.render.advanced.mesh
 
 /**
- * P217：地形顶点解码生成器。
- *
- * <p>mesh shader 没有输入装配阶段，必须按 `VertexFormat` 把 `DefaultVertexFormat.BLOCK`
- * 的原始字节解成 spvc 生成的 `SPIRV_Cross_Input` 字段，再对每个顶点调用 `vs_main`。
- * 这里只做代码生成（纯函数、可在任意线程跑），不碰 GPU。
- *
- * <p>`ChunkPosition` / `ChunkVisibility` 不在 28 B 顶点流里 —— 它们是 slot 1 的逐实例数据，
- * 由 [D3D12MeshletShader] 从 `SectionDesc` 直接填进输入结构体，不经过本文件。
+ * 地形顶点解码代码生成（纯函数、不碰 GPU）：mesh 无 IA 阶段，须按 `VertexFormat` 把 28 B 顶点解成 spvc 的 `SPIRV_Cross_Input` 字段（`ChunkPosition` / `ChunkVisibility` 不在此处）。见 docs/mesh&vrs/README.md §2.4。
  */
 object D3D12MeshVertexDecode {
 
-    /** `SPIRV_Cross_Input` 的一个字段（HLSL 类型 + 名字）。 */
+    /** `SPIRV_Cross_Input` 的一个字段：HLSL 类型 + 名字。 */
     data class Field(val type: String, val name: String)
 
     /** 从 VS HLSL 里解析 `struct SPIRV_Cross_Input { ... };` 的字段（类型 + 名字）。 */
@@ -61,11 +54,8 @@ object D3D12MeshVertexDecode {
     private fun parseGpuFormat(name: String): Triple<Int, Int, String> {
         val kind = name.substringAfterLast('_', "FLOAT")
         val head = name.substringBefore('_')
-        // `R32G32B32_FLOAT` 这种名字里每个分量都重复一次字母，分量数必须按 (字母+位宽) 的
-        // 出现次数算，不能按字符串长度（第一版就是在这里把 float3 解析成了 4 分量，
-        // 生成的 `float3(t.x, t.y, t.z, t.w)` 直接让 DXC 编译失败）。
-        // 本工程的 GpuFormat 名字是 `RGB32_FLOAT` / `RGBA8_UNORM` 这种"字母连写 + 一个位宽"，
-        // 分量数就是字母个数；`R32G32B32_FLOAT` 那种重复字母的写法按组数兜底。
+        // 分量数 = max(字母个数, "R8G8B8A8" 的分组数) 压到 4；解成 4 分量的 float3 会生成
+        // `float3(t.x, t.y, t.z, t.w)` 而编译失败。不能按字符串长度或重复字母数算。
         val letters = head.count { it.isLetter() }
         val groups = Regex("[RGBA]\\d+").findAll(head).count()
         val count = maxOf(letters, groups, 1).coerceAtMost(4)

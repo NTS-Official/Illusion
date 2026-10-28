@@ -8,10 +8,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-/**
- * P52：实体/方块实体提交（feature）准备路径耗时（排序 + prepare + 共享顶点缓冲上传）。
- * 官方 Vulkan 下这块同样是 Java 代码，用于对比"提交侧"是否被我们的后端拖慢。
- */
+/** 实体/方块实体提交（feature）准备路径耗时：排序 + prepare + 共享顶点缓冲上传。 */
 @Mixin(FeatureRenderDispatcher.class)
 public class FeatureRenderDispatcherProfMixin {
     @Inject(method = "prepareFrame", at = @At("HEAD"), remap = false)

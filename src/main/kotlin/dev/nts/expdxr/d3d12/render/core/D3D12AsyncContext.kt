@@ -1,6 +1,6 @@
 package dev.nts.expdxr.d3d12.render.core
 
-import dev.nts.expdxr.misc.D3D12Settings
+import dev.nts.expdxr.misc.settings.D3D12Settings
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
@@ -11,19 +11,8 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * P33：CPU/GPU 异步渲染上下文（Java 侧持有者）。
- *
- * <p>持有 native 侧的分区描述符分配器与 Bundle 录制器池，并维护执行 bundle
- * 录制的 worker 线程池。绘制热路径（{@link D3D12RenderPassBackend#drawMultipleIndexed}）
- * 在批量足够大时，把同一 pass + 同一 PSO + 同一 scissor 下的 core 段切给多个
- * worker，各自录制成 D3D12 BUNDLE，再由主列表按原顺序 {@code ExecuteBundle} 回放。
- *
- * <p>描述符不共享：native 把 shader-visible drawHeap 按 {@code (frameSlot, worker)}
- * 切成互不相交的区域（见 native {@code PartitionedDescriptorAllocator}），worker 只写
- * 自己的区域，因此并发写描述符不存在数据竞争。
- *
- * <p>回退开关：{@code -Ddx12.async=0} 关闭并行录制；{@code -Ddx12.async.workers=N}
- * 指定 worker 数（默认 4）。任何 native 初始化失败都会自动退回单线程录制。
+ * CPU/GPU 异步录制上下文：持有 native 分区描述符分配器与 bundle 池，管 worker 线程池。
+ * 描述符按 (frameSlot, worker) 分区、互不相交；native 初始化失败即退回单线程录制。
  */
 class D3D12AsyncContext private constructor() : AutoCloseable {
     private val workerCount: Int
@@ -68,7 +57,7 @@ class D3D12AsyncContext private constructor() : AutoCloseable {
         return this.workerCount
     }
 
-    /** worker 线程池；仅在 {@link #available()} 为 true 时非 null。 */
+    /** worker 线程池；仅在 [available] 为 true 时非 null。 */
     fun workers(): ExecutorService? {
         return this.workers
     }
@@ -82,13 +71,8 @@ class D3D12AsyncContext private constructor() : AutoCloseable {
     }
 
     /**
-     * 返回当前帧的 drawHeap 段号，并在进入新帧时清零该段的 worker 分配游标。
-     *
-     * <p>必须在命令列表已 begin 之后调用——native 侧 {@code drawHeapSlotBase} 已按
-     * 同一段号（{@code fenceValue % 4}）设定，worker 区域因此与主列表写入位置对齐。
-     * 段号在 4 帧内轮转一轮，复用时其 GPU 工作必然已完成，reset 安全。
-     *
-     * @return 段号（0..3）；取不到时返回 -1（调用方退回串行）
+     * 当前帧的 drawHeap 段号（进入新帧时 reset 该段游标）；必须在命令列表 begin 之后调用，
+     * 因为 native 的 `drawHeapSlotBase` 按同一段号（`fenceValue % 4`）设定。取不到返回 -1 → 退回串行。
      */
     fun frameSlot(ctx: Long): Int {
         val slot = MCDR_ABI.D3D12AsyncCurrentFrameSlot(ctx)
@@ -103,11 +87,8 @@ class D3D12AsyncContext private constructor() : AutoCloseable {
     }
 
     /**
-     * 当前帧的原始帧号（= ctx 的 fenceValue）。bundle 录制器用它判定「是否进入新的
-     * 一帧」，从而在同一帧内为每一批 drawMultipleIndexed 选一个独立的 allocator 槽位；
-     * 同一帧内已 ExecuteBundle 的 bundle 在父命令列表执行完成前不能被 Reset。
-     *
-     * @return 帧号；取不到时返回 -1（调用方退回串行）
+     * 当前帧号（= ctx 的 fenceValue），bundle 用它判定是否进入新帧并选 allocator 槽位。
+     * 同帧内已 ExecuteBundle 的 bundle 在父命令列表执行完成前不能被 Reset。取不到返回 -1。
      */
     fun frameValue(ctx: Long): Long {
         return MCDR_ABI.D3D12AsyncCurrentFrameValue(ctx)
@@ -142,14 +123,13 @@ class D3D12AsyncContext private constructor() : AutoCloseable {
     companion object {
         private val LOGGER: Logger = LoggerFactory.getLogger("dxrmc")
 
-        /** 全局开关：默认开启，见配置 `[renderer] asyncCommandLists`。 */
+        /** 全局开关，默认开启，见配置 `[renderer] asyncCommandLists`。 */
         @JvmField
         val ENABLED: Boolean = D3D12Settings.asyncCommandLists
 
         @Volatile
         private var instance: D3D12AsyncContext? = null
 
-        /** 由 {@link D3D12Device} 构造时调用；返回 false 表示不可用（自动退回串行录制）。 */
         @JvmStatic
         fun init(): Boolean {
             if (!ENABLED) {
@@ -168,7 +148,6 @@ class D3D12AsyncContext private constructor() : AutoCloseable {
             return true
         }
 
-        /** 由 {@link D3D12Device#close()} 调用。 */
         @JvmStatic
         fun shutdown() {
             val current = instance
@@ -178,7 +157,6 @@ class D3D12AsyncContext private constructor() : AutoCloseable {
             }
         }
 
-        /** 当前上下文；未启用或初始化失败时返回 null。 */
         @JvmStatic
         fun get(): D3D12AsyncContext? {
             return instance

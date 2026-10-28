@@ -17,7 +17,7 @@
 
 # DirectX Minecraft Graphics Experimental Project
 
-[English] | [[简体中文](README_ZH.md)]
+[English] | [[简体中文](docs/README_ZH.md)]
 
 > [!CAUTION]
 > This is an experimental project that may never be introduced to a real production environment.
@@ -46,6 +46,11 @@ It also takes advantage of DirectX's strengths on the Windows platform and Micro
 ### Overview
 
 Because it learns from (copies) Radiance, the project is organized the same way: the dynamic link library lives in its own repository, named **[MCDR](https://github.com/NTS-Official/MCDR)** — a rather hasty decision, to be honest.
+
+## Documentation
+
+The design documents live in [`docs/`](docs/overview.md), written in Simplified Chinese. Start with the overview: it lists every subsystem and what each document covers.<br>
+Source comments keep only the constraints that bite when you read the code; design intent, data flow and the reasons behind the architecture are in the documents.
 
 ## Details
 

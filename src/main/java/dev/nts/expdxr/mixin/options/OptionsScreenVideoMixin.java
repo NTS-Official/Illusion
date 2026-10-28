@@ -1,6 +1,6 @@
 package dev.nts.expdxr.mixin.options;
 
-import dev.nts.expdxr.misc.D3D12HdrPresentation;
+import dev.nts.expdxr.misc.settings.D3D12HdrPresentation;
 import dev.nts.expdxr.misc.gui.D3D12VideoSettingsScreen;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.Button;
@@ -17,13 +17,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import java.util.function.Supplier;
 
 /**
- * D3D12 后端下把"视频设置..."按钮换成自绘界面。
- *
- * <p>替换点在 {@code OptionsScreen.openScreenButton(title, supplier)}：原版用同一个工厂造"视频设置"、
- * "音乐与声音"、"语言"等按钮，只有 title 与 {@code VIDEO} 相同的那个被换掉，其余原样返回。
- *
- * <p>判据是 {@link D3D12HdrPresentation#isAvailable()}：它只在 D3D12 设备真的建起来之后为真，所以
- * 玩家选了 D3D12 却回退到原版后端时仍然走原版界面。
+ * 只把标题等于 {@code VIDEO} 的那个按钮换成自绘视频设置界面，其余原样返回。
+ * 判据 {@link D3D12HdrPresentation#isAvailable()} 只在 D3D12 设备建起来后为真，回退到原版后端时仍走原版界面。
  */
 @Mixin(OptionsScreen.class)
 public abstract class OptionsScreenVideoMixin {

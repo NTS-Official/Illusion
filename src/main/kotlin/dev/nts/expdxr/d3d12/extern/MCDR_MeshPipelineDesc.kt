@@ -6,21 +6,12 @@ import java.lang.foreign.MemorySegment
 import java.lang.foreign.ValueLayout
 
 /**
- * P72: structured mirror of `mcdr_mesh_pipeline_desc`.
+ * Structured mirror of `mcdr_mesh_pipeline_desc` (see docs/misc/ffm-abi.md §2.5).
  *
- * <p>Differs from [MCDRPipelineDesc] in exactly one way that matters: the three
- * shader blobs are **DXIL bytecode**, not HLSL source. D3DCompile stops at shader
- * model 5.1, so nothing on the graphics path can produce an amplification or mesh
- * shader; the native side compiles the HLSL through DXC
- * ([MCDR_ABI.D3D12CompileShaderDxc]) and this descriptor carries the result. There
- * is also no input layout and no topology: a mesh pipeline has no input assembler,
- * so `PrimitiveTopologyType` is fixed to TRIANGLE (meshlets are always triangles).
- *
- * <p>Instances are single-use builders: fill the fields, then hand the object to
- * [MCDR_ABI.D3D12CreateMeshPipeline]. The colour-target and binding lists reuse
- * [MCDRPipelineDesc.ColorTarget] / [MCDRPipelineDesc.Binding] because the native
- * layout contract is intentionally identical, so `mcdr_dx12PushDescriptors` needs
- * no mesh-specific variant.
+ * <p>The three blobs are **DXIL bytecode**, not HLSL: D3DCompile stops at SM 5.1, so the native side
+ * compiles through DXC. No input layout and no topology — a mesh pipeline has no input assembler,
+ * `PrimitiveTopologyType` is fixed to TRIANGLE. Colour-target and binding lists reuse
+ * [MCDRPipelineDesc.ColorTarget] / [MCDRPipelineDesc.Binding] unchanged.
  */
 class MCDRMeshPipelineDesc {
 
@@ -29,9 +20,7 @@ class MCDRMeshPipelineDesc {
         const val MAX_COLOR_TARGETS = 8
         const val MAX_BINDINGS = 64
 
-        // ------------------------------------------------------------------
-        // Field offsets, resolved once from the shared layout.
-        // ------------------------------------------------------------------
+        // Field offsets, resolved once from the shared layout; never literals.
 
         private val OFF_AS_DATA: Long = offMesh("asData")
         private val OFF_AS_LEN: Long = offMesh("asLen")
@@ -81,11 +70,8 @@ class MCDRMeshPipelineDesc {
         private fun offBinding(name: String): Long = offIn(MCDRLayout.PIPELINE_BINDING, name)
     }
 
-    // ------------------------------------------------------------------
-    // Shader bytecode. `msDxil` is required; `asDxil` empty means "no
-    // amplification stage", `psDxil` empty means "no pixel shader" (nothing is
-    // written to the colour targets).
-    // ------------------------------------------------------------------
+    // Shader bytecode: `msDxil` is required; empty `asDxil` = no amplification stage,
+    // empty `psDxil` = no pixel shader (nothing is written to the colour targets).
 
     var asDxil: ByteArray? = null
     var msDxil: ByteArray? = null
@@ -102,9 +88,7 @@ class MCDRMeshPipelineDesc {
     val colorTargets: MutableList<MCDRPipelineDesc.ColorTarget> = ArrayList()
     val bindings: MutableList<MCDRPipelineDesc.Binding> = ArrayList()
 
-    // ------------------------------------------------------------------
-    // Fluent builders (same shape as MCDRPipelineDesc's).
-    // ------------------------------------------------------------------
+    // Fluent builders.
 
     fun shaders(meshDxil: ByteArray?, amplificationDxil: ByteArray?, pixelDxil: ByteArray?): MCDRMeshPipelineDesc {
         this.msDxil = meshDxil
@@ -138,9 +122,8 @@ class MCDRMeshPipelineDesc {
     }
 
     /**
-     * Lay the descriptor out in `arena` and return the `mcdr_mesh_pipeline_desc`
-     * address. Every nested array is allocated in the same arena, so the result
-     * stays valid exactly as long as the arena does.
+     * Lay the descriptor out in `arena` and return the `mcdr_mesh_pipeline_desc` address; every
+     * nested array lives in the same arena, so the result expires with it.
      */
     fun pack(arena: Arena): MemorySegment {
         require(msDxil?.isNotEmpty() == true) { "mesh shader bytecode (msDxil) is required" }
@@ -211,9 +194,8 @@ class MCDRMeshPipelineDesc {
     }
 
     /**
-     * Copy `data` into `arena`. An absent shader still gets a one-byte allocation
-     * so the pointer is never NULL while the length is 0: the native validator
-     * accepts that, and a NULL pointer would be needlessly delicate.
+     * Copy `data` into `arena`; an absent shader still gets a one-byte allocation so the pointer is
+     * never NULL while the length is 0.
      */
     private fun blob(arena: Arena, data: ByteArray?): MemorySegment {
         if (data == null || data.size == 0) {

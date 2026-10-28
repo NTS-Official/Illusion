@@ -5,20 +5,10 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.gen.Invoker;
 
 /**
- * {@code PreferredGraphicsApi} 的枚举构造器是包私有的。
+ * 造一个 {@code PreferredGraphicsApi} 枚举常量。
  *
- * <p>这一条**不能**用 access transformer 代替，两条路都堵死：
- * <ul>
- *   <li>javac 在语言层面禁止 {@code new} 一个枚举（{@code 错误: 无法实例化枚举类}），
- *       即使 AT 把构造器放宽成 {@code public} 也一样编译不过；</li>
- *   <li>{@link java.lang.reflect.Constructor#newInstance} 对枚举直接抛
- *       {@code IllegalArgumentException: Cannot reflectively create enum objects}。</li>
- * </ul>
- * 所以这里保留 {@code @Invoker("<init>")} —— 由 Mixin 在转换期生成真实调用，
- * 方法体只在"忘了登记到 dxr_mc.mixins.json"时才会被执行到。
- *
- * <p>其余两个纯放宽访问的 interface（{@code OptionsAccessor}、{@code OptionsSubScreenAccessor}）
- * 已改成 {@code META-INF/accesstransformer.cfg} 里的条目。
+ * <p>AT 救不了这条：javac 语言层禁止 {@code new} 枚举，{@code Constructor.newInstance} 对枚举直接抛异常。
+ * 方法体只会在忘登记 dxr_mc.mixins.json 时被执行到。见 docs/misc/mixins-and-earlywindow.md §2.3</p>
  */
 @Mixin(PreferredGraphicsApi.class)
 public interface PreferredGraphicsApiAccessor {

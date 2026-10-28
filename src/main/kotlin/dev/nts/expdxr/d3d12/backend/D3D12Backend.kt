@@ -20,7 +20,7 @@ import com.mojang.renderpearl.api.textures.GpuTexture
 import dev.nts.expdxr.Illusion.Companion.NATIVE_NAME
 import dev.nts.expdxr.MeshDiagnostics
 import dev.nts.expdxr.misc.IllusionLogger
-import dev.nts.expdxr.misc.D3D12Settings
+import dev.nts.expdxr.misc.settings.D3D12Settings
 import dev.nts.expdxr.d3d12.debug.D3D12Fatal
 import dev.nts.expdxr.d3d12.extern.MCDRMeshPipelineDesc
 import dev.nts.expdxr.d3d12.extern.MCDRPipelineDesc
@@ -39,13 +39,10 @@ import java.util.*
 import java.util.function.BooleanSupplier
 
 /**
- * Direct3D 12 [GpuBackend] implementation.
+ * Direct3D 12 [GpuBackend] 实现：建窗口、建设备、跑自检链。
  *
- * Mirrors `com.mojang.blaze3d.vulkan.VulkanBackend`'s contract:
- * - [createWindow] creates the SDL3 window for the game (26.3 moved window creation into the backend;
- *   26.2 used `setWindowHints()` + vanilla's own `glfwCreateWindow`).
- * - [createDevice] is called once the window exists; it runs the full D3D12 self-test chain and, when it
- *   passes, returns a live [D3D12Device] that drives the vanilla render flow (P6+).
+ * 失败即崩、不回退 GL/Vulkan（崩溃路径见 [D3D12Fatal]）。
+ * 初始化顺序与自检链的门槛见 docs/misc/backend-and-device.md §3.1。
  */
 class D3D12Backend : GpuBackend {
     /** [createWindow] 建出来的 `SDL_Window*`；`createDevice` 里做 surface 自检时要用它。 */
@@ -53,22 +50,16 @@ class D3D12Backend : GpuBackend {
 
     override fun getName(): String = "D3D12"
 
-    // 26.3：GpuBackend 用 loadLibrary/unloadLibrary 显式管理后端动态库（26.2 是隐式的）。
-    // D3D12 由系统 d3d12.dll 提供、不需要预加载，这里留空即可。
+    // d3d12.dll 是系统组件，不需要预加载或卸载。
     override fun loadLibrary() {}
 
     override fun unloadLibrary() {}
 
     /**
-     * 26.3 把窗口创建移交给了后端：`GpuBackend.createWindow(title, w, h, flags)` 取代了 26.2 的
-     * `setWindowHints()` + vanilla 自己调 `glfwCreateWindow`。
+     * flags 是游戏算好的 SDL3 标志，**原样透传**。
      *
-     * flags 是游戏算好的 SDL3 标志（26.3 传 `SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_RESIZABLE`
-     * = `0x2020`），这里**原样透传**。绝不能或上 `SDL_WINDOW_OPENGL`：那是 GlBackend 自己加的
-     * （`GlBackend.createWindow` 里 `flags | SDL_WINDOW_OPENGL`），而 D3D12 进程里一旦出现一条
-     * **被使用过**的 GL 上下文，RTSS/Afterburner 的 OSD 就会改走 OpenGL 呈现路径、被我们的
-     * D3D12 子窗口整块盖住而永远不可见（26.2 的 GLFW_NO_API 就是为这件事存在的，
-     * 证据见 known_bugs.md §1 与 _port/noapi_osd_crop.png）。
+     * 绝不能或上 `SDL_WINDOW_OPENGL`：进程里一旦出现过被使用的 GL 上下文，RTSS/Afterburner 的 OSD
+     * 就会改走 OpenGL 呈现路径、被 D3D12 子窗口整块盖住而永久不可见。
      */
     override fun createWindow(title: String?, width: Int, height: Int, flags: Long): Long {
         if (D3D12Settings.glContext) {
@@ -87,40 +78,21 @@ class D3D12Backend : GpuBackend {
 
     @Throws(BackendCreationException::class)
     override fun createDevice(debugOptions: GpuDebugOptions): GpuDevice {
-        // P6: createDevice returns a real, live GpuDevice. The game then drives
-        // the full vanilla render flow through our backend (RenderSystem
-        // initRenderer, surface, per-frame render passes, present) with no
-        // GL/Vulkan fallback. Self-tests run against the live device; only a
-        // failure closes it and rethrows so the game can fall back.
-        // P73: that last sentence is obsolete - a failure here goes through D3D12Fatal
-        // (reset preferredGraphicsBackend + crash with an explanatory report) instead of
-        // rethrowing BackendCreationException, which the game would swallow before
-        // silently trying GL.
-        // P73 测试钩子：[debug] failDevice = true 让后端在第一步就失败，用来端到端验证
-        // "不再回退 + 还原 preferredGraphicsBackend + 生成带说明的崩溃报告"这条策略。
-        // 正常运行不会打开它（config/dxr_mc-client.toml 里的默认值是 false）。
+        // 失败不回退：D3D12Fatal 抛 ReportedException，vanilla 的候选后端循环吞不掉。
+        // [debug] failDevice = true 是这条崩溃路径的测试钩子，默认 false。
         if (D3D12Settings.failDevice) {
             D3D12Fatal.crash("simulated Direct3D 12 device failure ([debug] failDevice = true)", null)
         }
         try {
-            // 原生侧在建设备时从进程环境读几个开关（调试层、DLSS 实现、原生日志文件…）。
-            // 配置是唯一入口，这里在建 D3D12Device 之前把它们推进原生进程环境。
+            // 这一次通常被**静默丢弃**：MCDR_ABI 句柄要等 D3D12Device 构造时才加载。
             D3D12Settings.pushToNative()
-            // 26.3 的 `createDevice(GpuDebugOptions)` 不再收 defaultShaderSource / criticalShaderLoader：
-            // 着色器源与"关键着色器加载失败"的处理都移进了 FrontendGpuDevice/PipelineBuilder，后端只在
-            // `compilePipeline(CreateInfo)` 里拿到具体源。
-            // 真实管线的源在 `FrontendGpuDeviceCompilePipelineMixin` 里连同管线一起登记到
-            // D3D12PipelineBridge（D3D12Device.resolveShaderSource 优先取它）；构造参数只作兜底：
-            // 这里给内嵌 GLSL 源，让下面的自检（pipeline/gui + pipeline/gui_textured）在资源包
-            // 尚未加载时也能跑完整条 GLSL→SPIR-V→HLSL→DXBC→PSO 链。
+            // 内嵌 GLSL 只作兜底，真实 shader 源由 D3D12PipelineBridge 提供。
             val device = D3D12Device(EMBEDDED_SHADER_SOURCE)
-            // P213：**在这之前** MCDR_ABI 还没加载完（DLL 是在 D3D12Device 里 load 的），所以上面那次
-            // pushToNative() 的调用会静默丢掉（ABI 句柄为 null）。设备建好后必须再推一次，否则
-            // [dlss] frameGeneration 这类“只在启动时读一次”的开关永远到不了 native。
+            // ABI 已加载：必须在返回前再推一次，否则 [dlss] frameGeneration 这类
+            // 「只在启动时读一次」的开关永远到不了 native。
             D3D12Settings.pushToNative()
 
-            // P124/P217：mesh 能力与原因的唯一下发点。地形已无 IMR 回退，所以能力不足
-            // 必须留下一条玩家可见的 ERROR，而不是让地形静默消失。
+            // 地形已无 IMR 回退：mesh 能力不足时必须留下玩家可见的 ERROR，不能让地形静默消失。
             if (!D3D12MeshShader.isSupported() && D3D12Settings.meshTerrain) {
                 LOGGER.error("mesh shaders are unavailable but terrain has no IMR fallback: "
                     + "terrain batches will be skipped (see the mesh support reason above)")
@@ -129,32 +101,22 @@ class D3D12Backend : GpuBackend {
                 selfTestJavaResources(device)
                 selfTestCommandLayer(device)
                 selfTestPipelines(device)
-                // P72：mesh shader 自检（DXC 编译 → mesh PSO → DispatchMesh → 离屏像素回读）。
-                // 默认关闭：它要用 DXC 现场编译 HLSL，没必要塞进每次启动的关键路径；
-                // 打开方式：配置 `[debug] selfTestMesh = true`。
+                // 自检链顺序固定，后面的依赖前面的；任一步抛异常都会先 device.close() 再抛出。
                 if (D3D12Settings.selfTestMesh) {
                     selfTestMesh(device)
                 }
-                // P234：compute 最小通路自检（cs_6_8 → compute PSO → Dispatch → 回读）。
-                // 默认关闭；打开方式：配置 `[debug] selfTestCompute = true`。
+                // compute 与 SRI 两段共用同一个开关（要 DXC 现场编译，不进关键路径）。
                 if (D3D12Settings.selfTestCompute) {
                     selfTestCompute()
                 }
-                // P235：着色率图像（R8_UINT SRI）自检 —— 与 compute 共用 `[debug] selfTestCompute`。
-                // 验的是「算得出 → 写得进 → 挂得上命令列表」这三件事，不验图像内容。
                 if (D3D12Settings.selfTestCompute) {
                     selfTestShadingRate()
                 }
-                // 诊断（[debug] meshDiagnostics = clear|pass）：把"写纹理 → 回读"做最小化隔离，
-                // 用来区分「回读通路坏了」和「render pass 没落到纹理上」。只在取证时使用。
+                // 取证用：[debug] meshDiagnostics = clear|pass|pass2
                 D3D12Settings.meshDiagnostics.takeIf { it != MeshDiagnostics.NONE }?.let {
                     selfTestMeshDiag(it.name.lowercase())
                 }
-                // 注意：surface 自检会在真实窗口上创建、Present 并立刻销毁一条交换链。
-                // RTSS/Afterburner 的 OSD 绑定到它注入(默认约 15s)之后看到的第一条被 Present 的
-                // 交换链上；自检链一旦抢先 Present，真正的游戏交换链就再也拿不到 OSD（表现为
-                // 装了 RTSS 也完全看不到 OSD）。探针矩阵已验证：只要有 GL/其它交换链先 Present，
-                // OSD 会永久留在那条链上。因此默认跳过，需要时用配置 `[debug] selfTestSurface = true` 打开。
+                // 默认跳过：自检抢先 Present 会把 RTSS/Afterburner 的 OSD 永久绑在自检交换链上。
                 if (D3D12Settings.selfTestSurface) {
                     selfTestSurface(device, lastWindowHandle)
                 } else {
@@ -165,17 +127,14 @@ class D3D12Backend : GpuBackend {
                 device.close()
                 throw t
             }
-            // P6 诊断：自测阶段用嵌入 GLSL 填充了 pipeline cache，且 DIAG 绿色覆盖已生效。
-            // 必须在返回给游戏前清除，否则 getOrCompilePipeline 会命中自测缓存条目，
-            // 导致真实游戏 shader 从未被编译，屏幕显示的是自测阶段的嵌入 shader 输出（紫色）。
+            // 必须清空：自检用内嵌 GLSL 填过 cache，不清的话真实 shader 永远命中、从不编译，屏幕是紫色。
             device.clearPipelineCache()
             return FrontendGpuDevice(device)
         } catch (t: Throwable) {
             LOGGER.error("D3D12 self-test failed", t)
             LOGGER.error("D3D12 failure is fatal by design: no GL/Vulkan fallback, "
                 + "preferredGraphicsBackend is reset to default and the game crashes with a report")
-            // D3D12Fatal 抛的是 ReportedException（不是 BackendCreationException），
-            // 所以 vanilla 的候选后端循环不会吞掉它 —— 见 D3D12Fatal 的类注释。
+            // 抛 ReportedException 而不是 BackendCreationException —— 后者会被回退循环吞掉。
             D3D12Fatal.crash("DX12 self-test failed: $t", t)
         }
     }
@@ -183,19 +142,13 @@ class D3D12Backend : GpuBackend {
         private val LOGGER: Logger = LoggerFactory.getLogger("dxr_mc")
 
 
-        /**
-         * Exercise every P2 resource method through the real JNI path so a broken
-         * native binding fails loudly here instead of during vanilla initRenderer.
-         */
+        /** 逐项走真实 FFM 路径建纹理 / 采样器 / 缓冲并读写，绑定坏了要在这里就叫出来。 */
         private fun selfTestJavaResources(device: D3D12Device) {
-            // texture: RGBA8_UNORM, 64x64, TEXTURE_BINDING|RENDER_ATTACHMENT
             val texture: GpuTexture = device.createTexture("backend-selftest",
                 GpuTexture.USAGE_TEXTURE_BINDING or GpuTexture.USAGE_RENDER_ATTACHMENT,
                 GpuFormat.RGBA8_UNORM, 64, 64, 1, 1)
-            // sampler: REPEAT/REPEAT, NEAREST/NEAREST, aniso=1
             val sampler: GpuSampler = device.createSampler(AddressMode.REPEAT, AddressMode.REPEAT,
                 FilterMode.NEAREST, FilterMode.NEAREST, 1, OptionalDouble.of(16.0))
-            // buffer: MAP_WRITE, map -> write -> unmap
             val buffer: GpuBuffer = device.createBuffer({ "backend-selftest" },
                 GpuBuffer.USAGE_MAP_WRITE or GpuBuffer.USAGE_COPY_DST, 1024L)
             buffer.map(0L, 1024L, false, true).use { view ->
@@ -207,7 +160,6 @@ class D3D12Backend : GpuBackend {
                     throw IllegalStateException("buffer map write/read mismatch")
                 }
             }
-            // view over the texture
             device.createTextureView(texture, 0, texture.mipLevels).close()
             buffer.close()
             sampler.close()
@@ -215,11 +167,7 @@ class D3D12Backend : GpuBackend {
             LOGGER.info("Java resource self-test OK (texture/buffer/sampler/view via FFM)")
         }
 
-        /**
-         * Exercise the P3 command layer through the real JNI path: record
-         * uploads/copies into a command list, submit through the fence, and verify
-         * both a buffer copy readback and a texture write/readback round-trip.
-         */
+        /** 命令层自检：录制上传/拷贝 → submit → 等围栏 → 缓冲与纹理各回读一遍比对。 */
         private fun selfTestCommandLayer(device: D3D12Device) {
             val size = 256
             val src: GpuBuffer = device.createBuffer({ "backend-selftest-src" },
@@ -254,7 +202,7 @@ class D3D12Backend : GpuBackend {
                 }
                 fence.close()
 
-                // Buffer readback: every byte must survive the copy.
+                // 回读：拷贝后每个字节都必须还在。
                 dst.map(0L, size.toLong(), true, false).use { view ->
                     val read: ByteBuffer = view.data()
                     IllusionLogger.debugMessage(
@@ -264,7 +212,7 @@ class D3D12Backend : GpuBackend {
                         val actual = read.get(i).toInt() and 0xFF
                         val expected = i and 0xFF
                         if (actual != expected) {
-                            // Dump surrounding bytes for diagnosis
+                            // 不匹配时把前后各 8 字节一起打出来。
                             val start = (i - 8).coerceAtLeast(0)
                             val end = (i + 8).coerceAtMost(size)
                             val neighbors = buildString {
@@ -281,14 +229,12 @@ class D3D12Backend : GpuBackend {
                     }
                 }
 
-                // Texture readback: native writes tightly-packed rows (rowBytes per
-                // row), matching what the caller allocated.
                 val rowPitch = texSize * 4
                 texDst.map(0L, texDst.size(), true, false).use { view ->
                     val read: ByteBuffer = view.data()
                     for (row in 0 until texSize) {
                         for (col in 0 until texSize) {
-                            val expected = (row * texSize + col) * 4 and 0xFF  // texData first channel
+                            val expected = (row * texSize + col) * 4 and 0xFF
                             if ((read.get(row * rowPitch + col * 4).toInt() and 0xFF) != expected) {
                                 throw IllegalStateException(
                                     "texture readback mismatch at ($col,$row)"
@@ -307,11 +253,7 @@ class D3D12Backend : GpuBackend {
             LOGGER.info("Command layer self-test OK")
         }
         // -----------------------------------------------------------------------
-        // P4: pipeline self-test — 内嵌官方启动期 critical shader 的 GLSL 原文
-        // （提取自 assets/minecraft/shaders/core/），编译官方真实 RenderPipeline
-        // 全链路：GLSL -> shaderc SPIR-V -> spvc 反射/rebind -> HLSL 5.1 源码 ->
-        // DXC(DXIL, SM 6.9) -> root signature + 双 PSO。（2026-10-25 / P216：不再走
-        // d3dcompiler 的 DXBC 5.1，DXC 是唯一路径。）
+        // 自检用内嵌 GLSL：资源包未加载时也能跑完整条 GLSL→SPIR-V→HLSL→DXIL→PSO 链。
         // -----------------------------------------------------------------------
 
         private val CORE_GUI_VSH = """
@@ -446,11 +388,7 @@ class D3D12Backend : GpuBackend {
             override fun close() {}
         }
 
-        /**
-         * 用两条官方真实管线（GUI、GUI_TEXTURED）验证 P4 编译全链路。每条管线
-         * 编译出的原生 Dx12Pipeline* 必须 handle != 0（isValid()==true）。编译失败
-         * 时 compilePipeline 返回无效管线并记 error，这里再抛异常终止自检。
-         */
+        /** 用两条官方真实管线（GUI / GUI_TEXTURED）验证编译全链路；handle == 0 即判失败。 */
         private fun selfTestPipelines(device: D3D12Device) {
             val names = arrayOf("pipeline/gui", "pipeline/gui_textured")
             for (name in names) {
@@ -463,37 +401,13 @@ class D3D12Backend : GpuBackend {
                 }
             }
             LOGGER.info("Pipeline self-test OK (GLSL->SPIR-V->HLSL->DXBC->PSO for core/gui + core/position_tex_color)")
-            // 26.3 起真实 ShaderSource 是按次传进来的（见 D3D12Device.resolveShaderSource），
-            // 而这里的自检用的是内嵌 GLSL 兜底源。同一条 pipeline/gui 若把自检结果留在缓存里，
-            // 后面 vanilla 用真实源编译时会命中缓存、真实源永远不生效，所以自检完立刻清掉。
+            // 自检结果不能留在缓存里：否则 vanilla 用真实源编译时命中缓存，真实源永远不生效。
             device.clearPipelineCache()
         }
 
         /**
-         * P72：mesh shader 自检 —— 用**客观像素证据**证明「DXC 编译 → mesh PSO → DispatchMesh → GPU 真的执行了」。
-         *
-         * 为什么必须走 DXC：`D3DCompile` 只支持到 shader model 5.1，而 mesh shader 是 SM 6.5 才引入的
-         * （profile `ms_6_x` / `as_6_x`）；并且 mesh 管线用的是 pipeline state stream 里的 AS/MS subobject，
-         * 与图形路径的打包描述不通用，所以 native 侧单独提供
-         * `mcdr_dx12CreateMeshPipeline` / `mcdr_dx12DispatchMesh`。
-         *
-         * 为什么用像素回读当证据：所有 API 都返回成功只能说明「没报错」；离屏纹理里真的出现红色像素，
-         * 才说明 mesh shader 在 GPU 上跑过。至于「画面看起来对不对」属于肉眼判断，交给用户看，
-         * 这里只提供客观数字（见 AGENTS.md「协作约定」）。
-         *
-         * 全程走 `MCDR_ABI` 低层调用，不碰游戏渲染路径；失败抛异常（附 `dx12LastError()`），
-         * 由 [createDevice] 统一转成 `BackendCreationException`。
-         *
-         * @param device 只为与其他自检保持一致的签名——本自检只调用 ABI 静态入口，不经由 D3D12Device。
-         */
-        /**
-         * 诊断（`[debug] meshDiagnostics` = clear|pass）：把"写纹理 → 回读"这一对操作最小化隔离。
-         *
-         * - `clear`：只调 `dx12ClearColorTexture`（不涉及 render pass）；
-         * - `pass` ：只做一次 render pass + 不透明黑清屏（不涉及 mesh/PSO/描述符）。
-         *
-         * 两个模式最后都做一次 3x3 回读并抛异常（走 P73 崩溃路径，进程自行退出，
-         * 便于脚本取证）。只在诊断时使用，正常启动不会设置该环境变量。
+         * 诊断（`[debug] meshDiagnostics` = clear|pass|pass2）：把「写纹理 → 回读」最小化隔离，
+         * 用来区分「回读通路坏了」和「render pass 没落到纹理上」。只在取证时使用。
          */
         private fun selfTestMeshDiag(mode: String) {
             val size = 64
@@ -523,9 +437,7 @@ class D3D12Backend : GpuBackend {
                             MCDR_ABI.D3D12LastError())
                         MCDR_ABI.D3D12EndRenderPass(ctx)
                     }
-                    // pass2：先用 API 直接清成红（这一步已证明会落到纹理上），再用一次
-                    // render pass 清成不透明黑。回读若仍是红 ⇒ render pass 的清屏写入
-                    // 根本没落在这张纹理上；若变黑 ⇒ render pass 清屏有效。
+                    // pass2：先用 API 清红，再用一次 render pass 清黑。读到红 ⇒ pass 的写入没落在这张纹理上。
                     "pass2" -> {
                         MCDR_ABI.D3D12ClearColorTexture(ctx, texture, 1.0f, 0.0f, 0.0f, 1.0f)
                         MCDR_ABI.D3D12BeginRenderPass(ctx, longArrayOf(texture), intArrayOf(0),
@@ -554,15 +466,9 @@ class D3D12Backend : GpuBackend {
         }
 
         /**
-         * P234：compute 最小通路自检 —— 编译 `cs_6_8` → 建 compute PSO → `Dispatch(2,2,1)` →
-         * 回读，断言"根 UAV 写入 + 根常量生效"。
+         * compute 最小通路自检：`cs_6_8` → compute PSO → Dispatch(2,2,1) → 回读，断言根 UAV 与根常量生效。
          *
-         * 着色器把 `gTag` 写进 R 通道，所以回读的 9 个像素必须都是 `(gTag, 0, 0, 255)`。这同时
-         * 证明了四件事：DXC 接受 `cs_6_8`、`CreateComputePipelineState` 建成、根签名
-         * `[0] root UAV u0` 绑到了目标纹理、`[1] root constants b0` 的值真的进了着色器。
-         *
-         * <p>这张目标纹理必须带 `USAGE_STORAGE`(32)：native 只在带该位的纹理上置
-         * `ALLOW_UNORDERED_ACCESS`，缺了它 `CreateUnorderedAccessView`/派发都会失败。
+         * 目标纹理必须带 `USAGE_STORAGE`(32)：native 只在这类纹身上置 `ALLOW_UNORDERED_ACCESS`。
          */
         private fun selfTestCompute() {
             val size = 16
@@ -633,12 +539,7 @@ class D3D12Backend : GpuBackend {
             }
         }
 
-        /**
-         * P235：着色率图像（SRI）自检 —— 建 R8_UINT 图像、两张 SRV、dispatch、绑定 SRI、读回。
-         *
-         * 这张图以后由 `D3D12ShadingRateImage` 每帧生成，这里只证明"native 通路能写它、
-         * 而且能挂到命令列表的 SRI 槽位上"。输入纹理只要求存在且能建 SRV，内容不参与断言。
-         */
+        /** 着色率图像（R8_UINT SRI）自检：建图 → 两张 SRV → dispatch → 绑 SRI → 回读首像素。 */
         private fun selfTestShadingRate() {
             val tiles = 2
             val image = MCDR_ABI.D3D12CreateShadingRateImage(tiles, tiles)
@@ -691,8 +592,7 @@ class D3D12Backend : GpuBackend {
                         }
                         try {
                             MCDR_ABI.D3D12BeginCommandList(ctx)
-                            // 自检只有一张图像：把深度视图当作"上一帧"传进去，并把 flags 的
-                            // bit1（时间钳制）留 0，这样读回的就是这一趟 compute 写的值。
+                            // flags 的 bit1（时间钳制）留 0，读回的就是这一趟 compute 写的值。
                             val dispatched = MCDR_ABI.D3D12DispatchComputeShadingRate(
                                 ctx, pipeline, viewA, viewB, viewA, image,
                                 intArrayOf(tiles, tiles, 16, 0), 1, 1, 1)
@@ -744,9 +644,7 @@ class D3D12Backend : GpuBackend {
             val size = 64
             LOGGER.info("Mesh self-test starting (device={})", device)
 
-            // mesh shader：1 个线程组输出 3 顶点 1 图元；三角形故意超出 NDC（(-1,-1)/(3,-1)/(-1,3)）
-            // 以覆盖整个 viewport，颜色写死纯红，由 PS 原样输出。
-            // 注意：PS 的输入语义必须与 `out vertices` 结构逐字段、逐顺序一致，否则 PSO 创建失败。
+            // PS 的输入语义必须与 `out vertices` 结构逐字段、逐顺序一致，否则 PSO 创建失败。
             val meshHlsl = """
                 struct MeshVertex { float4 position : SV_Position; float4 color : COLOR0; };
 
@@ -768,9 +666,7 @@ class D3D12Backend : GpuBackend {
                 float4 main(PsIn input) : SV_Target { return input.color; }
             """.trimIndent()
 
-            // ms_6_6：本机已实测可用（能力行 dxc=yes(ms_6_9)、meshSmoke=ok，见 known_bugs.md）。
-            // 备选 ms_6_5；`ms_6_2` 不存在（mesh shader 自 SM 6.5 才有）。PS 用 ps_6_0 即可。
-            // 注意 ms_6_6 不是"回退"：它只是 mesh 的最低可用档，图形管线那边硬要求 6_9（P216）。
+            // ms_6_6 是 mesh 的最低可用档（ms_6_5 备选，ms_6_2 不存在）；图形管线那边硬要求 6_9。
             val meshDxil: ByteArray = MCDR_ABI.D3D12CompileShaderDxc(meshHlsl, "main", "ms_6_6")
                 ?: throw IllegalStateException(
                     "mesh self-test: DXC compile failed for ms_6_6: ${MCDR_ABI.D3D12LastError()}")
@@ -778,19 +674,16 @@ class D3D12Backend : GpuBackend {
                 ?: throw IllegalStateException(
                     "mesh self-test: DXC compile failed for ps_6_0: ${MCDR_ABI.D3D12LastError()}")
 
-            // 一张 R8G8B8A8_UNORM 离屏颜色目标：既当 RTV（RENDER_ATTACHMENT），又要能拷回 CPU
-            // （COPY_SRC）——回读路径走 CopyTextureRegion，缺 COPY_SRC 会失败。
+            // 回读走 CopyTextureRegion：缺 COPY_SRC 会失败；当 RTV 又要求 RENDER_ATTACHMENT。
             val colorTarget = MCDRPipelineDesc.ColorTarget()
                 .format(GpuFormat.RGBA8_UNORM.ordinal)
                 .writeMask(0xF)
             val desc = MCDRMeshPipelineDesc()
                 .shaders(meshDxil, null, pixelDxil)  // 不启用 amplification shader
-                .topology(false, 0)                  // 关闭剔除、polygonMode 0 = fill
-                .addColorTarget(colorTarget)         // 无 CBV/SRV 绑定，因此不调 addBinding
+                .topology(false, 0)
+                .addColorTarget(colorTarget)
 
-            // P129：自检同时覆盖「外部根签名」路径 —— 签名带 mesh 尾参
-            // （b8 段表 + t14/t15 顶点/索引表），PSO 用这份签名建。
-            // 自检 MS 不读任何绑定，所以只要签名与 PSO 结构合法就应当出像素。
+            // 自检同时覆盖外部根签名路径（b8 段表 + t14/t15 顶点/索引表），PSO 用这份签名建。
             val meshRootSig = MCDR_ABI.D3D12CreateMeshRootSignature(null, 0, 1)
             if (meshRootSig == 0L) {
                 throw IllegalStateException("mesh self-test: dx12CreateMeshRootSignature returned 0: "
@@ -812,11 +705,8 @@ class D3D12Backend : GpuBackend {
                     throw IllegalStateException("mesh self-test: dx12CreateTexture returned 0: "
                         + MCDR_ABI.D3D12LastError())
                 }
-                // P73：这里曾经再建一张同尺寸 "control" 纹理做负对照（只 clear、不 dispatch），
-                // 用来区分「RTV/clear/回读通路坏了」和「mesh 没产出」。实测该结构不稳定：
-                // 同一个命令列表内连续两个 render pass + 连续两次回读时，回读结果会互相错配
-                // （control 读到 mesh 的红色；也见过两张都读到红色），而游戏渲染路径从未观察到
-                // 该现象。自检必须确定性通过，故改回单纹理单 pass（详见 known_bugs.md）。
+                // 别在同一个命令列表里连续做两个 render pass + 两次回读：实测回读会互相错配。
+                // 自检要求确定性，所以只用单纹理单 pass。
                 ctx = MCDR_ABI.D3D12CreateCommandEncoder()
                 if (ctx == 0L) {
                     throw IllegalStateException("mesh self-test: dx12CreateCommandEncoder returned 0: "
@@ -824,22 +714,15 @@ class D3D12Backend : GpuBackend {
                 }
 
                 MCDR_ABI.D3D12BeginCommandList(ctx)
-                // P72/P73 取证结论（DX12_MESH_DIAG=clear|pass|pass2 三次隔离实验）：
-                //   ① 只调 dx12ClearColorTexture（API 清屏）+ 回读 → 读到清屏色 ✓
-                //   ② 只用 render pass 清屏 + 回读 → 读到 (0,0,0,0)（纹理从未被写）
-                //   ③ 先 API 清红、再用同一 pass 清黑 + 回读 → 读到黑 ✓
-                // 即"同一命令列表里 render pass 之前先有一次普通 API 写入"这种顺序才可靠。
-                // 因此自检改成：先 API 清成不透明蓝（证明纹理可写、回读通路正常），
-                // 再用 **LOAD**（clearFlag=0，不清屏）的 render pass 只让 mesh shader 写红——
-                // 读到蓝=mesh 什么都没画，读到红=DispatchMesh 真的光栅化进了这张纹理。
+                // 顺序敏感：render pass 之前必须先有一次普通 API 写入，否则 pass 的写入对回读不可见。
+                // 这里先 API 清蓝，再用 LOAD（clearFlag=0）的 pass 只让 mesh 写红：
+                // 读到蓝 = mesh 没画，读到红 = DispatchMesh 真的光栅化进了这张纹理。
                 MCDR_ABI.D3D12ClearColorTexture(ctx, texture, 0.0f, 0.0f, 1.0f, 1.0f)
                 LOGGER.info("mesh self-test: baseline clear(blue) lastError=[{}]", MCDR_ABI.D3D12LastError())
-                // 不清屏（LOAD）：底色保持上面那层蓝，任何红色都只能来自 mesh shader。
                 MCDR_ABI.D3D12BeginRenderPass(ctx, longArrayOf(texture), intArrayOf(0),
                     byteArrayOf(0), floatArrayOf(0.0f, 0.0f, 0.0f, 1.0f),
                     0L, 0, 0.toByte(), 0.0, 0, 0, size, size)
-                // 诊断：mcdr_dx12BeginRenderPass 返回 void，失败只能落在 lastError 里，而后续
-                // 成功的原生调用（如回读）会把它清掉——所以必须**紧跟**调用后立刻取一次。
+                // BeginRenderPass 返回 void，失败只落在 lastError，且会被后续成功调用清掉：必须紧跟取。
                 LOGGER.info("mesh self-test: beginRenderPass lastError=[{}]",
                     MCDR_ABI.D3D12LastError())
                 if (!MCDR_ABI.D3D12SetViewport(ctx, 0, 0, size, size)
@@ -850,23 +733,19 @@ class D3D12Backend : GpuBackend {
                     throw IllegalStateException("mesh self-test: dx12SetPipeline failed: "
                         + MCDR_ABI.D3D12LastError())
                 }
-                // native 的 dispatchMesh 会检查"本帧已 push 过描述符"；这条管线没有任何绑定，
-                // 但 wrapper 对 count == 0 直接返回 true，所以显式推一次空绑定。
+                // dispatchMesh 要求本帧推过描述符：无绑定时显式推一次空绑定（count==0 直接返回 true）。
                 if (!MCDR_ABI.D3D12PushDescriptors(ctx, null, null, null, null, null, null)) {
                     throw IllegalStateException("mesh self-test: dx12PushDescriptors failed: "
                         + MCDR_ABI.D3D12LastError())
                 }
-                // 线程组数 = ceil(64 / numthreads(1,1,1)) = 64 → 8x8x1 正好覆盖整张 64x64。
+                // 组数 = ceil(64 / numthreads(1,1,1)) = 64 → 8x8x1 覆盖整张 64x64。
                 if (!MCDR_ABI.D3D12DispatchMesh(ctx, 8, 8, 1)) {
                     throw IllegalStateException("mesh self-test: dx12DispatchMesh failed: "
                         + MCDR_ABI.D3D12LastError())
                 }
                 MCDR_ABI.D3D12EndRenderPass(ctx)
-                // 关键：submitCommandList 自己会 Close 命令列表（dx12_device.cpp:2296）。
-                // 若在 Submit 前先显式 dx12EndCommandList，submit 会把这一帧当"空帧"
-                // 直接早退（:2291 `if (!ctx->listOpen)`），于是 GPU 什么都没执行、
-                // 返回的 fence 又立即可满足 → 回读全 0 且没有任何报错。
-                // 游戏侧 D3D12CommandEncoderBackend 同样是 Begin → 录制 → Submit（不显式 End）。
+                // 不要显式 End：submitCommandList 自己 Close；listOpen==false 会被当空帧早退，
+                // 于是 GPU 什么都没执行、fence 立即满足 → 回读全 0 且没有任何报错。
                 val fence = MCDR_ABI.D3D12Submit(ctx)
                 LOGGER.info("mesh self-test: submitted, fence={}", fence)
                 if (!MCDR_ABI.D3D12WaitForFence(ctx, fence, 5_000_000_000L)) {
@@ -884,14 +763,9 @@ class D3D12Backend : GpuBackend {
                     ?: throw IllegalStateException(
                         "mesh self-test: dx12ReadbackTexturePixels returned null: "
                             + MCDR_ABI.D3D12LastError())
-                // 诊断：把 3x3 采样点全部打出来。mesh 的输出只有纯红，clear 是黑，
-                // 所以"读到红"就证明 dispatch 真的光栅化进了这张纹理。
                 LOGGER.info("mesh self-test: readback = [{}]", dump(pixels))
                 if (!hasRed(pixels)) {
-                    // 同一个二进制、同一份代码，实测会出现"整条命令列表的内容对回读不可见"
-                    // （连 API clear 的蓝底都读不到，alpha=0），而重启一次又正常。
-                    // 先隔一小段时间重读一次：若第二次能读到红，就说明这是"提交后立刻回读"
-                    // 的可见性/同步竞态（native 侧），而不是 mesh 没画。
+                    // 提交后立刻回读存在可见性竞态（整条列表的内容都读不到，alpha=0）：隔一下重读再判。
                     Thread.sleep(150)
                     val retry = MCDR_ABI.D3D12ReadbackTexturePixels(texture)
                     LOGGER.warn("mesh self-test: first readback = [{}]; retry after 150ms = [{}]",
@@ -919,14 +793,10 @@ class D3D12Backend : GpuBackend {
         }
 
         /**
-         * P5：创建 DXGI swapchain（绑定真实窗口 HWND）→ 配置 → acquire →
-         * 用纯红色清空 Backbuffer → submit → present。
-         * 首帧会向 MC 真实窗口 present 一次红色，用于验证渲染链路是否打通。
-         * 随后回退不影响游戏（游戏有自己的 surface/lifecycle）。
+         * 交换链自检：建 swapchain（绑真实 HWND）→ 清屏 → submit → present 一次。
          *
-         * 注意：使用 D3D12GpuSurface 而非 GpuSurface 包装类，因为 clearToRed 走
-         * 非 blit 路径（null srcTex = ClearRenderTargetView），绕过了 hasBlittedTexture
-         * 标志，GpuSurface.present() 会因此抛出 IllegalStateException。
+         * 必须用 [D3D12GpuSurface] 而不是 GpuSurface 包装类：清屏走非 blit 路径（null srcTex =
+         * ClearRenderTargetView），绕过了 hasBlittedTexture 标志，[GpuSurface.present] 会抛异常。
          */
         @Throws(SurfaceException::class)
         private fun selfTestSurface(device: D3D12Device, window: Long) {
@@ -939,11 +809,9 @@ class D3D12Backend : GpuBackend {
                 D3DSurface.configure(GpuSurface.Configuration(640, 480, mode))
                 D3DSurface.acquireNextTexture()
 
-                // 纯红色清空 Backbuffer（null texture = 不做 copy，只做 ClearRenderTargetView）
+                // null texture = 不做 copy，只做 ClearRenderTargetView
                 D3DSurface.clearToRed(encoderBackend)
 
-                // 26.3：前端 CommandEncoder 已改成接口 + 内部包装，自检直接走 backend 层
-                // （submit 后由 fence 等 GPU 完成，语义与旧的 encoder.createFence() 一致）。
                 val fence: GpuFence = encoderBackend.createFence()
                 encoderBackend.submit()
                 // 必须等 GPU 完成 clear 后再销毁 swapchain，否则 backbuffer 在被使用时释放。

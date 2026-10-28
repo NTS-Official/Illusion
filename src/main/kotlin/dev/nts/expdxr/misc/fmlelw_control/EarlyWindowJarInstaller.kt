@@ -1,4 +1,4 @@
-package dev.nts.expdxr.misc
+package dev.nts.expdxr.misc.fmlelw_control
 
 import dev.nts.expdxr.Illusion
 import net.neoforged.fml.loading.FMLPaths
@@ -12,17 +12,13 @@ import kotlin.io.path.readText
 import kotlin.io.path.writeText
 
 /**
- * P270: keeps the early-window provider available to FML.
+ * 保证 early-window provider 对 FML 可用。
  *
- * FML only recognises early services in top-level `*.jar` files under `mods/` (`EarlyServiceDiscovery`
- * walks the mods folder and matches the `.jar` suffix), and a jar carrying one of those
- * `META-INF/services` entries is claimed and then excluded from mod discovery. The provider therefore
- * cannot live inside the mod jar, and cannot be a `META-INF/jarjar` dependency either: nested jars are
- * extracted long after `ImmediateWindowHandler.load()` has already run.
- *
- * The release stays a single download: the mod jar carries the provider jar as
- * `META-INF/dxrmc/earlywindow.jar`, and this object writes it to `mods/dxrmc-earlywindow.jar` and points
- * `config/fml.toml` at our provider. Both take effect on the next launch.
+ * FML 只在 `mods/` 下的**顶层 `*.jar`** 里找早期服务，且带这类 `META-INF/services` 条目的 jar 会被从
+ * 模组发现中排除 —— provider 放进模组 jar，模组自己就会消失；`META-INF/jarjar` 也不行（解压晚于
+ * `ImmediateWindowHandler.load()`）。所以主 jar 内嵌 `META-INF/dxrmc/earlywindow.jar`，这里解到 `mods/`
+ * 并把 `fml.toml` 指向它；两条都要重启一次才生效。
+ * 见 docs/misc/mixins-and-earlywindow.md §5.5
  */
 object EarlyWindowJarInstaller {
     private const val RESOURCE = "/META-INF/dxrmc/earlywindow.jar"
@@ -48,7 +44,7 @@ object EarlyWindowJarInstaller {
         }
     }
 
-    /** Returns true when the jar on disk differs from the bundled copy (and was therefore (re)written). */
+    /** 磁盘内容与内嵌副本不同才写盘；返回值表示是否写过。 */
     private fun installProviderJar(target: Path): Boolean {
         val bundled = try {
             EarlyWindowJarInstaller::class.java.getResourceAsStream(RESOURCE)?.use { it.readBytes() }
@@ -65,14 +61,13 @@ object EarlyWindowJarInstaller {
         }
         return try {
             Files.createDirectories(target.parent)
-            // Write a sibling first: a half-written jar in mods/ would break the next launch.
+            // 先写同目录 .tmp 再 move：mods/ 里半写的 jar 会让下一次启动失败。
             val temp = target.resolveSibling("$FILE_NAME.tmp")
             Files.write(temp, bundled)
             try {
                 Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING)
             } catch (locked: Throwable) {
-                // P271: the running JVM keeps the loaded provider jar open, so it cannot be replaced in place.
-                // Move it aside (a stale jar the loader never rescans) and put the new one at the canonical path.
+                // 旧 jar 被本进程占用、无法原地替换：挪成 .stale（loader 不会重扫），再把新的放到正式路径。
                 val stale = target.resolveSibling("dxrmc-earlywindow.stale")
                 Files.move(target, stale, StandardCopyOption.REPLACE_EXISTING)
                 Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING)
@@ -87,7 +82,7 @@ object EarlyWindowJarInstaller {
         }
     }
 
-    /** Returns true when `fml.toml` had to be rewritten to select our provider. */
+    /** `fml.toml` 不存在时不动（不创建）；返回值表示是否改写。 */
     private fun pointConfigAtProvider(config: Path): Boolean {
         if (!config.exists()) {
             return false

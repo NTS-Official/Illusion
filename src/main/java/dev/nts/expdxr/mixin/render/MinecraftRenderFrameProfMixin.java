@@ -1,7 +1,7 @@
 package dev.nts.expdxr.mixin.render;
 
 import dev.nts.expdxr.d3d12.render.adapter.D3D12RenderProf;
-import dev.nts.expdxr.misc.ImprovedTransparencyLock;
+import dev.nts.expdxr.misc.settings.ImprovedTransparencyLock;
 import net.minecraft.client.Minecraft;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -9,10 +9,10 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * P50：给 Minecraft.renderFrame 整体计时，并在帧尾触发分段报告。
+ * `Minecraft.renderFrame` 整体计时，帧尾触发分段报告。
  *
- * 用 @At("RETURN") 而非 TAIL——renderFrame 在 surface 已 acquire 时会提前 return，
- * RETURN 覆盖所有返回路径，保证 begin/end 严格配对。
+ * <p>必须用 RETURN 而不是 TAIL：renderFrame 在 surface 已 acquire 时会提前 return，RETURN 覆盖所有
+ * 返回路径，保证 begin / end 严格配对。
  */
 @Mixin(Minecraft.class)
 public class MinecraftRenderFrameProfMixin {

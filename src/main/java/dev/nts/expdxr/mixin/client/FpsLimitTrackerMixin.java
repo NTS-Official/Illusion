@@ -10,11 +10,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-/**
- * 选了 "Never" 时，AFK / 最小化都不再降低帧率上限（直接用玩家设定的 framerateLimit）。
- *
- * <p>Java 版移植自 whynotkeepyourfpsup 的同名 Kotlin mixin。
- */
+/** 限帧档为 "Never" 时取消失焦降帧，直接返回玩家设定的 framerateLimit。 */
 @Mixin(FramerateLimitTracker.class)
 public class FpsLimitTrackerMixin {
     @Shadow

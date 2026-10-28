@@ -6,12 +6,7 @@ import com.mojang.renderpearl.api.textures.GpuSampler
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import java.util.OptionalDouble
 
-/**
- * D3D12-backed {@link GpuSampler}.
- *
- * Native mapping (see dx12_mc.dll {@code dx12CreateSampler}):
- * address 0=REPEAT/1=CLAMP_TO_EDGE, filter 0=NEAREST/1=LINEAR.
- */
+/** D3D12 `GpuSampler`：address 0=REPEAT/1=CLAMP_TO_EDGE、filter 0=NEAREST/1=LINEAR。见 docs/shaders/README.md §10.4 */
 class D3D12GpuSampler(
     private val addressModeU: AddressMode,
     private val addressModeV: AddressMode,
@@ -19,7 +14,7 @@ class D3D12GpuSampler(
     private val magFilter: FilterMode,
     private val maxAnisotropy: Int,
     private val maxLod: OptionalDouble,
-    /** P220：只在超分（DLSS/DLAA）时非 0；0 走原采样器路径。 */
+    /** 只在超分（DLSS/DLAA）时非 0；0 走普通采样器创建。 */
     mipLodBias: Float = 0f,
 ) : GpuSampler {
     private val handle: Long

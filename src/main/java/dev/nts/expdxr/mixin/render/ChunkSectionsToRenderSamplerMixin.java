@@ -8,12 +8,10 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
 
 /**
- * P220：只在**地形**的采样器参数上应用超分 mip bias。
+ * 只在**地形**的采样器参数上应用超分 mip bias。
  *
- * <p>`ChunkSectionsToRender.renderGroup` / `renderOit` 是 vanilla 26.3 地形层的唯一入口，
- * `sampler` 来自 `LevelRenderer.chunkLayerSampler`（专用采样器）。在这里换成带 bias 的版本，
- * 既不会碰 GUI/实体共享的 sampler cache，也不必改 `LevelRenderer` 的采样器生命周期：
- * 不需要 bias 时 {@link D3D12TerrainSampler#wrap} 原样返回 vanilla 对象。
+ * <p>`renderGroup` / `renderOit` 是地形层的唯一入口，换成带 bias 的版本不会碰 GUI/实体共享的 sampler
+ * cache。不需要 bias 时 `D3D12TerrainSampler.wrap` 原样返回 vanilla 对象。
  */
 @Mixin(ChunkSectionsToRender.class)
 public abstract class ChunkSectionsToRenderSamplerMixin {

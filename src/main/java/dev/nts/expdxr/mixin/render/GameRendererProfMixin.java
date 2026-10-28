@@ -8,10 +8,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-/**
- * P50：拆分 GameRenderer 的 extract（渲染状态提取）与 render（命令录制），
- * 并单独测量 renderLevel（世界渲染，render 的子集）。
- */
+/** 三段计时：`extract`（状态提取）/ `render`（命令录制）/ `renderLevel`（世界渲染，render 的子集）。 */
 @Mixin(GameRenderer.class)
 public class GameRendererProfMixin {
     @Inject(method = "extract", at = @At("HEAD"), remap = false)

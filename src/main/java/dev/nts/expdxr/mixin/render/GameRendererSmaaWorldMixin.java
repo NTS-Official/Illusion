@@ -13,53 +13,34 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * P104b：SMAA 的挂点 —— 世界层画完、GUI 还没画的那一刻。
+ * SMAA / 超分的挂点：世界层画完、GUI 还没画的那一刻 —— 全帧唯一这样的时刻。
  *
- * 不加这一处，SMAA 就只能在最终 blit 上做，而那一刻「世界 + GUI」已经合成为整帧，
- * 界面会被一起柔化（用户报告的 GUI 发虚）。
- *
- * 注入点选 `GuiRenderer.render()` 这个 INVOKE：它前面是 fogRenderer.endFrame()（世界渲染
- * 与后处理都已结束），后面才是 GUI 的绘制。逻辑全在 Kotlin 的
- * `D3D12SMAAWorld.applyIfEnabled()`，这里只留一行。
+ * <p>`GuiRenderer.render()` 这个 INVOKE 前面是 `fogRenderer.endFrame()`（世界渲染与后处理都已结束），
+ * 后面才是 GUI 的绘制。退到最终 blit 上做会把界面一起柔化。逻辑都在 Kotlin 的 `applyIfEnabled()`。
+ * 见 docs/misc/mixins-and-earlywindow.md §3.6
  */
 @Mixin(GameRenderer.class)
 public class GameRendererSmaaWorldMixin {
 
     @Inject(method = "render", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/gui/render/GuiRenderer;render()V"), remap = false)
     private void dx12_smaaWorldOnly(CallbackInfo ci) {
-        // P77：TAA 与 SMAA 是同一个选项的两个取值，互斥；排在 SMAA 旁边，谁被选中谁动手。
+        // TAA 与 SMAA 是同一个选项的两个取值，互斥；谁被选中谁动手。
         D3D12TAA.applyIfEnabled();
         D3D12SMAAWorld.applyIfEnabled();
-        // P108d + P282：超分的 Evaluate 挂在这里 —— 只有这一刻主目标的**颜色**里才有本帧的世界层。
-        // 排在 SMAA 之后：先在世界分辨率上做 AA，再让后端把结果升采样进 GUI 目标。
-        // 门面按 `[sr] backend` 分流：DLSS 原样委托给 DeepLearningSuperSampling，FSR / XeSS 走
-        // mcdr_dx12SrEvaluate。
+        // Evaluate 只能在这里：此刻主目标颜色里才有本帧的世界层。排在 SMAA 之后 —— 先在世界分辨率上
+        // 做 AA，再让后端把结果升采样进 GUI 目标。门面按 `[sr] backend` 分流。
         SuperResolution.applyIfEnabled();
-        // P117：世界层已画完 —— eSimulationEnd + eRenderSubmitStart。
+        // 世界层已画完，记 eSimulationEnd + eRenderSubmitStart。
         DeepLearningSuperSampling.pclRenderSubmitStart();
-        // P106：世界层（含 SMAA / DLSS 结果）随后被搬进 GUI 自己的窗口尺寸目标 —— 顺序不能反。
+        // 世界层（含 AA / 超分结果）随后搬进 GUI 自己的窗口尺寸目标 —— 顺序不能反。
         D3D12GUISplit.prepareForGui();
-        // P109 + P214：F3 的 3D 十字准星推迟到这里才画 —— 上面那一笔已经把本帧世界层（不含它）
-        // 喂给 DLSS/DLAA 评价了，所以它进不了 NGX 的时间性输入（不会拖影）。
-        // 必须在 prepareForGui() **之后**：DLSS 把世界层搬进 GUI 目标之后，主目标才是最终画面；
-        // 提前画会被随后的搬移覆盖，表现为准星整个消失（用户 m09400）。
-        // P223：补画链接管已停用（见 DebugCrosshairRendererMixin 类注释），这里不再调用。
-        // P223：接管停用，补画不再调用。
+        // F3 的 3D 准星补画已停用（见 DebugCrosshairRendererMixin 类注释）。
         // DeepLearningSuperSampling.replayCrosshair();
     }
 
     /**
-     * 每帧兜底（抗锯齿锁 + 进出 DLSS 模式的状态机）。
-     *
-     * <p>P76c（用户 m07942）：运动矢量的**速度 pass 已经从这里移走**，改由
-     * `LevelRendererMainPassDepthMixin` 挂在帧图 main pass 的 RETURN 上录。原因：这处注入按
-     * `LevelRendererMainPassDepthMixin` 类注释里的执行序排在三次清深度中的 (1)(2) **之后**，
-     * 实测此刻主目标深度是 `mean=0.0/0.0/0.0/0.0` —— 速度 pass 拿到全 0 深度会把运动矢量写成一整张 0，
-     * DLSS 于是把移动的画面当静止画面累积，表现为"只有开 DLSS 才有、只随运动出现的拖影"。
-     * 这里只保留与 DLSS 开关状态有关的记账，不再碰深度/速度通道。
-     *
-     * <p>P108b（用户 m10920）：SMAA 与 DLSS **互不排斥**，两处注入各判各的开关（DLSS 是自己的
-     * 开关，SMAA 那处是抗锯齿模式）。
+     * 每帧兜底：抗锯齿锁与进出 DLSS 模式的状态机。速度 pass 已移到 `LevelRendererMainPassDepthMixin`
+     * —— 此处按执行序排在三次清深度之后，深度恒为 0，运动矢量会被写成整张 0。
      */
     @Inject(method = "render",
             at = @At(value = "INVOKE",
@@ -68,9 +49,8 @@ public class GameRendererSmaaWorldMixin {
                      shift = At.Shift.BEFORE),
             remap = false)
     private void dxr_mc$dlssBeforeDepthClear(CallbackInfo ci) {
-        // P282：这两件都是 DLSS 自家记账（抗锯齿锁、Reflex 的 PCL 打点）。选了 FSR / XeSS 时
-        // 不该再让 DLSS 去推自己的开关 —— 那会每帧付一次 NGX 可用性探测，还会和 `[sr] backend`
-        // 打架（两套"谁在超分"的结论不一致）。
+        // 这两件都是 DLSS 自家记账；选了 FSR / XeSS 时不该再让 DLSS 推自己的开关 —— 会每帧付一次
+        // NGX 可用性探测，还与 `[sr] backend` 打架。
         if (SuperResolution.backendId() != MCDR_ABI.SR_BACKEND_DLSS) {
             return;
         }

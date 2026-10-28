@@ -9,31 +9,19 @@ import dev.nts.expdxr.d3d12.render.core.D3D12GpuTextureView
 import java.util.Locale
 
 /**
- * P276 / P276b：把 26.3 的 OIT 透射率重建结果写进一张 R8 掩码，喂给 FSR 的 `reactive` 与 XeSS 的
- * `responsive` 输入。
- *
- * <p>**不能直接读通道**：`LevelTargetBundle.transmittance` 里装的不是透射率，而是
- * `oit_add_transmittance.glsl` 逐片元写入的**吸收率小波系数**（8 个系数拆成 2 张 RGBA16F，
- * `OIT_COEFFICIENT_COUNT = 2^3`、`OIT_WAVELET_RANK = 2`、深度分箱数 = 系数数）。要看懂画面里
- * 有多少半透明遮挡，必须按 `oit_sample.glsl:sampleAbsorbance` 把小波树还原成"整列吸收率"，
- * 再取 `1 - exp(-吸收率)`。这里的 HLSL 就是那段 GLSL 的逐行移植（`originalDepth = 1`、
- * `currentAbsorbance = 0` 即"整列"）。
- *
- * <p>计算走 P235 那条 compute 根签名（3×SRV + 1×UAV + b0 的 8 个 int；P276 给它加了一对不带
- * `ShadingRate` 字样的别名导出 `mcdr_dx12CreateComputePipelineTexture3` /
- * `mcdr_dx12DispatchComputeTexture3`，实现是同一个）。只用得到 t0/t1 两张 SRV。
+ * 把 26.3 的 OIT 透射率重建结果写成一张 R8 掩码，供 FSR 的 `reactive` / XeSS 的 `responsive` 用。
+ * **不能直接读附件**：里面装的是吸收率的**小波系数**（8 个系数 / 2 张 RGBA16F / rank 2），必须按
+ * `oit_sample.glsl:sampleAbsorbance` 还原成整列吸收率再取 `1 - exp(-吸收率)`。见 docs/superresolution/README.md §6。
  */
 object D3D12SrMask {
 
     private const val MAX_MASK = 900
 
-    /** `LevelRenderer.OIT_COEFFICIENT_COUNT = Math.powExact(2, 3)`。 */
+    /** 以下三个必须与 `LevelRenderer.OIT_*` 一致：系数 = 2^3、附件 = 系数 / 4、rank 2。 */
     private const val COEFF_COUNT = 8
 
-    /** `LevelRenderer.OIT_TRANSMITTANCE_TARGET_COUNT = OIT_COEFFICIENT_COUNT / 4`。 */
     private const val ATTACHMENTS = 2
 
-    /** `LevelRenderer.OIT_WAVELET_RANK`。 */
     private const val WAVELET_RANK = 2
 
     private const val HLSL = """
@@ -132,11 +120,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     private var announced = false
     private var verified = false
 
-    /**
-     * 每帧由 main pass 的 RETURN 挂点填一次（那一刻 OIT 已经合成完）。
-     *
-     * @param views `LevelTargetBundle.transmittance` 里的颜色视图，按顺序（[ATTACHMENTS] 张）
-     */
+    /** 每帧由 main pass 的 RETURN 挂点填一次（那一刻 OIT 已合成完）；`views` 按顺序取前 [ATTACHMENTS] 张。 */
     @JvmStatic
     fun captureTransmittance(views: Array<D3D12GpuTextureView>) {
         var count = 0
@@ -160,10 +144,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
     fun hasSource(): Boolean = attachments > 0
 
     /**
-     * 生成这一帧的掩码，返回纹理句柄（0 = 没做成，调用方按"没有掩码"处理）。
-     *
-     * <p>用调用方**已经打开**的命令列表（`encoder.nativeHandle()`），不自己 begin/submit ——
-     * 掩码必须在 SR 的 evaluate 之前、同一条列表里完成。
+     * 生成这一帧的掩码，返回纹理句柄（0 = 没做成，调用方按「没有掩码」处理）。
+     * 用调用方**已经打开**的命令列表：掩码必须在 SR 的 evaluate 之前、同一条列表里完成。
      */
     fun produce(encoder: D3D12CommandEncoderBackend, maskWidth: Int, maskHeight: Int): Long {
         if (failure != null) {
@@ -240,8 +222,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
         if (texture == null || width != maskWidth || height != maskHeight) {
             texture?.close()
             texture = D3D12GpuTexture(
-                // 32 = USAGE_STORAGE（native 只认这个位来加 ALLOW_UNORDERED_ACCESS）；1/2 = COPY_DST/COPY_SRC，
-                // 读回与 dump 都靠它（与 DLSSOutput 那张输出纹理同一套标志）。
+                // 32 = USAGE_STORAGE（native 只认这个位加 ALLOW_UNORDERED_ACCESS）；1/2 = COPY_DST/COPY_SRC，读回用。
                 D3D12GpuTexture.USAGE_STORAGE or 1 or 2,
                 "DXRMC SR mask", GpuFormat.R8_UNORM, maskWidth, maskHeight, 1, 1)
             width = maskWidth

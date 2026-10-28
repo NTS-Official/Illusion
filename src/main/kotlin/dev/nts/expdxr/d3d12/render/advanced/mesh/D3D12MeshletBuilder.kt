@@ -7,40 +7,24 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
- * P217（mesh 管线重构 §一/§二）：**meshlet 生成器**（shadow 模式，只统计不绘制）。
- *
- * 方案的 `TerrainVertex`（28 B、无法线）在 26.3 上成立 —— 顶点格式由
- * `com.mojang.blaze3d.vertex.DefaultVertexFormat.BLOCK` 定义：
- * `Position RGB32_FLOAT@0` + `Color RGBA8_UNORM@12` + `UV0 RG32_FLOAT@16` + `UV2 RG16_SINT@24`
- * = 28 B，没有 normal。逐区块的 `ChunkPosition`（RGB32_SINT，12 B）与 `ChunkVisibility`
- * （R32_FLOAT，4 B）在**另一个 VertexFormat `CHUNK_DATA_INSTANCED`（slot 1，stepRate=1，
- * 16 B/段）**里 —— 所以朝向只能像方案说的那样，在**分桶/切 Meshlet 时静态写入**
- * [Meshlet.directionMask]，不从顶点读。
- *
- * 这里做的是"切分 + 量化 AABB + 方向掩码"的 CPU 侧纯函数：
- * - 每 [QUADS_PER_MESHLET] 个 Quad 切一个 meshlet（方案 §二：16 Quad / 64 顶点 / 32 三角形）；
- * - Quad 的法线用 `cross(p1-p0, p2-p0)` 现算（顶点里没有法线字段），主轴分量决定 6 向之一，
- *   主轴不够占优（斜面、十字草）记 [DIR_NON_AXIS]；
- * - 局部 AABB 按 `[0,16] -> [0,255]`（`x15.9375`）量化，与方案 §二 的 packedAABB 对齐。
- *
- * **本类不改任何绘制状态**：先在 shadow 模式里跑出真实规模（每段 meshlet 数、方向分布、
- * 单方向纯度），再决定分桶重排与 MS 的实现细节。
+ * meshlet 生成器（CPU 纯函数，不碰 GPU）：切分 + 量化 AABB + 方向掩码。
+ * 顶点是 `DefaultVertexFormat.BLOCK`（28 B，无法线），朝向只能由绕序现算后静态写进 [Meshlet.directionMask]。
+ * 硬约束：每 [QUADS_PER_MESHLET] 个 Quad 一个 meshlet；AABB 量化 `[0,16] -> [0,255]`（x15.9375）。
+ * 见 docs/mesh&vrs/README.md §2.2。
  */
 object D3D12MeshletBuilder {
 
-    /** `DefaultVertexFormat.BLOCK` 的步长。 */
     const val VERTEX_STRIDE = 28
 
-    /** 方案 §二：1 Meshlet = 16 Quad = 64 顶点 / 32 三角形。 */
+    /** 1 meshlet = 16 Quad = 64 顶点 / 32 三角形。 */
     const val QUADS_PER_MESHLET = 16
 
-    /** 一个 Quad 的顶点数（MC 的 BufferBuilder 固定按 4 个顶点出一个面）。 */
+    /** 一个 Quad 的顶点数：BufferBuilder 固定 4 顶点一个面。 */
     const val VERTICES_PER_QUAD = 4
 
     /** 每条 `MeshletDescriptor` 的字节数（见 [Meshlet.pack]）。 */
     const val MESHLET_DESC_BYTES = 32
 
-    /** 方向掩码的位（与方案 §二 的 directionMask 一致）。 */
     const val DIR_POS_X = 1 shl 0
     const val DIR_NEG_X = 1 shl 1
     const val DIR_POS_Y = 1 shl 2
@@ -57,24 +41,18 @@ object D3D12MeshletBuilder {
     /** 量化系数：`[0,16] * 15.9375 = [0,255]`（16 -> 255 而非 256，正好装进 uint8）。 */
     private const val QUANTIZE = 15.9375f
 
-    /**
-     * 一个 meshlet 的元数据。字段顺序即方案 §二 的 `MeshletDescriptor`：
-     * 两个量化 AABB（`minXYZ + quadCount`、`maxXYZ + directionMask`）+ sectionID + localVertexOffset。
-     */
+    /** meshlet 元数据；字段顺序即 descriptor 布局（两个量化 AABB + sectionID + localVertexOffset）。 */
     data class Meshlet(
         /** 在 section 内的 quad 序号（不是索引号）。 */
         val firstQuad: Int,
         val quadCount: Int,
-        /** 量化后的局部 AABB（0..255，对应 [0,16] 方块）。 */
         val quantMinX: Int, val quantMinY: Int, val quantMinZ: Int,
         val quantMaxX: Int, val quantMaxY: Int, val quantMaxZ: Int,
-        /** 该 meshlet 内出现过的方向位（多个 = 混合朝向，分桶后应变成单一位）。 */
+        /** 该 meshlet 内出现过的方向位（多个 = 混合朝向）。 */
         val directionMask: Int,
     ) {
-        /** 单方向（或非轴对齐）的 meshlet —— 分桶的目标产物。 */
         val isPure: Boolean get() = Integer.bitCount(directionMask) == 1
 
-        /** 打包成方案 §二 的 32 B 记录（与 HLSL 侧一致，便于后续原样上传）。 */
         fun packedAabbMin(): Int =
             (quantMinX and 0xFF) or ((quantMinY and 0xFF) shl 8) or
                 ((quantMinZ and 0xFF) shl 16) or ((quadCount and 0xFF) shl 24)
@@ -83,14 +61,7 @@ object D3D12MeshletBuilder {
             (quantMaxX and 0xFF) or ((quantMaxY and 0xFF) shl 8) or
                 ((quantMaxZ and 0xFF) shl 16) or ((directionMask and 0xFF) shl 24)
 
-        /**
-         * 写一条 **32 B** 的 `MeshletDescriptor`（8 个 uint32，2 条正好占一条 64 B cache line）。
-         *
-         * <p>布局（与将来的 HLSL `StructuredBuffer<MeshletDesc>` 一一对应）：
-         * `[0] packedMin`、`[1] packedMax`、`[2] sectionID`、`[3] localVertexOffset`、
-         * `[4] firstQuad`（调试/分桶用）、`[5..7] reserved`。
-         * 方案原文写的 16 B 装不下 `directionMask` + `sectionID` + `localVertexOffset`（见 known_bugs P217）。
-         */
+        /** 写一条 32 B descriptor（8 个 uint32，2 条占一条 cache line）；布局见 docs/mesh&vrs/README.md §2.5.3。 */
         fun pack(dst: ByteBuffer, sectionId: Int, localVertexOffset: Int) {
             dst.putInt(packedAabbMin())
             dst.putInt(packedAabbMax())
@@ -116,11 +87,8 @@ object D3D12MeshletBuilder {
     }
 
     /**
-     * 把一段 `BLOCK` 格式的顶点流切成 meshlet。
-     *
-     * @param vertex 该 section 的顶点缓冲（`ByteBuffer` 的 `position..limit` 就是有效数据）。
-     * @param stride 顶点步长；26.3 固定 28，参数化只为将来复用。
-     * @return 无法切分（顶点数不是 4 的倍数 / 不足一个 Quad）时返回 null。
+     * 切一段 `BLOCK` 顶点流；`stride < 28` 或不足一个 Quad 时返回 null（调用方按"切不出"处理）。
+     * `vertex` 的 `position..limit` 即有效数据。
      */
     fun build(vertex: ByteBuffer, stride: Int = VERTEX_STRIDE): Result? {
         if (stride < VERTEX_STRIDE) return null

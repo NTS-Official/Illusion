@@ -2,8 +2,8 @@ package dev.nts.expdxr
 
 import com.mojang.logging.LogUtils
 import dev.nts.expdxr.Illusion.Companion.OPTIONS_KEY_PREFERRED_GRAPHICS
-import dev.nts.expdxr.misc.D3D12Settings
-import dev.nts.expdxr.misc.EarlyWindowJarInstaller
+import dev.nts.expdxr.misc.settings.D3D12Settings
+import dev.nts.expdxr.misc.fmlelw_control.EarlyWindowJarInstaller
 import dev.nts.expdxr.d3d12.backend.D3D12GraphicsApi
 import dev.nts.expdxr.d3d12.debug.D3D12VrsDebugEntry
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
@@ -34,13 +34,13 @@ class Illusion(modEventBus: IEventBus, modContainer: ModContainer) {
 
     init {
         modContainer.registerConfig(ModConfig.Type.CLIENT, IllusionConfig.SPEC)
-        // P237：F3 的 VRS 行是一个独立 debug entry，由 F3+F6 的 DebugOptionsScreen 开关。
+        // F3 里的 VRS 行是独立的 debug entry，由 F3+F6 的 DebugOptionsScreen 开关。
         D3D12VrsDebugEntry.register(modEventBus)
         // 退出存档时把 VRS 诊断计数清零（属于一局的统计，不跨存档累加）。
         D3D12VariableShadingRate.register()
         // Construct log level before initialize the logger.
         IllusionLogger.applyDefaults()
-        // P270：early-window provider 以 jar-in-jar 形式随模组发布，启动时解到 mods/ 并改好 fml.toml。
+        // early-window provider 以 jar-in-jar 形式随模组发布，启动时解到 mods/ 并改好 fml.toml。
         EarlyWindowJarInstaller.ensureInstalled()
         modEventBus.addListener<ModConfigEvent.Loading> {
             IllusionLogger.applyFromConfig()
@@ -55,8 +55,7 @@ class Illusion(modEventBus: IEventBus, modContainer: ModContainer) {
             applyGpuCaptureConfig()
         }
         LOGGER.info("[$MODID] $MOD_NAME is constructing...")
-        // P291c：一行构建标记。用户 m03636 那轮黑屏取证里，我插的临时探针日志一次都没出现，
-        // 无法证明"跑的是不是刚编出来的代码"—— 让任何一份日志自己回答这个问题。
+        // 一行构建标记：任何一份日志都能自己回答"跑的是不是刚编出来的代码"。
         // To probe exact backend setting before loading the mod, the only way to achieve this is to read it from file.
         val preferredGraphics = preferredGraphicsSettingFromOptionsFile()
         LOGGER.info(

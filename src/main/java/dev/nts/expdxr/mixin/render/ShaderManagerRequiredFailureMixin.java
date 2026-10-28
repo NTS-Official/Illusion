@@ -13,20 +13,12 @@ import org.spongepowered.asm.mixin.injection.At;
 /**
  * 必需着色器管线编译失败时，把"静默黑屏"升级成真正的崩溃。
  *
- * <p>原版 {@code ShaderManager.apply} 在必需管线缺失时 `throw new RuntimeException("Failed to load
- * required shader programs: …")`。这个异常发生在资源重载线程上，{@code SimpleReloadInstance}
- * 把它记进日志就结束、渲染线程继续跑；但 {@code apply} 已经把管线缓存丢掉，于是玩家看到的是一整块
- * 黑屏，日志里只有一条埋在 reload 栈里的 stack trace。2026-10-25 实测：21:06:40 报错，之后
- * {@code COMPILE OK} / P106 每帧继续打到 21:07:03 用户手动关窗口 —— 既没崩也没画面。
+ * <p>原版那条 `RuntimeException` 发生在资源重载线程上，被 `SimpleReloadInstance` 记进日志就结束、
+ * 渲染线程继续跑；但 `apply` 已经把管线缓存丢掉，玩家看到的是一整块黑屏。
  *
- * <p>注入点是那句 {@code new RuntimeException(message)}（`@WrapOperation` + `@At("NEW")`），
- * 因为 {@code apply} 的参数类型 `ShaderManager$PendingResults` 是私有内部 record，Java 侧无法在
- * 方法签名里引用它（用 `Object` 会被 Mixin 判为 invalid signature）。这里不改变 vanilla 的抛异常
- * 行为，只在构造出这条异常时额外把崩溃报告交给 {@link Minecraft#delayCrash}：下一帧就是崩溃屏幕，
- * 日志里也留一条带修法的 ERROR。
- *
- * <p>装饰性内容（例如天空方块）应当用 {@code registerOptionalPipeline} 注册，失败只打 WARN，
- * 与本 mixin 无关。
+ * <p>必须包 `NEW` 而不是改方法签名：`apply` 的参数类型 `ShaderManager$PendingResults` 是私有内部
+ * record，Java 侧写不出来（用 `Object` 会被 Mixin 判为 invalid signature）。
+ * 见 docs/misc/mixins-and-earlywindow.md §3.7
  */
 @Mixin(ShaderManager.class)
 public class ShaderManagerRequiredFailureMixin {

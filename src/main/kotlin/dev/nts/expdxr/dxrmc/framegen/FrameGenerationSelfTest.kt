@@ -8,22 +8,12 @@ import net.neoforged.neoforge.client.event.ClientTickEvent
 import net.neoforged.neoforge.common.NeoForge
 
 /**
- * P300 验收用的自动化钩子（**只给自动化跑测试**，与 `-Pdxrmc.quickPlayWorld` / `-Pdxrmc.noPopup`
- * 同一条约定：构建脚本里的 `-Pdxrmc.*` 不是功能入口）。
- *
- * <p>为什么需要它：A6（会话中途关帧生成）与 A11（会话中途把超分换成 FSR/XeSS）都要求「运行中
- * 改设置」，无人值守的冒烟脚本改不了 —— 它只能改 `options.txt` 再重启，而那样跨不过「0 → 开」
- * 之外的任何边界。有了这个钩子，一次 `gradlew runClient -Pdxrmc.selfTest=…` 就能把两条都演一遍，
- * 而且走的是**和玩家操作完全相同**的路径（`OptionInstance.set` → 门面的 `push()` → ABI）。
- *
- * <p>规格：[PROPERTY] 是 `动作@tick` 的逗号分隔表，tick 从**进入世界**那一刻开始算（20 tick = 1 s）。
- * 动作：`fg-on` / `fg-off` / `sr-dlss` / `sr-fsr` / `sr-xess` / `sr-none` / `probe-fg`（打印三家能力表）。
- * 例：`-Pdxrmc.selfTest=fg-on@20,fg-off@400` = 进世界 1 s 后开帧生成，20 s 后关掉。
- *
- * <p>没设这个属性时 [install] 只做一次 `System.getProperty` 就返回，不注册任何监听器。
+ * 自动化验收钩子（不是功能入口）：系统属性 `dxrmc.selfTest` = `action@tick,...`，tick 从世界加载完成起算。
+ * 走的是与玩家操作相同的路径；只有「强制选后端」会直推 native 绕开可用性推断。
+ * 规格、动作表与降级说明见 docs/framegen/README.md §4。
  */
 object FrameGenerationSelfTest {
-    /** 系统属性名（`-Ddxrmc.selfTest=…`；gradle 的 `-Pdxrmc.selfTest=…` 会转发成它）。 */
+    /** 系统属性名；gradle 的 `-Pdxrmc.selfTest` 会转发成它。 */
     const val PROPERTY: String = "dxrmc.selfTest"
 
     private data class Step(val atTick: Long, val action: String) {
@@ -33,16 +23,13 @@ object FrameGenerationSelfTest {
     private var installed: Boolean = false
     private var forcedFrameGenBackend: Int = MCDR_ABI.FG_BACKEND_NONE
 
-    /** 解析后的计划；空表 = 没启用（或规格写错）。 */
+    /** 空表 = 没启用，或规格写错。 */
     private var plan: List<Step> = emptyList()
 
-    /** 进入世界之后的 tick 计数；负数 = 还没进世界。 */
+    /** 世界 tick 计数；负数 = 还没进世界。 */
     private var ticks: Long = -1
 
-    /**
-     * 读属性并（必要时）挂上 tick 监听。必须在客户端调用（[SuperResolution] 与 [Minecraft] 都是
-     * 纯客户端类）。
-     */
+    /** 读属性并（必要时）挂 tick 监听；必须在客户端调用。 */
     fun install() {
         if (installed) {
             return
@@ -89,7 +76,7 @@ object FrameGenerationSelfTest {
         if (plan.isEmpty()) {
             return
         }
-        // 时钟从「进入世界」开始：标题界面也在 tick，按进程启动算会让所有动作提前发生。
+        // 时钟从进入世界开始：标题界面也在 tick，按进程启动算会让动作提前。
         if (ticks < 0) {
             if (Minecraft.getInstance()?.level == null) {
                 return
@@ -120,8 +107,7 @@ object FrameGenerationSelfTest {
                         ?: FrameGeneration.activeBackend().takeIf { it != 0 }
                         ?: MCDR_ABI.FG_BACKEND_DLSSG
                     FrameGeneration.requestBackend(backend, true)
-                    // P305ab：门面在包装型后端 available=0 时会把 mode 传成 0，`fgSetMode` 走"关闭"早退，
-                    // 于是强制 picked 也永远到不了包装。钩子这里直接把「开」发下去，绕开可用性推断。
+                    // 门面在 available=0 时会传 mode=0，这里直推 native 绕开可用性推断。
                     forcedFrameGenBackend = backend
                     pushFrameGenModeDirectly(1)
                 }
@@ -138,12 +124,9 @@ object FrameGenerationSelfTest {
                 "sr-none" -> SuperResolution.onDlssToggle(false)
                 "sr-fsr" -> SuperResolution.fsrOption().set(true)
                 "sr-xess" -> SuperResolution.xessOption().set(true)
-                // P304：把三家的能力表各打一行。只有自动化跑测试才会用到 —— 界面按
-                // "第一个可用" 提前返回，所以 FSR-FG / XeSS-FG 的探测结果平时看不到，
-                // 而"这台机器缺哪个 DLL、为什么不可用"恰恰是要取证的东西。
+                // 界面只显示一个后端的状态行，三家的完整能力表只有这里能取证。
                 "probe-fg" -> probeFrameGeneration()
-                // P305d：强制指定 picked 后端。**只有自动化跑测试才用**：界面永远挑"第一个可用"的
-                // 后端，所以没有这条就没法让 XeSS-FG / FSR-FG 的代码路径真的跑起来。
+                // 强制 picked 后端：界面不会选 available=0 的后端，只有这里能让它们跑起来。
                 "fg-backend-xess" -> pickFrameGenBackend(MCDR_ABI.FG_BACKEND_XESSFG)
                 "fg-backend-fsr" -> pickFrameGenBackend(MCDR_ABI.FG_BACKEND_FSRFG)
                 "fg-backend-dlssg" -> pickFrameGenBackend(MCDR_ABI.FG_BACKEND_DLSSG)
@@ -186,13 +169,8 @@ object FrameGenerationSelfTest {
         "fg-on", "fg-off", "sr-dlss", "sr-fsr", "sr-xess", "sr-none", "probe-fg",
         "fg-backend-xess", "fg-backend-fsr", "fg-backend-dlssg")
 
-    /**
-     * P305ab：直接调 `mcdr_dx12FgSetMode`（不经过门面的可用性推断）。
-     *
-     * 只给自动化用：包装型后端（FSR-FG / XeSS-FG）在 `available=0` 时门面不会选它，`nativeMode()` 也会
-     * 得 0，`fgSetMode` 于是早退，强制的 picked 永远走不到包装。这里显式要求「开」，让 native 把 provider
-     * 建起来、把链重建挂上。
-     */
+    /** 直接调 `mcdr_dx12FgSetMode`，绕开门面的可用性推断（available=0 时门面会传 mode=0）。
+     * 只给自动化用：让 native 把 provider 建起来、把链重建挂上。 */
     private fun pushFrameGenModeDirectly(mode: Int) {
         val backend = forcedFrameGenBackend
         if (backend == MCDR_ABI.FG_BACKEND_NONE) {

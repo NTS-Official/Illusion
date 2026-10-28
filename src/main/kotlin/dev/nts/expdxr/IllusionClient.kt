@@ -37,7 +37,7 @@ class IllusionClient(container: ModContainer) {
         // here (the binding is one), but there is nothing to gain from crashing if it is.
         container.eventBus?.let {
             D3D12PixCaptureController.register(it)
-            // P300 验收：-Pdxrmc.selfTest=… 时才挂 tick 钩子（不设属性就什么都不做）。
+            // 仅当传了 -Pdxrmc.selfTest=… 才挂 tick 钩子（不设属性就什么都不做）。
             FrameGenerationSelfTest.install()
         }
     }

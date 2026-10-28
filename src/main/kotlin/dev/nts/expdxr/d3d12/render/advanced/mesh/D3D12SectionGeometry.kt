@@ -1,7 +1,7 @@
 package dev.nts.expdxr.d3d12.render.advanced.mesh
 
 import net.minecraft.core.SectionPos
-import dev.nts.expdxr.misc.D3D12Settings
+import dev.nts.expdxr.misc.settings.D3D12Settings
 import org.slf4j.LoggerFactory
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
@@ -9,17 +9,8 @@ import java.util.concurrent.atomic.AtomicIntegerArray
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * P125（mesh 引入 Step 2）：**section 几何注册表**（上传时刻采集）。
- *
- * <p>采集点是 `SectionRenderDispatcher$RenderSection.addSectionBuffersToUberBuffer` 的 HEAD
- * （见 `SectionUploadCaptureMixin`）。相比 `SectionCompiler.compile` 的 RETURN，这里的好处是：
- * 该方法是 section 数据进入 GPU 前的必经之路（实测 `compile` 的回调在本机一次都不触发，
- * 而 `CompileTask.doTask` 的探针每次都打）；同时能拿到 section 节点、层、`CompiledSectionMesh`
- * 的索引数与顶点/索引缓冲字节数。
- *
- * <p>**不缓存 GPU 句柄**：`RenderSectionBufferSlice` 里的 `GpuBuffer` + offset 会随
- * UberGpuBuffer 扩容/整理变化（计划里明确禁止长期持有失效句柄）。这里只保留 CPU 侧元信息，
- * 绘制时再按 (section, layer) 现取 slice。
+ * 段几何注册表：段上传时采集 CPU 侧元信息，不缓存 GPU 句柄（Uber 缓冲扩容/整理会让句柄失效）。
+ * `levelIdentity` 变化（切世界/重连）时整体清空并递增 epoch。见 docs/mesh&vrs/README.md §2.1。
  */
 object D3D12SectionGeometry {
     private val LOGGER = LoggerFactory.getLogger("dxr_mc/mesh")
@@ -30,13 +21,7 @@ object D3D12SectionGeometry {
         val indexCount: Int,
         val vertexBytes: Int,
         val indexBytes: Int,
-        /**
-         * P217：该段的 meshlet 表（方案 §二，每条 32 B）。
-         *
-         * <p>只有 `[mesh] terrain = true` 时才真正切分（默认为空表，零成本）；开启后
-         * **每次上传都切**，因为 Stage 2 的派发需要全部可见段的 meshlet，而不是采样。
-         * 未开启时只在前 [MESHLET_SHADOW_UPLOADS] 次做 shadow 统计。
-         */
+        /** 该段的 meshlet 表（32 B/条）；`[mesh] terrain` 打开时每次上传都切，否则只做 shadow 统计。 */
         val meshlets: List<D3D12MeshletBuilder.Meshlet> = emptyList(),
     ) {
         val triangles: Int get() = indexCount / 3
@@ -59,7 +44,7 @@ object D3D12SectionGeometry {
     private var generation: Long = 0
     private var levelIdentity: Int = 0
 
-    /** 采集计数（计划要求：真实 section/三角形/更新频率与采集成本计数）。 */
+    /** 采集计数与成本。 */
     private val uploads = AtomicLong()
     private val capturedTriangles = AtomicLong()
     private val emptyUploads = AtomicLong()
@@ -67,11 +52,7 @@ object D3D12SectionGeometry {
     private val indexBytesTotal = AtomicLong()
     private val captureNanosTotal = AtomicLong()
 
-    /**
-     * P217：meshlet 切分（shadow）。只对**前 [MESHLET_SHADOW_UPLOADS] 次**上传做切分 ——
-     * 目的是拿到真实规模（每段 meshlet 数、方向分布、单方向纯度），不是给每次上传加成本。
-     * 统计结果用 [meshletSummary] 打一行，之后进分桶/上传改造时这段会被真实产物取代。
-     */
+    /** shadow 统计只切前 [MESHLET_SHADOW_UPLOADS] 次上传，默认路径零成本。 */
     private const val MESHLET_SHADOW_UPLOADS = 64
     private val meshletUploads = AtomicLong()
     private val meshletCount = AtomicLong()
@@ -86,8 +67,7 @@ object D3D12SectionGeometry {
     fun find(sectionNode: Long): SectionGeometry? = sections[sectionNode]
 
     /**
-     * 记录一次上传。`levelIdentity` 变化（切世界/重连）时清空注册表并推进 epoch。
-     * 由渲染线程与 worker 线程共同调用，因此内部只用并发容器 + 幂等的清空判断。
+     * 记录一次上传；`levelIdentity` 变化时清空注册表并推进 epoch。渲染线程与 worker 线程都会调用。
      */
     @JvmStatic
     fun captureUpload(sectionNode: Long, layer: String, indexCount: Int, vertexBytes: Int,
@@ -98,9 +78,8 @@ object D3D12SectionGeometry {
             this.levelIdentity = levelIdentity
             epoch++
         }
-        // P217：`[mesh] terrain` 打开时**每次上传都切** meshlet（Stage 2 的派发需要全量段表）；
-        // 未打开时只做前 [MESHLET_SHADOW_UPLOADS] 次 shadow 统计，默认路径成本为零。
-        // 切分失败 / 缓冲为空都静默跳过 —— 这段绝不能影响上传本身。
+        // 切分是旁路数据：`[mesh] terrain` 打开时每次上传都切（派发要全量段表），否则只做前
+        // [MESHLET_SHADOW_UPLOADS] 次统计。失败 / 缓冲为空都静默跳过 —— 绝不能影响上传本身。
         val shadowLimit = if (D3D12Settings.meshTerrain) Int.MAX_VALUE else MESHLET_SHADOW_UPLOADS
         var meshlets: List<D3D12MeshletBuilder.Meshlet> = emptyList()
         if (vertex != null && indexCount > 0 && meshletUploads.get() < shadowLimit) {
@@ -167,11 +146,7 @@ object D3D12SectionGeometry {
     }
 
     /**
-     * P217：meshlet shadow 统计的一行摘要。
-     *
-     * <p>`pure` = 整段只含单一朝向（或全是非轴对齐）的 meshlet 占比 —— 方案 §三 的
-     * "按朝向分桶"要把它推到接近 100%，否则 AS 的位掩码背面剔除对混合 meshlet 只能整段放行。
-     * `dirs` 是逐 Quad 的朝向分布（+X,-X,+Y,-Y,+Z,-Z,non-axis）。
+     * shadow 统计摘要：`pure` = 单方向 meshlet 占比，`dirs` = 逐 Quad 朝向分布（+X…-Z, non-axis）。
      */
     fun meshletSummary(): String {
         val sections = meshletUploads.get()

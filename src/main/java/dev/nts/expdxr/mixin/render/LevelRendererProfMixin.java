@@ -13,10 +13,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-/**
- * P51：拆解 LevelRenderer.render（P50 的 WORLD 段）内部构成。
- * 这三段是世界渲染中"非提交"的 CPU 部分，用于判断 2~3.6ms 花在哪。
- */
+/** 拆解 `LevelRenderer.render`（WORLD 段）里三段非提交的 CPU 部分：提交 feature / 准备区块 / 编译区块。 */
 @Mixin(LevelRenderer.class)
 public class LevelRendererProfMixin {
     @Inject(method = "submitFeatures", at = @At("HEAD"), remap = false)

@@ -7,20 +7,8 @@ import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * P217（mesh 重构 Stage 2 的前置）：**捕获 vanilla 每帧的 MDI 段列表**。
- *
- * <p>为什么能拿到：26.3 的 `DynamicGpuData` 把 MDI 的参数与逐段信息都做成**公开** record：
- * - `IndexedDraw(indexCount, instanceCount, firstIndex, baseVertex, baseInstance)` ——
- *   正是 `D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED` 的 20 B 内容；
- * - `ChunkSectionInfo(x, y, z, visibility)` —— slot 1（`CHUNK_DATA_INSTANCED`，16 B/段）的内容。
- *
- * <p>`writeChunkSectionCommands(List<List<IndexedDraw>>)` 返回的 `GpuBufferSlice[]` 就是
- * 每个 layer 的间接参数缓冲；这个 slice 会原样成为 `ChunkSectionsToRender$GpuMultiDrawIndexedIndirect`
- * 的 `indirectCommandBuffer`，最终由 `D3D12RenderPassBackend.drawIndexedIndirect` 收到 ——
- * 所以用 **slice.offset** 做键就能在绘制时精确取回"这一批到底是哪几段"。
- *
- * <p>参数缓冲本身在 UPLOAD 堆、CPU 读不到（P194 实测 `mapBuffer: buffer lacks MAP_READ`），
- * 这条捕获路径是绕过它的唯一干净办法。
+ * 捕获 vanilla 每帧的 MDI 段列表（参数缓冲在 UPLOAD 堆、CPU 读不回，只能在这里记）。
+ * 键用 `GpuBufferSlice.offset`，绘制时按同一 offset 取回批次。见 docs/mesh&vrs/README.md §2.3。
  */
 object D3D12MeshDrawCapture {
 
@@ -29,7 +17,7 @@ object D3D12MeshDrawCapture {
 
     private val batches = ConcurrentHashMap<Long, Batch>()
 
-    /** 最近一次 `writeChunkSectionsInstanced` 的段位置（`SectionPos.asLong`），按 baseInstance 索引。 */
+    /** 段位置（`SectionPos.asLong`），按 baseInstance 索引。 */
     @Volatile private var sectionKeys: LongArray = LongArray(0)
     @Volatile private var sectionVisibility: FloatArray = FloatArray(0)
 
@@ -38,13 +26,7 @@ object D3D12MeshDrawCapture {
     @Volatile private var sectionBlockY: IntArray = IntArray(0)
     @Volatile private var sectionBlockZ: IntArray = IntArray(0)
 
-    /**
-     * P217：每帧写段表命令前清空上一帧的批次。
-     *
-     * <p>以前是"超过 64 条只留最新 offset"，那条启发式会把同一帧里**其它图层**的批次删掉
-     * （实测进世界头几帧 `no captured MDI list for offset 0/2920/4620` → 地形没画）。
-     * 现在按帧清空：`writeChunkSectionCommands` 一次写全部图层，清一次正好。
-     */
+    /** 每帧清空：一次 `writeChunkSectionCommands` 写全部图层，不能按旧 offset 做过期淘汰。 */
     @JvmStatic
     fun beginFrame() {
         batches.clear()
@@ -73,9 +55,8 @@ object D3D12MeshDrawCapture {
         val bz = IntArray(infos.size)
         for (i in infos.indices) {
             val s = infos[i]
-            // `ChunkSectionInfo.x/y/z` 是**方块坐标**（写进 slot1 的 `ChunkPosition`，着色器里
-            // 还要减 `CameraBlockPos`），而上传注册表的键是 `SectionPos.asLong`（段坐标）。
-            // 直接拿方块坐标当键，实测 369 段只命中 1 段。
+            // x/y/z 是**方块坐标**（写进 slot1 的 ChunkPosition），注册表键却是 SectionPos.asLong（段坐标）：
+            // 拿方块坐标当键实测 369 段只命中 1 段。
             keys[i] = SectionPos.asLong(
                 SectionPos.blockToSectionCoord(s.x()),
                 SectionPos.blockToSectionCoord(s.y()),
@@ -100,15 +81,8 @@ object D3D12MeshDrawCapture {
                       val meshletCount: Int)
 
     /**
-     * 把这一批 MDI 段打包成 **段表 + meshlet 表**（P217 Stage 2 的派发表）。
-     *
-     * <p>缺任何一段的 meshlet（还没上传完 / 不是这个 layer）就整批返回 null。地形已无 IMR
-     * 回退，调用方会把这一批跳过并记一条 ERROR —— 部分派发会让画面缺块，不能做。
-     *
-     * <p>`vertexSliceOffset` 是这批段绑定的顶点切片起点；`baseVertex` 是相对该切片的顶点号，
-     * 所以 SectionDesc.vertexBase 直接写 `baseVertex`（native 侧的 SRV 也从同一偏移起绑）。
-     *
-     * @param layer 该批对应的图层名（SOLID / CUTOUT / TRANSLUCENT），与上传注册表的 key 一致。
+     * 打包段表 + meshlet 表（32 B/条）；任一段缺 meshlet / 缺该层即整批返回 null —— 地形无 IMR 回退，
+     * 部分派发只会画出缺块的画面。`baseVertex` 相对 `vertexSliceOffset`，所以 vertexBase 直接写 `baseVertex`。
      */
     fun buildTables(batch: Batch, layer: String, vertexSliceOffset: Long): BatchTables? {
         val blocksX = sectionBlockX

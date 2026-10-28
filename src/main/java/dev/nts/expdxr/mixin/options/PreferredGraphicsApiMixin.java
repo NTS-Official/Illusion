@@ -17,32 +17,17 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * Turns vanilla's three-state graphics API cycle (Default / OpenGL / Vulkan) into a
- * four-state one, with Direct3D 12 appended last - i.e. immediately after Vulkan, so
- * the button reads Default - OpenGL - Vulkan - Direct3D 12.
+ * 在原版图形后端枚举尾部（Vulkan 之后）追加 D3D12，使循环按钮变成四项。
  *
- * <p>An earlier revision of this class injected DX12 into the DEFAULT and OPENGL
- * branches of {@code getBackendsToTry}, which made Direct3D 12 the de-facto default.
- * That is deliberately gone: {@code getBackendsToTry} is now left exactly as vanilla
- * wrote it unless the selected value is the DXRMC constant, so DEFAULT and OPENGL both
- * keep the stock OpenGL-first order and DX12 is only used when the user picks it.
- *
- * <p>The constant is built rather than declared because the mod compiles against the
- * same enum the game ships, whose {@code $VALUES} array is already baked into
- * {@code <clinit>}. Appending through the constructor invoker means {@code values()}
- * reports four constants, {@code Class.getEnumConstants()} agrees, and {@code CODEC}
- * is rebuilt because {@link StringRepresentable#fromEnum} snapshots the array it is
- * handed instead of reading it lazily.
+ * <p>常量必须用 {@code @Invoker("<init>")} 现造，造完必须重建 {@code CODEC} ——
+ * {@code StringRepresentable.fromEnum} 快照的是当时那个数组。未选中 D3D12 时不改原版行为。
+ * 见 docs/misc/mixins-and-earlywindow.md §3.7</p>
  */
 @Mixin(PreferredGraphicsApi.class)
 public abstract class PreferredGraphicsApiMixin {
     @Shadow @Final @Mutable public static Codec<PreferredGraphicsApi> CODEC;
 
-    /**
-     * Runs after vanilla has assigned {@code $VALUES} and {@code CODEC}. The constant is
-     * created here, not before, because {@code Component.translatable} in its constructor
-     * would otherwise hand {@code install} something a later {@code <clinit>} overwrites.
-     */
+    /** 必须在 {@code <clinit>} TAIL：早于原版赋值会被后续 {@code <clinit>} 覆盖。 */
     @Inject(method = "<clinit>", at = @At("TAIL"))
     private static void dxr_mc$createDx12Constant(CallbackInfo ci) {
         if (D3D12GraphicsApi.constant() != null) return;
@@ -57,12 +42,7 @@ public abstract class PreferredGraphicsApiMixin {
         D3D12GraphicsApi.logInstalled(PreferredGraphicsApi.values().length);
     }
 
-    /**
-     * Publishes the appended constant through {@code values()} - which is what
-     * {@code Options} calls for the cycle button's value set and what
-     * {@code Class.getEnumConstants()} reflects over. Left alone if the array is not
-     * vanilla's three constants, so a future game version cannot be silently mangled.
-     */
+    /** 让 {@code values()} / {@code getEnumConstants()} 看到第四个常量；数组不是原版三个时不碰。 */
     @ModifyReturnValue(method = "values", at = @At("RETURN"))
     private static PreferredGraphicsApi[] dxr_mc$appendDx12Constant(PreferredGraphicsApi[] vanilla) {
         PreferredGraphicsApi d3d12 = D3D12GraphicsApi.constant();
@@ -78,18 +58,8 @@ public abstract class PreferredGraphicsApiMixin {
     }
 
     /**
-     * Only the DXRMC constant gets its own backend list; every vanilla value falls
-     * through to the original implementation, restore-for-restore.
-     *
-     * <p>DXRMC deliberately returns a <b>single</b> backend (P73). Minecraft's selection
-     * loop swallows {@code BackendCreationException} and moves on to the next entry, so
-     * the previous {@code {DX12, GL, Vulkan}} order turned every Direct3D 12 failure
-     * into a silent OpenGL launch - the user watched an OpenGL frame while the setting
-     * still read "Direct3D 12". With one entry there is nothing left to fall back to;
-     * the failure is handled by
-     * {@link D3D12Fatal}, which resets
-     * {@code preferredGraphicsBackend} to {@code default} and crashes the game with an
-     * explanatory crash report.
+     * 必须返回**单条目** {@code {D3D12Backend}}：原版选中循环会吞掉 {@code BackendCreationException} 继续试下一个，
+     * 多条目就等于 DX12 失败后静默回退 OpenGL。失败改由 {@link D3D12Fatal} 重置设置并崩溃。
      */
     @ModifyReturnValue(method = "getBackendsToTry", at = @At("RETURN"))
     private GpuBackend[] dxr_mc$injectDx12Backend(GpuBackend[] vanilla) {

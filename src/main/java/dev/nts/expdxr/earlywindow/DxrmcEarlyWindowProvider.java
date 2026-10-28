@@ -26,12 +26,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * P268/P271: DX RMC early window provider.
+ * 建 Minecraft 随后接管的那个 SDL 窗口，并把加载屏画进去。
  *
- * <p>Creates the SDL window that Minecraft later adopts (see {@code WindowAdoptCreatedMixin}), and paints the
- * Illusion loading screen into it. The screen itself is
- * composed with AWT (logo + purple bar + caption) and uploaded as one streaming texture, so no font or
- * image codec dependency is added to the loader phase.</p>
+ * <p>加载屏用 AWT 合成、经 surface → texture 上屏，不自带字体/图像编解码依赖。
+ * 必须待在独立的 early-service jar 里。见 docs/misc/mixins-and-earlywindow.md §5</p>
  */
 public final class DxrmcEarlyWindowProvider implements ImmediateWindowProvider {
     private static final Logger LOGGER = LoggerFactory.getLogger("dxrmc/earlywindow");
@@ -40,23 +38,19 @@ public final class DxrmcEarlyWindowProvider implements ImmediateWindowProvider {
     private static final int INITIAL_HEIGHT = 480;
 
     private static final String LOGO_RESOURCE = "/assets/dxrmc/logo_flat_dark.jpg";
-    /** Minecraft's own default (Mojangles) glyph sheet: 16x16 cells of 8x8 pixels, U+0000..U+00FF. */
+    /** 原版默认字形表（Mojangles）：16×16 格、每格 8×8，覆盖 U+0000..U+00FF。 */
     private static final String MOJANGLES_RESOURCE = "/assets/dxrmc/mojangles_ascii.png";
     private static final String CAPTION = "Initializing DirectX 12 backend...";
 
-    /** Bright purple progress fill (P271). */
+    /** 进度条填充色。 */
     private static final Color BAR_FILL = new Color(0xC4, 0x6B, 0xFF);
     private static final Color BAR_TRACK = new Color(0x2E, 0x32, 0x38);
     private static final Color BACKGROUND = new Color(0x00, 0x00, 0x00);
     private static final Color CAPTION_COLOR = new Color(0xD8, 0xDC, 0xE2);
 
-    /**
-     * P269: channel to {@code WindowAdoptCreatedMixin}. The provider lives in the loader's early-service class
-     * loader and the mixin in the game's, so they cannot exchange statics; a system property is readable from
-     * both. The mixin clears the handle on take, so no stale handle can be adopted by a later window.
-     */
+    /** 窗口句柄由 mixin 用后即清；名字改动要三处同步（见 docs/misc/mixins-and-earlywindow.md §5.4）。 */
     private static final String HANDLE_PROPERTY = "dxrmc.earlywindow.handle";
-    /** Written by the mixin when the game really adopted this window (D3D12 backend only). */
+    /** 由 mixin 在窗口真被接管后写入（仅 D3D12）。 */
     private static final String ADOPTED_PROPERTY = "dxrmc.earlywindow.adopted";
 
     private long window;
@@ -154,8 +148,7 @@ public final class DxrmcEarlyWindowProvider implements ImmediateWindowProvider {
             g.setColor(BAR_FILL);
             g.fillRoundRect(margin, barY, filled, barHeight, barHeight, barHeight);
 
-            // P272: the caption uses Minecraft's own glyph sheet, not a system font - the loading screen then looks
-            // like the in-game UI (Mojangles) instead of an AWT fallback.
+            // 说明文字用原版字形表而不是系统字体，观感才和游戏内一致。
             int captionScale = Math.max(2, Math.round(height * 0.036f) / 8);
             drawMojangles(g, CAPTION, width, barY + barHeight + Math.round(18 * captionScale / 2f), captionScale);
         } finally {
@@ -178,11 +171,7 @@ public final class DxrmcEarlyWindowProvider implements ImmediateWindowProvider {
         }
     }
 
-    /**
-     * P272: draws {@code text} with Minecraft's own default font. The glyph sheet is the vanilla
-     * {@code assets/minecraft/textures/font/ascii.png} atlas (16x16 cells of 8x8 pixels); every glyph is advanced
-     * by its last non-empty column, which is what the vanilla font renderer reports as the glyph width.
-     */
+    /** 用原版 Mojangles 字形表画说明文字；字宽取最后一个非空列 +1。 */
     private void drawMojangles(Graphics2D g, String text, int canvasWidth, int baselineY, int scale) {
         if (mojangles == null) {
             return;
@@ -236,11 +225,7 @@ public final class DxrmcEarlyWindowProvider implements ImmediateWindowProvider {
             }
         }
     }
-    /**
-     * P271: blit an AWT frame through a throw-away SDL surface/texture pair. Going through
-     * {@code SDL_CreateTextureFromSurface} keeps the pixel format negotiation inside SDL instead of relying on
-     * a streaming texture upload, which the software renderer silently ignored.
-     */
+    /** 必须走 surface → texture：软件 renderer 会**静默忽略**流式纹理上传（不报错、也不显示）。 */
     private void presentFrame(BufferedImage frame) {
         int width = frame.getWidth();
         int height = frame.getHeight();
@@ -308,8 +293,7 @@ public final class DxrmcEarlyWindowProvider implements ImmediateWindowProvider {
         System.clearProperty(HANDLE_PROPERTY);
         handedOver = true;
         if (!adopted) {
-            // P269: the game is not on our Direct3D 12 backend, so vanilla just created its own window. Ours must
-            // not stay on screen as a stray second window.
+            // 非 D3D12：原版自己建了窗口，我们这扇不能当第二个窗口留在屏幕上。
             LOGGER.info("graphics backend is not D3D12 - dropping the early window, vanilla creates its own");
             close();
             if (window != 0L) {
@@ -318,8 +302,7 @@ public final class DxrmcEarlyWindowProvider implements ImmediateWindowProvider {
             return new WindowState(0, 0, INITIAL_WIDTH, INITIAL_HEIGHT, false, false, false, false);
         }
         LOGGER.info("handing the early window over to Minecraft (same window, no recreate)");
-        // Keep the last frame on screen: destroying the renderer here would leave the window black until
-        // the game presents its first frame, which reads as a flash. Released in close().
+        // 故意不销毁 renderer：销毁会让窗口黑到游戏第一帧，观感上就是闪一下。改在 close() 释放。
         return new WindowState(0, 0, INITIAL_WIDTH, INITIAL_HEIGHT, false, false, false, false);
     }
 
@@ -328,8 +311,8 @@ public final class DxrmcEarlyWindowProvider implements ImmediateWindowProvider {
         if (handedOver) {
             return;
         }
-        // NOTE: do not drain SDL events here - SDL_PollEvent(NULL) keeps returning true while events are
-        // pending and FML calls this method on the loading thread, so draining can spin forever (P268 hang).
+        // NOTE: 绝不能在这里 drain SDL 事件：SDL_PollEvent(NULL) 有待处理事件就一直返回 true，
+        // 而 FML 在加载线程上调这个方法 —— 清一次队列就把加载线程卡死。
         progressTicks++;
         if (progressTicks % 4 == 0) {
             redraw();
@@ -338,7 +321,7 @@ public final class DxrmcEarlyWindowProvider implements ImmediateWindowProvider {
 
     @Override
     public void updateProgress(String label) {
-        // The caption is fixed on purpose: it names the backend that is being brought up.
+        // 说明文字固定：它描述的是正在初始化的后端。
     }
 
     @Override

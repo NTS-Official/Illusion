@@ -9,20 +9,11 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * P104: folds anti-aliasing into the vanilla graphics presets.
+ * 画质预设联动抗锯齿（fast=off、fancy=SMAA、fabulous=TAA、custom 不动）。
  *
- * <p>Vanilla's {@code GraphicsPreset.apply} only touches the options it knows about; anti-aliasing
- * is DXRMC's own video setting, so it is mapped here right after the preset has done its work:
- * fast = off, fancy = SMAA, fabulous = TAA, custom = left alone (that is the player's own mix).
- *
- * <p>The two gates live in {@code D3D12AntiAliasing.applyFromPreset} rather than here, so there is
- * exactly one place that decides: the option is only touched while the game really renders through
- * the D3D12 backend ({@code D3D12AdapterInfo.current != null} - under GL/Vulkan the option is a
- * greyed-out no-op and a preset must not rewrite it), and never while DLSS has it pinned to OFF.
- *
- * <p>The injection sits after the {@code GraphicsPreset.apply} call and before
- * {@code isApplyingGraphicsPreset} is cleared, so writing the anti-aliasing options is not mistaken
- * for a manual change that would immediately bounce the freshly picked preset back to "custom".
+ * <p>必须在 {@code GraphicsPreset.apply} 之后、{@code isApplyingGraphicsPreset} 清空之前：否则写抗锯齿会被
+ * 当成手动改动，把刚选的预设弹回 custom。是否该写的判据全在 {@code D3D12AntiAliasing.applyFromPreset}。
+ * 见 docs/misc/mixins-and-earlywindow.md §3.7</p>
  */
 @Mixin(Options.class)
 public abstract class OptionsGraphicsPresetMixin {

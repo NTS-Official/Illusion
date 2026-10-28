@@ -8,13 +8,7 @@ import net.minecraft.network.chat.Component
 import net.minecraft.util.Mth
 import java.util.function.Function
 
-/**
- * 一整行的标题（深色底 + 居中白字）。
- *
- * <p>挪自 wgpu-mc（Neolectrum）的 `TextWidget`：屏幕顶部那条“视频设置”就是它。
- *
- * @author DXRMC
- */
+/** 一整行的标题（深色底 + 居中白字）。 */
 class D3D12TitleWidget(x: Int, y: Int, width: Int, private val text: Component) :
     D3D12Widget(x, y, width, DEFAULT_HEIGHT) {
 
@@ -24,13 +18,7 @@ class D3D12TitleWidget(x: Int, y: Int, width: Int, private val text: Component) 
     }
 }
 
-/**
- * 分组标题：不画底、不参与悬停，只有主题色的字。
- *
- * <p>照 wgpu-mc 的 `HeadingWidget`：空文本就是一个纯留白行，用来隔开上一段设置。
- *
- * @author DXRMC
- */
+/** 分组标题：只有主题色的字，不画底、不参与悬停；空文本就是一行留白。 */
 class D3D12HeadingWidget(x: Int, y: Int, width: Int, private val text: Component) :
     D3D12Widget(x, y, width, DEFAULT_HEIGHT) {
 
@@ -39,18 +27,10 @@ class D3D12HeadingWidget(x: Int, y: Int, width: Int, private val text: Component
             return
         }
 
-        // 分组标题不再铺深色底（用户 m06280）：只有一行主题色的字，和下面对齐即可。
         renderer.text(text, x + 6, centerTextY(renderer), ACCENT)
     }
 }
-/**
- * 只读的说明行：不画底、不可点、不参与悬停，灰色小字。
- *
- * <p>用来写"为什么这一项现在不可用"这类**状态**（例如超分后端的运行库缺失），
- * 与分组标题的区别只是颜色 —— 它必须看起来不可交互，否则会有人去点。
- *
- * @author DXRMC
- */
+/** 只读说明行：灰色小字，不可点、不参与悬停 —— 必须看起来不可交互，否则会有人去点。 */
 class D3D12NoteWidget(x: Int, y: Int, width: Int, private val text: Component, private val warning: Boolean) :
     D3D12Widget(x, y, width, DEFAULT_HEIGHT) {
 
@@ -63,11 +43,7 @@ class D3D12NoteWidget(x: Int, y: Int, width: Int, private val text: Component, p
     }
 }
 
-/**
- * 左侧页签：深色底 + 白字，选中时左边一条 1px 主题色竖条，出现/消失带淡入淡出。
- *
- * @author DXRMC
- */
+/** 左侧页签：选中时左边一条 1px 主题色竖条，选中/取消带淡入淡出。 */
 class D3D12TabWidget(
     x: Int,
     y: Int,
@@ -86,7 +62,7 @@ class D3D12TabWidget(
         }
 
         renderer.rect(x, y, x + width, y + height, if (isMouseOver(mouseX, mouseY)) BG_HOVERED else BG)
-        // 页签宽度固定，超长的译名要截断，否则会压到内容区（P201 实机所见）。
+        // 页签宽度固定：超长的译名必须截断，否则压到内容区。
         val available = width - TEXT_INSET * 2
         val flat = label.string
         val shown = if (renderer.textWidth(label) > available) {
@@ -123,50 +99,35 @@ class D3D12TabWidget(
 /**
  * 一行设置：滑条 / 开关 / 枚举，三种外观都在这里。
  *
- * <p>照 wgpu-mc 的 `IntWidget` / `BoolWidget` / `EnumWidget`：
- * <ul>
- *   <li>滑条：未悬停时右侧显示格式化后的取值；悬停时名称限宽（超过 1/3 行宽就截断加 “...”），取值缩到
- *       左半边，右半边出现白色滑轨与手柄，点击/拖拽直接按比例设值。</li>
- *   <li>开关：右侧一个方框，打开时里面填主题色（带过渡）。</li>
- *   <li>枚举：右侧取值，取值变化时新旧文本交叉淡入淡出。</li>
- * </ul>
- *
- * @author DXRMC
+ * <p>滑条悬停时标题最多占 1/3 行宽，取值只能填在"标题右缘 → 行中线"之间，放不下就整体省略。
+ * 见 docs/misc/settingscreen/README.md §6.4。
  */
 class D3D12OptionWidget<T : Any>(
     x: Int,
     y: Int,
     width: Int,
     private val option: OptionInstance<T>,
-    /** 窄窗/大界面尺寸下退化成“折叠控件”：行尾显示 ▸，点开后在下一行露出滑条（见 [renderCollapsible]）。 */
+    /** 窄窗下退化成折叠控件：行尾 ▸，点开在下一行露出滑轨（见 [renderCollapsible]）。 */
     private val collapsible: Boolean = false,
-    /** 折叠控件是否已展开；展开时本行多占 [SLIDER_LINE] 的高度，后续行整体下移。 */
+    /** 已展开：本行多占 [SLIDER_LINE] 的高度，后续行整体下移。 */
     private val expanded: Boolean = false,
     private val onToggleExpand: () -> Unit = {},
-    /**
-     * 只读行（用户 m07432）：值由别处决定时（例如 DLSS 开着时渲染缩放被绑到 DLSS 输入比例），
-     * 这一行只显示取值、不接受任何点击/拖拽，文字转灰。
-     */
+    /** 只读行：值由别处决定（如 DLSS 开着时渲染缩放绑到 DLSS 输入比例），只显示取值、文字转灰。 */
     private val readOnlyProvider: () -> Boolean = { false },
-    /**
-     * 允许取值白名单（每次点击时求值）：帧生成生效期间 Reflex 只允许在 On / Boost 之间切换，
-     * 不允许被切回 Off（那会让 SDK 静默禁用插帧，用户却以为还开着）。
-     */
+    /** 允许取值白名单（每次点击时求值）：帧生成生效时 Reflex 不允许被切回 Off，否则 SDK 静默禁用插帧。 */
     private val allowedValues: (() -> Set<T>)? = null,
-    /** 只读原因（用户 m10067）：非空时，悬停这一行会额外显示一条说明。 */
+    /** 只读原因：非空时悬停这一行会额外显示一条说明。 */
     private val lockReasonProvider: () -> Component? = { null },
 ) : D3D12Widget(x, y, width, DEFAULT_HEIGHT + if (expanded) SLIDER_LINE else 0) {
 
-    // `caption` 与 `toString` 在 `OptionInstance` 上是 public 字段（26.2 起就是），直接读即可；
-    // 原先经 `OptionInstanceAccessor` 的两道转换永远不可能成功，只剩 `tooltip`
-    // 仍是 private，那个才需要 accessor（见 [tooltipText]）。
+    // caption 与 toString 在 OptionInstance 上是 public 字段；只有 tooltip 是 private，走 accessor。
     private val caption: Component = option.caption
     private val stringifier: Function<T, Component> = option.toString
     private val slider: OptionInstance.SliderableValueSet<T>? =
         option.values() as? OptionInstance.SliderableValueSet<T>
     private val cycleValues: List<T>? = run {
-        // 26.3 里“枚举行”有两种来源：`Enum`（抗锯齿、画质预设这类内建枚举）与 `CycleableValueSet`
-        // （我们自己的 HDR 呈现、以及原版若干 int 型循环按钮）。只认前者会让后者点了没反应（用户 m06370）。
+        // 26.3 的枚举行有两种来源：Enum（内建枚举）与 CycleableValueSet（HDR 呈现、原版 int 循环按钮）。
+        // 只认前者会让后者点了没反应。
         @Suppress("UNCHECKED_CAST")
         (option.values() as? OptionInstance.Enum<T>)?.values()
             ?: (option.values() as? OptionInstance.CycleableValueSet<T>)
@@ -174,12 +135,7 @@ class D3D12OptionWidget<T : Any>(
     }
     private val isSwitch: Boolean = option.get() is Boolean
 
-    /**
-     * 暂存值（用户 m06864）：改动只记在这里，点“应用”才真正写回 [OptionInstance]。
-     *
-     * <p>这样“改一下看看效果”不会再立刻重建渲染目标/开关 DLSS——以前那种即时生效正是
-     * “关掉 DLSS 却没点应用也崩”的直接原因。
-     */
+    /** 暂存值：改动只记在这里，点"应用"才写回 [OptionInstance]（即时生效会立刻重建渲染目标、开关 DLSS）。 */
     private var pendingValue: T? = null
     private var hasPending: Boolean = false
 
@@ -187,16 +143,13 @@ class D3D12OptionWidget<T : Any>(
     @Suppress("UNCHECKED_CAST")
     private fun displayValue(): T = if (hasPending) pendingValue as T else option.get()
 
-    /** 记下暂存值（不写回 OptionInstance）。 */
     private fun stage(value: T) {
         pendingValue = value
         hasPending = true
     }
 
-    /** 这一行是否有“尚未应用”的改动。 */
     fun hasPendingChange(): Boolean = hasPending && pendingValue != option.get()
 
-    /** 把暂存值写回 OptionInstance（“应用”按钮与撤销基线都用它）。 */
     fun commitPending() {
         if (hasPending) {
             @Suppress("UNCHECKED_CAST")
@@ -206,7 +159,6 @@ class D3D12OptionWidget<T : Any>(
         }
     }
 
-    /** 丢弃暂存值（“撤销”与关闭界面时用）。 */
     fun clearPending() {
         pendingValue = null
         hasPending = false
@@ -233,15 +185,11 @@ class D3D12OptionWidget<T : Any>(
     private var valueAnimation: Double = 1.0
 
     /**
-     * 悬停（含拖拽中）显示在左半边的“实时取值”。
-     *
-     * <p>一律用与未悬停时同一个格式化文本：原始值对玩家没有意义 —— 独占全屏模式是显示器模式列表的
-     * 下标（“0/1/2”），画质预设是枚举名（“FAST/FANCY”），拖拽中还必须和松手后显示的那行字一致
-     * （用户 m06236 / m06270）。
+     * 悬停（含拖拽中）显示在左半边的"实时取值"：一律用与未悬停时同一份格式化文本 —— 原始值对玩家
+     * 没有意义（模式下标、枚举名），拖拽中还必须与松手后显示的那行字一致。
      */
     private fun sliderHoverText(): String = formattedValue().string
 
-    /** 与屏幕的撤销基线对接：当前值与写回。 */
     fun currentValue(): Any? = option.get()
 
     fun restore(value: Any?) {
@@ -251,7 +199,7 @@ class D3D12OptionWidget<T : Any>(
 
     override fun render(renderer: D3D12WidgetRenderer, mouseX: Int, mouseY: Int, delta: Float) {
         if (readOnlyProvider()) {
-            // 只读：不响应悬停、不高亮、不画滑轨/手柄，只把标题与取值转灰（用户 m07432）。
+            // 只读：不响应悬停、不高亮、不画滑轨/手柄，只把标题与取值转灰。
             renderer.rect(x, y, x + width, y + height, BG)
             renderDisabled(renderer)
             return
@@ -281,31 +229,22 @@ class D3D12OptionWidget<T : Any>(
         }
     }
 
-    /** 屏幕用它判断这一行值不值得退化成折叠控件：只有滑条行才需要（开关/枚举没有展开态）。 */
     fun canCollapse(): Boolean = !isSwitch
 
-    /** 这一行是否带滑条（屏幕用它决定“窄窗是否一律折叠”）。 */
     fun hasSlider(): Boolean = slider != null
 
-    /** 取值（展开态、悬停布局用）的像素宽度：屏幕据此判断标题加取值是否放得下。 */
     fun hoverHintWidth(): Int = Minecraft.getInstance().font.width(formattedValue().string)
 
-    /** 标题（未截断）的像素宽度：屏幕用它判断真实重叠，而不是只看取值占多宽（用户 m06567）。 */
+    /** 标题未截断的像素宽度：屏幕据此判断真实重叠，而不是只看取值占多宽。 */
     fun captionWidth(): Int = Minecraft.getInstance().font.width(caption)
 
-    /** 标题组件：屏幕的提示块首行显示它（用户 m06618 的版式：标题、空行、描述）。 */
     fun captionComponent(): Component = caption
 
-    /**
-     * 该行的提示文本（**未换行**）；没有提示时为 `null`。
-     *
-     * <p>原版只给“已按固定宽度换好行”的序列；版式宽度由屏幕决定，所以这里拿原始组件回去自己拆行。
-     */
     /** 只读原因；为空表示这一行没有额外解释。 */
     fun lockReasonText(): Component? = if (readOnlyProvider()) lockReasonProvider() else null
 
-    // `tooltip` 是 `OptionInstance` 里唯一还是 private 的字段，只能走 @Accessor；Kotlin 看不到
-    // mixin 在加载期织进去的接口，所以把这句判成“转换永远不可能成功”——运行时是成功的。
+    // tooltip 是 OptionInstance 里唯一还是 private 的字段，只能走 @Accessor；mixin 在加载期织入，
+    // Kotlin 看不到那个接口，所以转换被判成"永远不可能成功"（运行时是成功的）。
     @Suppress("CAST_NEVER_SUCCEEDS")
     fun tooltipText(): Component? {
         val supplier = (option as OptionInstanceAccessor).`dxr_mc$tooltipSupplier`() ?: return null
@@ -313,7 +252,6 @@ class D3D12OptionWidget<T : Any>(
         return (tooltip as TooltipAccessor).`dxr_mc$message`()
     }
 
-    /** 只读行的绘制：标题与取值都转灰，取值右对齐，标题按剩余宽度从右侧截断。 */
     private fun renderDisabled(renderer: D3D12WidgetRenderer) {
         val valueText = formattedValue()
         renderer.text(
@@ -328,8 +266,7 @@ class D3D12OptionWidget<T : Any>(
     }
 
     private fun renderTitle(renderer: D3D12WidgetRenderer, hovered: Boolean) {
-        // 纯取值行（枚举/文本）也要给右对齐的取值留位置：否则长取值会和标题直接叠在一起
-        // （用户 m10244 的「独占全屏模式 + 2560x1440@165Hz（24位色深）」）。滑条/开关仍按悬停收窄。
+        // 纯取值行（枚举/文本）也要给右对齐的取值留位置，否则长取值会直接盖住标题；滑条/开关按悬停收窄。
         val font = Minecraft.getInstance().font
         // 悬停中的滑条行把取值挪到左半边（右半边给滑轨），此时不需要再预留整段取值宽度；
         // 其余情况（含未悬停的滑条行）都必须给右对齐的取值/开关留位置，否则标题会被取值直接盖住。
@@ -359,7 +296,7 @@ class D3D12OptionWidget<T : Any>(
         valueRenderer: OptionInstance.SliderableValueSet<T>,
     ) {
         val font = Minecraft.getInstance().font
-        // 展开态的滑条在第二行，第一行不再受“中线左侧”限制，整行都可用（用户 m10358）。
+        // 展开态的滑条在第二行，第一行不再受"中线左侧"限制，整行都可用。
         if (!hovered || expanded) {
             // 未悬停时取值右对齐；限宽给标题留出位置（长取值如 2560x1440@165Hz）。
             val text = formattedValue()
@@ -369,8 +306,7 @@ class D3D12OptionWidget<T : Any>(
             return
         }
 
-        // 悬停：标题占左侧（最多 width/3），取值只能填在“标题右侧到行中线”这段；不够就整体省略。
-        // 之前只按 width/2 限宽、右对齐到中线，长取值会向左越过标题（用户 m10244 的重叠）。
+        // 悬停：取值只能填在"标题右侧 → 行中线"这段；只按 width/2 限宽、右对齐到中线会让长取值越过标题。
         val hoverText = sliderHoverText()
         val captionBudget = minOf(renderer.textWidth(caption), width / 3)
         val valueLeft = x + 6 + captionBudget + 8
@@ -389,8 +325,8 @@ class D3D12OptionWidget<T : Any>(
         val progress = valueRenderer.toSliderValue(displayValue()).coerceIn(0.0, 1.0)
         val handleWidth = 3
         val handleHeight = renderer.textHeight() + 2
-        // 手柄必须落在滑轨上：轨道从 x + width/2 开始、到 x + width - 6 结束，所以按轨道长度换算。
-        // 之前用 x + progress * width 算，进度为 0 时手柄直接飞到行首、压在标题文字上（P201 实机所见）。
+        // 手柄必须落在滑轨上：轨道从 x + width/2 到 x + width - 6，所以按轨道长度换算（按 progress * width
+        // 算的话，进度为 0 时手柄会飞到行首、压在标题上）。
         val handleX = (trackX1 + (progress * (trackX2 - trackX1)).toInt())
             .coerceIn(trackX1, trackX2 - handleWidth)
         renderer.rect(
@@ -402,27 +338,20 @@ class D3D12OptionWidget<T : Any>(
         )
     }
 
-    /**
-     * 折叠态滑条：行尾一个 ▸，点开后在**下一行**铺开整条滑轨（把后面的行往下挤，不覆盖）。
-     *
-     * <p>窄窗或大界面尺寸下，展开的滑条会把取值挤到标题上（用户 m06280），所以这种行不再内联展开，
-     * 直接退化成折叠控件。
-     */
+    /** 折叠态滑条：行尾 ▸，点开后在**下一行**铺开整条滑轨（把后面的行往下挤，不覆盖）。 */
     private fun renderCollapsible(renderer: D3D12WidgetRenderer) {
         val marker = if (expanded) "▾" else "▸"
         val markerWidth = renderer.textWidth(marker)
         val font = Minecraft.getInstance().font
 
-        // 折叠态排版按“这一行真实可用的宽度”算，而不是套用带滑条的布局（用户 m06520）：
-        // 内边距 6+6、行尾 ▸ 与它的间距、标题与取值之间再留 6。
+        // 折叠态排版按本行真实可用宽度算：内边距 6+6、▸ 与它的间距、标题与取值之间再留 6。
         val inner = (width - 12 - markerWidth - 4).coerceAtLeast(24)
         val valueText = formattedValue().string
         val captionText = caption.string
         val valueFull = font.width(valueText)
         val captionFull = font.width(captionText)
 
-        // 取值先按“它自己需要的宽度”拿（用户 m06597：固定按 45% 分给标题，会在两者本可以并排时
-        // 把取值白白截掉）。只有标题与取值确实放不下时，才压缩取值；此时标题至少保留 1/4 行宽。
+        // 取值先按它自己需要的宽度拿；只有标题与取值确实放不下时才压缩取值，此时标题至少保留 1/4 行宽。
         val minCaption = (inner / 4).coerceAtLeast(24)
         val valueBudget = if (captionFull + valueFull + 6 <= inner) {
             valueFull
@@ -430,7 +359,7 @@ class D3D12OptionWidget<T : Any>(
             (inner - minCaption - 6).coerceIn(16, inner)
         }
 
-        // 纯取值行展开后，取值挪到第二行，第一行整行都留给标题（这样“有省略”时展开真的能看全，用户 m10319）。
+        // 纯取值行展开后，取值挪到第二行，第一行整行都留给标题（这样"有省略"时展开才真的能看全）。
         val valueInline = !(expanded && slider == null)
 
         // 取值从左边省略：数值/分辨率这类文本有意义的部分在尾部（“…0@165”），砍尾巴会只剩前缀。
@@ -452,7 +381,7 @@ class D3D12OptionWidget<T : Any>(
 
         val valueRenderer = slider
         if (valueRenderer == null) {
-            // 纯取值行没有滑轨可露，展开就是“把完整取值放到第二行”；只有第二行也放不下才省略（用户 m10319）。
+            // 纯取值行没有滑轨可露，展开就是把完整取值放到第二行；只有第二行也放不下才省略。
             val full = ellipsizeRight(font, formattedValue().string, width - 12)
             renderer.text(full, x + 6, y + DEFAULT_HEIGHT + 1, WHITE)
             return
@@ -540,8 +469,8 @@ class D3D12OptionWidget<T : Any>(
 
         val valueRenderer = slider
         if (valueRenderer != null) {
-            // 右半边 = 滑轨：按比例设值并进入拖拽；左半边 = 名称区：按原版语义退一档。
-            // 以前左边也按比例设值，鼠标点在标题上就会把取值拉到 0，看起来就像“手柄飞到行首”（用户 m06174）。
+            // 右半边 = 滑轨：按比例设值并进入拖拽；左半边 = 名称区：按原版语义退一档（左边也按比例
+            // 设值的话，点在标题上就会把取值拉到 0）。
             if (mouseX >= (x + width / 2).toDouble()) {
                 dragging = true
                 applyFraction(valueRenderer, mouseX)
@@ -608,16 +537,14 @@ class D3D12OptionWidget<T : Any>(
     @Suppress("UNCHECKED_CAST")
     private fun toggleSwitch() {
         val boolean = displayValue() as Boolean
-        // 开关也必须走暂存（用户 m06937：DLSS 开关一拨就生效、却不显示“应用”）。
+        // 开关也必须走暂存，否则一拨就生效、却不显示"应用"。
         @Suppress("UNCHECKED_CAST")
         stage((!boolean) as T)
     }
 
     /**
-     * 原版的换算函数返回 “标题: 值”，直接显示会变成 “标题：标题：值”，所以这里把前缀去掉。
-     *
-     * <p>分隔符要两种都认：英文语言的 `options.generic_value` 是 `%s: %s`，中文是 `%s：%s`，
-     * 只按 `": "` 匹配的话中文界面会把标题原样留在取值里（P201 实机所见）。
+     * 原版换算函数返回"标题: 值"，去掉前缀；分隔符必须中英两种都认 —— 中文语言键是 `%s：%s`，
+     * 只按 `": "` 匹配会把标题原样留在取值里。
      */
     private fun formattedValue(): Component {
         val text = stringifier.apply(displayValue())
@@ -643,13 +570,7 @@ class D3D12OptionWidget<T : Any>(
     }
 }
 
-/**
- * 底部动作按钮：深色底 + 居中白字，出现/消失与文字切换都带淡入淡出。
- *
- * <p>照 wgpu-mc 的 `CustomButtonWidget`：同一个按钮在“有改动”时显示成“应用”，没改动时显示“完成”。
- *
- * @author DXRMC
- */
+/** 底部动作按钮：有改动时显示"应用"、无改动时显示"完成"，文字切换带淡入淡出。 */
 class D3D12ButtonWidget(
     x: Int,
     y: Int,
@@ -711,7 +632,6 @@ class D3D12ButtonWidget(
         return true
     }
 }
-/** 从右边省略：保留前缀（标题这类文本有意义的部分在开头）。 */
 private fun ellipsizeRight(font: net.minecraft.client.gui.Font, text: String, maxWidth: Int): String {
     if (maxWidth <= 0) {
         return ""
@@ -724,11 +644,7 @@ private fun ellipsizeRight(font: net.minecraft.client.gui.Font, text: String, ma
     return font.plainSubstrByWidth(text, budget) + dots
 }
 
-/**
- * 从左边省略：保留后缀（分辨率、数值这类文本有意义的部分在末尾）。
- *
- * <p>Kotlin 没有现成的“按像素裁左”，这里从尾部逐字符往前扩，直到再扩就超宽为止。
- */
+/** 从左边省略：保留后缀（分辨率、数值这类文本有意义的部分在末尾）。Kotlin 没有按像素裁左的现成函数，从尾部逐字符往前扩。 */
 private fun ellipsizeLeft(font: net.minecraft.client.gui.Font, text: String, maxWidth: Int): String {
     if (maxWidth <= 0) {
         return ""

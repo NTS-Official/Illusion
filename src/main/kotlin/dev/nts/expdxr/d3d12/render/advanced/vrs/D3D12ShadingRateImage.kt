@@ -11,25 +11,9 @@ import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
 /**
- * P235：Tier 2 的屏幕空间着色率图像（SRI）。
- *
- * 每帧在**开画之前**跑一次 compute：读上一帧的深度与运动矢量，按 16×16 tile 判定
- * "这一块像素该不该降采样"，把结果写进一张 `R8_UINT` 的着率图像；地形绘制时把它绑到
- * 命令列表上（`RSSetShadingRateImage`），由运行时的三级组合（基率 / 逐图元 / 图像，
- * 全部取 `MIN`）取**最细**的那一票。
- *
- * 为什么用上一帧的数据：本帧的深度要到主 pass 才写出来，而着率图像必须在主 pass 开画前
- * 就绑好。上一帧的深度与它自己的运动矢量是同一时刻的，正好成对；相机在一帧内的相对
- * 变化（重投影误差）由"运动矢量过大就退回 1X1"这条规则吃掉。
- *
- * 判定规则（任一命中即 1X1，否则 2X2）：
- * - 深度落在两极（天空 `≈1`、近平面 `≈0`）—— 天空没有着色细节，但它的深度梯度会
- *   在轮廓处制造大面积误判，宁可保守；
- * - tile 内四角深度相对差 > `edgePermille/1000`（默认 0.05，即 5%）—— 剪影/棱边；
- * - tile 内四角运动矢量的绝对值 > `motionPx`（默认 8 像素）—— 快速运动或遮挡变化。
- *
- * 失败策略与 [D3D12Velocity] 一致：任何一步失败只记一次日志并**永久自关**，画面退回
- * P233 的逐图元档位，绝不影响正常渲染。
+ * Tier 2 的屏幕空间着色率图像（SRI）：每帧开画前跑一次 compute，读上一帧深度与运动矢量，按 16×16 tile 判定
+ * 是否降采样并写入 `R8_UINT` 着率图，地形批次绑到命令列表（`RSSetShadingRateImage`）。任何一步失败只记一次
+ * 日志并永久自关。见 docs/mesh&vrs/README.md §3.3。
  */
 object D3D12ShadingRateImage {
     private val LOGGER: Logger = LoggerFactory.getLogger("dxrmc-vrs-sri")
@@ -37,11 +21,7 @@ object D3D12ShadingRateImage {
     /** 运行时 tile 尺寸（NVIDIA 为 16×16；能力查询里拿到的就是这个值）。 */
     private const val TILE: Int = 16
 
-    /**
-     * 深度快照的 usage：SRV（compute 读）+ COPY_DST（从主深度拷进来）+ COPY_SRC（诊断回读）。
-     *
-     * 注：必须写成一行 —— 本工具链不接受"续行以 `or` 开头"的写法（见 `D3D12Velocity.USAGE`）。
-     */
+    /** 深度快照 usage：SRV + COPY_DST + COPY_SRC，必须写成一行（工具链不接受以 `or` 开头的续行）。 */
     private val DEPTH_USAGE: Int = GpuTexture.USAGE_TEXTURE_BINDING or GpuTexture.USAGE_COPY_DST or GpuTexture.USAGE_COPY_SRC
 
     /** 深度边沿阈值（千分比）：四角深度相对差超过它即判为几何边沿。 */
@@ -51,19 +31,16 @@ object D3D12ShadingRateImage {
     private const val MOTION_PIXELS: Int = 8
 
     /**
-     * 着色率图像（两张 ping-pong）。
-     *
-     * <p>时间钳制（§8.6 末行）要把"上一帧的 SRI"当 `t2` 读回来，而 compute 不能同时读写同一张
-     * 纹理 —— 所以每帧写 A 读 B、下一帧写 B 读 A，各带一张 SRV 视图（`t2` 只能是视图句柄）。
+     * 着色率图像（两张 ping-pong）：compute 不能同时读写同一张纹理，每帧写 A 读 B；`t2` 只能绑视图句柄。
      */
     private val images: LongArray = LongArray(2)
     private val views: LongArray = LongArray(2)
 
-    /** 本帧要写入的图像下标；[lastWritten] 是上一帧写完的那张（= 本帧的 `t2`，也是要绑的那张）。 */
+    /** 本帧写入下标；[lastWritten] 是上一帧写完那张（= 本帧的 `t2`，也是要绑的那张）。 */
     private var writeIndex: Int = 0
     private var lastWritten: Int = -1
 
-    /** 上一帧的 SRI 是否还有效（强制 1X1 的那帧会把它清掉，否则下一帧会 `min(x, 0)` 再糊一帧）。 */
+    /** 上一帧的 SRI 是否仍有效（强制 1X1 的帧必须清掉，否则下一帧 `min(x, 0)` 再糊一帧）。 */
     private var historyValid: Boolean = false
     private var pipeline: Long = 0L
     private var depthTex: Long = 0L
@@ -74,7 +51,6 @@ object D3D12ShadingRateImage {
     private var pixelW: Int = 0
     private var pixelH: Int = 0
 
-    /** 本帧的着率图像是否已经生成好、可以绑定。 */
     private var ready: Boolean = false
 
     /** 一次性失败闩锁：置上之后永久退回逐图元档位。 */
@@ -90,7 +66,7 @@ object D3D12ShadingRateImage {
     private var lastPitch: Float = 0.0f
     private var hasLastCamera: Boolean = false
 
-    /** 本帧强制全 1X1（§8.4 第 2/3 条）：相机跳变或世界切换后的那一帧。 */
+    /** 本帧强制全 1X1：相机跳变或世界切换后的那一帧。 */
     private var forceFine: Boolean = false
 
     /** 一帧内相机位移超过它（方块）就判为跳变 —— `/tp`、重生、传送门都远超这个量级。 */
@@ -99,7 +75,6 @@ object D3D12ShadingRateImage {
     /** 一帧内视角转角超过它（度）也算跳变（相机路径跳帧、视角瞬间切换）。 */
     private const val CAMERA_JUMP_DEGREES: Float = 30.0f
 
-    /** 已生成好的帧数（诊断用）。 */
     @JvmStatic
     fun frames(): Long = frames
 
@@ -107,15 +82,10 @@ object D3D12ShadingRateImage {
     @JvmStatic
     fun isReady(): Boolean = ready && !failed && sriEnabled()
 
-    /** 着色率图像的尺寸描述，供 F3 诊断行；`none` = 还没生成过。 */
     @JvmStatic
     fun tileSize(): String = if (tilesX <= 0) "none" else tilesX.toString() + "x" + tilesY + "@" + pixelW + "x" + pixelH
 
-    /**
-     * 每帧开画前调用（挂点：`FrameGraphBuilderProfMixin` 的 `execute` HEAD）。
-     *
-     * 此刻本帧的 clear 还没跑，主深度里仍是上一帧最后一笔 —— 正好是我们要的输入。
-     */
+    /** 每帧开画前调用（挂点：`FrameGraphBuilderProfMixin` 的 `execute` HEAD）：此刻主深度是上一帧最后一笔。 */
     @JvmStatic
     @Synchronized
     fun prepareFrame() {
@@ -142,14 +112,12 @@ object D3D12ShadingRateImage {
         if (w <= 0 || h <= 0) {
             return
         }
-        // §8.4 第 2 条：相机跳变（/tp、重生、传送门、相机路径跳帧）时上一帧的深度与速度
-        // 已经指向别处，这一帧的 SRI 只能是全 1X1 —— 否则会看到"传送后整帧糊一下"。
+        // 相机跳变（/tp、重生、传送门）时上一帧的深度与速度已指向别处，本帧只能全 1X1，否则"传送后整帧糊一下"。
         if (detectCameraJump()) {
             forceFine = true
         }
-        // 速度通道没开（抗锯齿与 DLSS 都关时根本没有速度 pass）不是错误：退化成"只看深度"，
-        // 把深度视图当第二张 SRV 传进去，并把运动阈值推到 Int.MAX_VALUE，使"在动就 1X1"永不触发。
-        // 注意：这张视图要等 `ensureResources` 建出来，所以不能在它之前取句柄（首帧会是 0）。
+        // 速度通道没开（抗锯齿与 DLSS 都关）不是错误：退化成只看深度 —— 深度视图当第二张 SRV，运动阈值
+        // 推到 Int.MAX_VALUE 使"在动就 1X1"永不触发。视图要等 `ensureResources` 建出来（首帧是 0）。
         val motion = D3D12Velocity.previousMotionView()
         if (motion == null) {
             note("no previous motion vectors (velocity pass off); SRI runs depth-only")
@@ -160,7 +128,7 @@ object D3D12ShadingRateImage {
         }
         val motionHandle = motion?.handle() ?: depthView
         try {
-            // 上一帧 submit 之后这条列表就关掉了 —— 每帧要先重新开一条（与 backend 的帧循环同构）。
+            // 上一帧 submit 之后这条列表就关掉了 —— 每帧都要重新开一条。
             MCDR_ABI.D3D12BeginCommandList(encoderCtx)
             MCDR_ABI.D3D12CopyTextureToTexture(encoderCtx, depth.handle(), depthTex,
                 0, 0, 0, 0, 0, 0, w, h)
@@ -175,7 +143,7 @@ object D3D12ShadingRateImage {
                 return
             }
             MCDR_ABI.D3D12Submit(encoderCtx)
-            // 写完交换：下一帧的 t2 就是这一张；强制 1X1 的那帧写的是全 0，历史必须作废。
+            // 强制 1X1 的那帧写的是全 0，历史必须随之作废。
             lastWritten = writeIndex
             writeIndex = 1 - writeIndex
             historyValid = !forceFine
@@ -194,28 +162,18 @@ object D3D12ShadingRateImage {
     }
 
     /**
-     * §8.4 第 3 条：世界切换 / 维度切换时，把下一张图像强制成全 1X1。
-     *
-     * <p>不在这里 release 资源 —— 调用方（`ClientPlayerNetworkEvent.LoggingOut/LoggingIn`）
-     * 不一定在渲染线程上，销毁纹理会是 D.10 那类悬空指针；只置一个标志，由下一帧的
-     * [prepareFrame] 在渲染线程上消费。
+     * 世界 / 维度切换时把下一张图像强制成全 1X1；只置标志由下一帧 [prepareFrame] 消费（调用方不一定在渲染线程上）。
      */
     @JvmStatic
     fun requestForceFine(reason: String) {
         forceFine = true
         hasLastCamera = false
-        // 上一帧的历史马上就不作数了：下一帧写全 0，再下一帧若还拿这张当 t2，就会把整屏
-        // `min(rate, 0)` 压成 1X1 —— 白糊两帧。所以在这里就作废历史。
+        // 历史马上不作数：下一帧写全 0，再下一帧若还拿它当 t2 会把整屏 `min(rate, 0)` 压成 1X1（白糊两帧）。
         historyValid = false
         note("$reason; the next generated image is all 1X1")
     }
 
-    /**
-     * §8.4 第 2 条：比较这一帧与上一帧的相机，判断是否发生"跳变"。
-     *
-     * <p>没有上一帧（首帧、世界切换后）时不判跳变 —— 那种情况由 [requestForceFine] 负责，
-     * 否则每次进世界都会白糊一帧。
-     */
+    /** 比较本帧与上一帧的相机判断跳变；没有上一帧时不判，那由 [requestForceFine] 负责。 */
     private fun detectCameraJump(): Boolean {
         val camera = Minecraft.getInstance().gameRenderer.mainCamera()
         val pos = camera.position()
@@ -249,9 +207,7 @@ object D3D12ShadingRateImage {
     }
 
     /**
-     * 把着率图像绑到当前命令列表（由 [D3D12VariableShadingRate.scope] 在进入地形批次时调用）。
-     *
-     * 返回 true 表示真的绑上了 —— 调用方必须配对调用 [unbind]。
+     * 把着率图像绑到当前命令列表；返回 true 时必须配对调用 [unbind]。
      */
     @JvmStatic
     @Synchronized
@@ -290,12 +246,7 @@ object D3D12ShadingRateImage {
         writeIndex = 0
     }
 
-    /**
-     * 只把帧计数清零，**不碰 GPU 资源**。
-     *
-     * <p>离开存档时由 [D3D12VariableShadingRate.resetCounters] 调用（那个钩子不一定在渲染线程上，
-     * 所以这里不能像 [reset] 那样去销毁纹理）。下一帧 `prepareFrame` 会照常重新计数。
-     */
+    /** 只把帧计数清零，**不碰 GPU 资源**：钩子不一定在渲染线程上，不能像 [reset] 那样销毁纹理。 */
     @JvmStatic
     fun resetCounters() {
         frames = 0L
@@ -325,9 +276,7 @@ object D3D12ShadingRateImage {
             images[i] = img
             views[i] = view
         }
-        // 快照必须与主深度**同格式**（D32_FLOAT）：native 的 CopyTextureToTexture 不做格式转换，
-        // 实测 `R32_FLOAT` 目标会直接报 "format mismatch"。深度格式的 SRV 在 HLSL 侧照样声明成
-        // `Texture2D<float>` + `Load`，语义就是我们需要的线性深度。
+        // 快照必须与主深度**同格式**（D32_FLOAT）：CopyTextureToTexture 不做格式转换，`R32_FLOAT` 会报 "format mismatch"。
         val tex = MCDR_ABI.ID3D12CreateTexture(DEPTH_USAGE, GpuFormat.D32_FLOAT.ordinal, w, h, 1, 1)
         if (tex == 0L) {
             releaseImage()
@@ -360,8 +309,7 @@ object D3D12ShadingRateImage {
         val hlsl = """
             Texture2D<float> gDepth : register(t0);
             Texture2D<float2> gMotion : register(t1);
-            // t2 = 上一帧的着色率图像（P236 时间钳制）：两帧之间只允许变细、不允许变粗，
-            // 否则边缘 1X1/2X2 的来回跳会表现成轮廓"呼吸"。
+            // t2 = 上一帧的着色率图像（时间钳制）：两帧之间只允许变细，否则边缘 1X1/2X2 来回跳会成"呼吸"。
             Texture2D<uint> gPrev : register(t2);
             RWTexture2D<uint> gOut : register(u0);
             cbuffer Params : register(b0) {
@@ -402,15 +350,13 @@ object D3D12ShadingRateImage {
                 bool moving = motion > (float)gMotionPixels;
 
                 uint rate = 5u;
-                // gPad bit0 = 强制全 1X1（相机跳变 / 世界切换那一帧，§8.4 第 2、3 条）：
-                // 上一帧的深度与速度已经不在同一个地方，任何粗化都会让"传送后整帧糊一下"出现。
+                // gPad bit0 = 强制全 1X1（相机跳变 / 世界切换那帧）：上一帧数据已不在同一个地方。
                 if ((gPad & 1u) != 0u) {
                     gOut[id.xy] = 0u;
                     return;
                 }
                 if (extreme || edge || moving) rate = 0u;
-                // gPad bit1 = 时间钳制（§8.6 末行）：枚举值即面积序，min 就是"取更细那档"。
-                // 首帧 / 强制 1X1 之后历史无效，调用方会把这一位关掉。
+                // gPad bit1 = 时间钳制：枚举值即面积序，min 就是"取更细那档"；历史无效时调用方关掉这一位。
                 if ((gPad & 2u) != 0u) {
                     rate = min(rate, gPrev.Load(int3(id.xy, 0)));
                 }
@@ -492,10 +438,7 @@ object D3D12ShadingRateImage {
         LOGGER.info("SRI: {}", message)
     }
 
-    /**
-     * P237：`[vrs]` 的三个开关每帧现读 —— 改 `run\config\dxr_mc-client.toml` 下一帧生效，
-     * 不需要重启（与 `msBand()` 读距离带的方式一致）。配置尚未加载时用默认值。
-     */
+    /** `[vrs]` 的开关每帧现读 —— 改 TOML 下一帧生效，不需要重启。 */
     private fun sriEnabled(): Boolean {
         if (!IllusionConfig.SPEC.isLoaded) return true
         return IllusionConfig.VRS_SRI.get()
@@ -511,7 +454,7 @@ object D3D12ShadingRateImage {
         return IllusionConfig.VRS_SRI_MOTION_PIXELS.get().coerceIn(0, 256)
     }
 
-    /** `[vrs] sriTemporalClamp` —— 每帧现读，关掉之后等于回到 P235 的无历史行为。 */
+    /** `[vrs] sriTemporalClamp` —— 每帧现读；关掉等于回到无历史的逐帧行为。 */
     private fun temporalClampEnabled(): Boolean {
         if (!IllusionConfig.SPEC.isLoaded) return true
         return IllusionConfig.VRS_SRI_TEMPORAL_CLAMP.get()

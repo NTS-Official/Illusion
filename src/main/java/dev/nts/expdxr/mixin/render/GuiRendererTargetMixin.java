@@ -8,14 +8,10 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 
 /**
- * P106：把界面的渲染目标从「与世界共用的主渲染目标」换成 GUI 自己的窗口尺寸目标。
+ * 把界面的渲染目标从「与世界共用的主渲染目标」换成 GUI 自己的窗口尺寸目标。
  *
- * GuiRenderer.draw() 里只在开头取一次 minecraft.gameRenderer.mainRenderTarget()
- * （GuiRenderer.java:181），后面两个 draw range、清深度、模糊都用这个局部变量，
- * 所以一处 {@code @ModifyExpressionValue} 就覆盖了整段界面绘制。
- *
- * 未启用（renderScale == 100%，或 GUI 目标不可用）时返回原表达式的结果（主渲染目标本身），
- * 与 vanilla 完全一致。
+ * <p>`draw()` 只在开头取一次 `mainRenderTarget()`，后面两个 draw range、清深度、模糊都用这个局部变量，
+ * 所以一处 `@ModifyExpressionValue` 就覆盖整段界面绘制。未启用时返回原值。
  */
 @Mixin(GuiRenderer.class)
 public class GuiRendererTargetMixin {

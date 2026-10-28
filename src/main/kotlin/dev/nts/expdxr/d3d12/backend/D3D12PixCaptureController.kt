@@ -4,7 +4,7 @@ import com.mojang.blaze3d.platform.InputConstants
 import dev.nts.expdxr.Illusion.Companion.MODID
 import dev.nts.expdxr.IllusionConfig
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
-import dev.nts.expdxr.misc.D3D12Settings
+import dev.nts.expdxr.misc.settings.D3D12Settings
 import net.minecraft.ChatFormatting
 import net.minecraft.client.KeyMapping
 import net.minecraft.client.Minecraft
@@ -22,19 +22,12 @@ import java.nio.file.Path
 import java.util.Locale
 
 /**
- * PIX timing capture driven by a key press (`[debug] pixTimingCapture`, default F9).
+ * 按键驱动的 PIX timing capture（`[debug] pixTimingCapture`，默认 F9）：PIX 自己的计时捕获只写
+ * `%TEMP%` 且文件名由它决定，要落到游戏目录、用玩家选的名字与长度，只能进程内起
+ * PIXBeginCapture/PIXEndCapture（native 在自己的线程上调）。
  *
- * <p>PIX's UI cannot write this file for us: its continuous ("counters") recording keeps everything
- * inside the PIX session until the user saves it, and the timing capture that PIX itself starts
- * writes to `%TEMP%` under a name it picks. A capture that has to land under the game directory,
- * with a name and a length the player chose, has to be started from inside the process -
- * PIXBeginCapture/PIXEndCapture, which the native layer calls on threads of its own.
- *
- * <p>Hence the key binding instead of an automatic capture: the player decides when the interesting
- * content is on screen, every press starts a fresh file, pressing again stops early, and the frame
- * budget is read from the config at the moment of the press, so changing it does not need a
- * restart. A capture is only started while `[debug] pixTimingCapture` is on, so the feature stays
- * dormant unless it is asked for.
+ * 每次按下开新文件，再按一次提前结束；帧预算在按下那一刻读配置，改配置不用重启。开关关闭时功能休眠。
+ * 见 docs/misc/backend-and-device.md。
  */
 internal object D3D12PixCaptureController {
     private val LOGGER = LoggerFactory.getLogger("dxrmc")
@@ -55,20 +48,14 @@ internal object D3D12PixCaptureController {
     /** Highest index tried for `run/pix/dxrmc-capture-N.wpix` before giving up. */
     private const val MAX_CAPTURE_INDEX = 999
 
-    /**
-     * Chat lines. Their arguments arrive as already styled components, so a translation only has to
-     * order them; the wording is free to differ per language.
-     */
+    /** chat 行翻译键：参数是已带样式的 component，翻译只负责排序。 */
     private const val TRANSLATION_PREFIX = "chat.dxr_mc.pix_capture.prefix"
     private const val TRANSLATION_START = "chat.dxr_mc.pix_capture.start"
     private const val TRANSLATION_STOP = "chat.dxr_mc.pix_capture.stop"
 
     /**
-     * Failure lines, also always shown: a capture that silently refuses to start looks exactly like
-     * a key that does nothing, which is what the first on-machine test ran into. A refusal by PIX
-     * reports the HRESULT and nothing else: the code is what identifies the problem (0x80070005 is
-     * an unelevated process, 0x800700B7 a capture session left alive by an earlier run), while a
-     * sentence about it would be a guess.
+     * 失败行也必须显示：capture 静默拒绝启动与「按键没反应」无法区分。PIX 拒绝时只给 HRESULT，
+     * 码本身就能定位问题（0x80070005 = 进程未提权，0x800700B7 = 上一次会话还活着）。
      */
     private const val TRANSLATION_FAIL_HRESULT = "chat.dxr_mc.pix_capture.fail.hresult"
     private const val TRANSLATION_FAIL_RECORDING = "chat.dxr_mc.pix_capture.fail.recording"
@@ -80,17 +67,13 @@ internal object D3D12PixCaptureController {
     private var capturePath: Path? = null
     private var startedNanos = 0L
 
-    /** Why a capture ended; each cause is its own translation key, so the chat line follows the language. */
+    /** 结束原因；每种原因一个翻译键。 */
     private enum class StopCause(val translationKey: String) {
         LIMIT("chat.dxr_mc.pix_capture.cause.limit"),
         MANUAL("chat.dxr_mc.pix_capture.cause.manual"),
     }
 
-    /**
-     * Registers the key binding and the per-tick handler. Called from [dev.nts.expdxr.IllusionClient]
-     * with the mod event bus (the key binding has to be registered during mod loading, or the
-     * controls screen has no entry for it).
-     */
+    /** 注册按键绑定与每 tick 处理器：必须在模组加载期注册，否则「控制」界面里没有这一项。 */
     fun register(modEventBus: IEventBus) {
         modEventBus.addListener<RegisterKeyMappingsEvent> { event ->
             event.registerCategory(CATEGORY)
@@ -198,11 +181,8 @@ internal object D3D12PixCaptureController {
     }
 
     /**
-     * Only `[DXEGP/PIX Capture]` is purple - the tag itself, not the sentence after it.
-     *
-     * <p>A style set on a parent is inherited by everything appended to it, so the tag has to be a
-     * sibling of the message rather than its parent. Hence [line]: an unstyled root that carries the
-     * purple tag and then the parts, each part keeping its own colour.
+     * 只有 `[DXEGP/PIX Capture]` 这个标签是紫色，后面的句子不是：样式会被子节点继承，
+     * 所以标签必须是消息的**兄弟**而不是父节点（见 [line]）。
      */
     private fun tag(): MutableComponent =
         Component.translatable(TRANSLATION_PREFIX).withStyle(ChatFormatting.LIGHT_PURPLE)
@@ -229,10 +209,7 @@ internal object D3D12PixCaptureController {
         )
     }
 
-    /**
-     * Puts one line into the chat, always: the capture state has to be visible in game even when the
-     * log is not being watched, and the user explicitly did not want a switch to silence it.
-     */
+    /** 无条件写一行到 chat：capture 状态必须在游戏里可见，即使没人看日志。 */
     private fun postChat(message: Component) {
         try {
             Minecraft.getInstance().gui.hud.chat.addClientSystemMessage(message)
@@ -241,12 +218,12 @@ internal object D3D12PixCaptureController {
         }
     }
 
-    /** A refusal, in red: silence here looks like a dead key. */
+    /** 红色拒绝行：这里静默就像按键坏了。 */
     private fun postFailure(key: String) {
         postChat(line(Component.translatable(key).withStyle(ChatFormatting.RED)))
     }
 
-    /** PIX's own refusal, in red, with the HRESULT as the whole explanation. */
+    /** PIX 的拒绝，红色，HRESULT 就是全部解释。 */
     private fun postHresult(status: Int) {
         val code = "0x%08X".format(Locale.ROOT, status)
         postChat(
@@ -259,10 +236,7 @@ internal object D3D12PixCaptureController {
         )
     }
 
-    /**
-     * `pixCaptureFrames` as it stands right now: the point of the key binding is that the length of
-     * the next capture can be tuned without restarting the game.
-     */
+    /** 现读 `pixCaptureFrames`：按键绑定的意义就是下一次 capture 的长度不用重启就能调。 */
     private fun configuredFrames(): Int {
         val configured = try {
             IllusionConfig.PIX_CAPTURE_FRAMES.get()
@@ -273,13 +247,9 @@ internal object D3D12PixCaptureController {
     }
 
     /**
-     * `run/pix/dxrmc-capture-<n>.wpix`, numbered off what the directory already holds.
-     *
-     * <p>The number comes from the directory, never from a counter kept in this session: only the
-     * directory knows what earlier launches wrote, and reusing a number would overwrite a capture
-     * that is still wanted. Every `dxrmc-capture-*` entry counts, not just the `.wpix` - a capture
-     * that PIX never finished writing leaves `-wal`/`-shm` companions behind, and those belong to
-     * that number too. So the next file is always one past the highest index seen on disk.
+     * `run/pix/dxrmc-capture-<n>.wpix`，序号取自目录**已有什么**，不能用本会话的计数器：只有目录知道
+     * 之前几次启动写了什么，重用序号会覆盖还想要的 capture。`dxrmc-capture-*` 全部计入，不只 `.wpix`
+     * —— PIX 没写完的 capture 会留下 `-wal`/`-shm` 伴生文件，它们同样占用那个序号。
      */
     private fun nextCapturePath(): Path? {
         return try {

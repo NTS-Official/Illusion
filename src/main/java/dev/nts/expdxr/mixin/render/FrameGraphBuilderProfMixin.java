@@ -9,10 +9,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-/**
- * P52：整帧 FrameGraph 执行（所有 pass 体，含 renderGroup / feature 绘制 / 天空 / 云 / 天气）。
- * 与 P51 的 renderGroup 相减可得到"非区块"部分（实体、天空、云、天气、帧图开销）。
- */
+/** 整帧帧图执行（所有 pass 体：区块 / 实体 / 天空 / 云 / 天气）。与区块渲染相减得到非区块部分。 */
 @Mixin(FrameGraphBuilder.class)
 public class FrameGraphBuilderProfMixin {
 
@@ -21,8 +18,8 @@ public class FrameGraphBuilderProfMixin {
             "Lcom/mojang/blaze3d/framegraph/FrameGraphBuilder$Inspector;)V",
             at = @At("HEAD"), remap = false)
     private void D3D12ProfExecFrameGraphHead(GraphicsResourceAllocator resourceAllocator, FrameGraphBuilder.Inspector inspector, CallbackInfo ci) {
-        // P235：整帧开画前生成 Tier 2 的着色率图像。此刻本帧的 clear 还没跑，主深度里仍是
-        // 上一帧最后一笔 —— 正好是 SRI 想要的输入（详见 D3D12ShadingRateImage 的类注释）。
+        // 整帧开画前生成 Tier 2 着色率图像：此刻本帧的 clear 还没跑，主深度里仍是上一帧最后一笔，
+        // 正好是 SRI 想要的输入（见 D3D12ShadingRateImage 类注释）。
         D3D12ShadingRateImage.prepareFrame();
         D3D12RenderProf.begin(D3D12RenderProf.EXECUTE_FRAMEGRAPH);
     }

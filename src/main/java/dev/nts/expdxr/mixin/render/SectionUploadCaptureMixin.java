@@ -15,17 +15,12 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import java.nio.ByteBuffer;
 
 /**
- * P125（mesh Step 2）：在 section 网格**上传到 UberBuffer 的那一刻**采集几何元信息。
+ * 在 section 网格**上传到 UberBuffer 的那一刻**采集几何元信息。
  *
- * <p>为什么不用 `SectionCompiler.compile`：本机实测该混入能成功应用，但回调一次也不触发
- * （`CompileTask.doTask` 的探针每次都打，`compile` 的回调为 0 —— 见 known_bugs P125）。
- * `addSectionBuffersToUberBuffer` 是同一批数据进入 GPU 前的必经之路，而且这里**同时**能拿到：
- * section 坐标（`getSectionNode()`）、层（`ChunkSectionLayer`）、`CompiledSectionMesh`
- * （`getSectionDraw(layer).indexCount()`）、顶点/索引 ByteBuffer 的字节数 ——
- * 正是计划 Step 2 要的"MeshData 元信息 + 上传生命周期关联"。
- *
- * <p>只在 HEAD 读取，不改任何状态；不缓存 GPU 句柄（UberBuffer slice 会随整理变化）。
- * 注意：混入类不能有非 private 成员方法，否则 Mixin 抛 `contains non-private method(s)` 崩游戏。
+ * <p>不能挂 `SectionCompiler.compile`：那个混入能应用，但回调一次也不触发。
+ * 这里同时能拿到 section 坐标、层、`CompiledSectionMesh` 与两个 ByteBuffer 的字节数。
+ * 只在 HEAD 读实参、不改状态；不缓存 GPU 句柄（UberBuffer slice 会随整理变化）。
+ * 见 docs/misc/mixins-and-earlywindow.md §3.6
  */
 @Mixin(targets = "net.minecraft.client.renderer.chunk.SectionRenderDispatcher$RenderSection")
 public abstract class SectionUploadCaptureMixin {

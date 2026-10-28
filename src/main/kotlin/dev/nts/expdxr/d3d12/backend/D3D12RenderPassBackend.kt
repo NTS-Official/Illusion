@@ -1,5 +1,4 @@
 package dev.nts.expdxr.d3d12.backend
-import dev.nts.expdxr.Illusion
 
 
 import com.mojang.renderpearl.api.pipeline.IndexType
@@ -14,7 +13,7 @@ import com.mojang.renderpearl.backend.api.RenderPassBackend
 import com.mojang.renderpearl.api.textures.GpuSampler
 import com.mojang.renderpearl.api.textures.GpuTextureView
 import dev.nts.expdxr.CommandBundleMode
-import dev.nts.expdxr.misc.D3D12Settings
+import dev.nts.expdxr.misc.settings.D3D12Settings
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.adapter.D3D12Device
 import dev.nts.expdxr.d3d12.render.advanced.mesh.D3D12MeshDrawCapture
@@ -33,46 +32,30 @@ import org.slf4j.LoggerFactory
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.IntBuffer
-import java.lang.foreign.Arena
 import java.util.*
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.function.Supplier
 
 
-/**
- * P141 续八：地形批次里唯一逐 draw 变化的 uniform 名。
- *
- * 其余 uniform（材质、图集、投影…）在同一批里是同一个值，所以 [D3D12RenderPassBackend.setUniform]
- * 拿它当"材质没变"的判据：只有别名的 uniform 被设置时才置脏、重算材质签名。
- */
+/** 地形批次里唯一逐 draw 变化的 uniform 名：[D3D12RenderPassBackend.setUniform] 拿它当「材质没变」的判据。 */
 private const val CHUNK_SECTION_UNIFORM = "ChunkSection"
 
 
-/**
- * P217：mesh 跳过理由的去重必须**跨帧**（每个 pass 每帧都会新建一份 backend，挂实例字段
- * 等于每帧重新打一遍）。这个集合只服务日志，不参与任何渲染逻辑。
- */
+/** mesh 跳过理由的去重必须**跨帧**（每个 pass 每帧都会新建 backend）；只服务日志。 */
 private val gMeshSkipLogReasons: MutableSet<String> = HashSet()
-/** P217：meshlet 派发日志的全局限流（每个 pass 都会新建 backend，实例计数会被重置）。 */
+/** 其余均为日志去重/限流状态，同样必须全局（实例字段每帧都会被重置）。 */
 private var gMeshletLogNanos = 0L
-/** P217：地形批次因 mesh 数据缺失而未绘制的去重日志（不再回退 IMR）。 */
 private val gMeshTerrainMissingLog: MutableSet<String> = HashSet()
-/** P237：`drawIndexedIndirect` 见过的管线名（每个只打一行，用来核对 VRS 白名单）。 */
 private val gDrawIndirectLocations: MutableSet<String> = HashSet()
-/** P217：上一次 AS 剔除开关状态（同会话 A/B 切换时打一条诊断）。 */
 private var gMeshletLastCull: Boolean? = null
-/** P217：按图层的派发计数（日志限流是全局的，只印一条会看不到 TRANSLUCENT）。 */
 private var gMeshletSolid = 0L
 private var gMeshletCutout = 0L
 private var gMeshletTranslucent = 0L
 
 /**
- * D3D12 render pass backend（P6 core 全链路）。
- *
- * 镜像官方 {@code VulkanRenderPass}：uniform/texture 暂存在本类 map 中，core
- * 前按需 push 到原生瞬时描述符堆（{@link #pushDescriptors()}）；setPipeline
- * 绑定 withDepth/withoutDepth PSO；顶点/索引缓冲与 core 命令直接下发 native。
+ * D3D12 render pass 后端（镜像官方 VulkanRenderPass）：uniform/texture 暂存在本类 map，core 之前按需
+ * 推入原生瞬时描述符堆（[pushDescriptors]）；顶点/索引缓冲与 draw 直接下发 native。
  */
 class D3D12RenderPassBackend(
     private val device: D3D12Device?,
@@ -81,69 +64,42 @@ class D3D12RenderPassBackend(
     private val outputWidth: Int,
     private val outputHeight: Int,
     private val hasDepth: Boolean,
-    /** P27：本 pass 的 color[0] 纹理 native handle（用于图集合成后 dump 验证）。 */
     private val colorTargetHandle: Long,
-    /** P31：是否使用 shader Y-flip 变体管线（GUI 离屏 pass，由 CommandEncoder 根据 texture usage 判断）。 */
+    /** 是否使用 shader Y-flip 变体管线（GUI 离屏 pass，由 CommandEncoder 按 texture usage 判断）。 */
     private val flipY: Boolean,
-    /**
-     * P217：本 encoder 的瞬态上传区 —— meshlet 派发每帧要上传段表、meshlet 表与小常量，
-     * 只有 `uploadStaging` 能拿到 COPY_SRC 缓冲与 256 对齐偏移。
-     */
+    /** 本 encoder 的瞬态上传区：meshlet 派发要上传段表/meshlet 表/小常量，只有 `uploadStaging` 能给 COPY_SRC 与 256 对齐偏移。 */
     private val transientMemory: D3D12TransientMemory,
 ) : RenderPassBackend {
     private var pushedDebugGroups = 0
 
-    /** P217：mesh 派发是否启用（唯一入口是 `[mesh] terrain` 配置项）。 */
+    /** mesh 派发是否启用（唯一入口是 `[mesh] terrain` 配置项）。 */
     private val meshDispatchEnabled: Boolean
         get() = D3D12Settings.meshTerrain
 
-    /** P217：最近一次 slot0 顶点切片的字节偏移（MDI 每段的 `baseVertex` 相对它）。 */
+    /** 最近一次 slot0 顶点切片的字节偏移（MDI 每段的 `baseVertex` 相对它）。 */
     private var lastVertexSliceOffset = -1L
 
-    /** P217：最近一次 slot0 顶点切片的缓冲（meshlet 派发要把它当 t14 的 RAW SRV 绑定）。 */
+    /** 最近一次 slot0 顶点切片的缓冲（meshlet 派发要把它当 t14 的 RAW SRV 绑定）。 */
     private var lastVertexBuffer: GpuBuffer? = null
 
-    /**
-     * P243：早期显示（NeoForge `ELSDrawCollector` → `RenderPearlRenderPass.bindVertexBuffer`）
-     * 会**先绑定顶点缓冲、后设置管线**。stride 只能从管线的顶点布局推导，native 的
-     * `D3D12SetVertexBuffer` 又必须给 stride，所以此时先把绑定挂起，等 `setPipeline`
-     * 拿到管线后再落实。旧逻辑在这里抛异常，整条加载屏 draw 被 NeoForge 吞掉（日志
-     * "Unexpected error while rendering the loading screen"），在冷启动的机器上会一直报。
-     */
+    /** 早期显示会**先绑顶点缓冲、后设管线**：stride 只能从管线推导，故先挂起等 [setPipeline] 落实；抛异常会让加载屏整条 draw 被吞掉。 */
     private val pendingVertexBuffers = LinkedHashMap<Int, Pair<D3D12GpuBuffer, Long>>()
 
     private var pipeline: D3D12CompiledRenderPipeline? = null
     private var anyDescriptorDirty = false
 
-    /** 26.3：当前管线的 uniform 名字表（顺序 = `pipeline.getBindGroupLayouts` 展平顺序）。 */
+    /** 当前管线的 uniform 名字表（顺序 = CreateInfo.uniforms，非 layouts 展平顺序）。 */
     private var uniformNames: List<String> = emptyList()
     private var pushConstantsWarned = false
 
-    /**
-     * P141 续八：除 `ChunkSection` 外的 uniform 自上次 [materialSignature] 以来变过。
-     *
-     * <p>地形批次里每个 draw 的 uniform 上传都会走 [setUniform]（`ChunkSection` 逐段换、其余
-     * 材质 uniform 整批相同），所以拿这个标志当"材质可能变了"的粗判据：只有它置位才重算签名，
-     * 1231 draw/帧的 ArrayList + 字符串拼接 + 排序就降到每批一次。宁可多算（漏置位也只是退化
-     * 成原来的每 draw 一次），不能少算（少算会把不同材质混进同一批）。
-     */
+    /** 除 `ChunkSection` 外的 uniform 变过：宁可多算（退化回每 draw 一次），不能少算（会把不同材质混进同一批）。 */
     private var materialDirty = true
     private val uniforms: MutableMap<String, GpuBufferSlice> = HashMap()
 
-    /**
-     * P141 续八：最近一次设置的 `ChunkSection` 切片。
-     *
-     * <p>mesh 批次的 per-draw 循环要拿它两次（查 96 B 快照、给根 CBV 复位），原先走
-     * `uniforms["ChunkSection"]` 两次哈希查找；现在 [setUniform] 顺手记一份，循环直接读字段。
-     */
+    /** 最近一次设置的 `ChunkSection` 切片（mesh 批次 per-draw 循环直接读字段，省两次哈希查找）。 */
     private var chunkSectionSlice: GpuBufferSlice? = null
 
-    /**
-     * P141 续八：逐段 uniform 上传的接收器。
-     *
-     * <p>原先在每 draw 的循环里现造一个 lambda（1231 次/帧），这里提到字段上一次建好 ——
-     * 它只捕获 `this`，与 draw 无关。
-     */
+    /** 逐段 uniform 上传的接收器：只捕获 this，提到字段上一次建好，避免每 draw 现造 lambda。 */
     private val uniformUploader: RenderPass.UniformUploader = object : RenderPass.UniformUploader {
         override fun setUniform(name: String, value: GpuBufferSlice) {
             this@D3D12RenderPassBackend.setUniformByName(name, value)
@@ -157,23 +113,21 @@ class D3D12RenderPassBackend(
 
     private data class TextureViewAndSampler(val view: D3D12GpuTextureView, val sampler: D3D12GpuSampler)
 
-    /** P27：当前管线的 location 字符串（如 minecraft:pipeline/animate_sprite_blit）。 */
+    /** 当前管线的 location 字符串（如 minecraft:pipeline/animate_sprite_blit）。 */
     fun pipelineLocation(): String? {
         val p = this.pipeline ?: return null
         return p.info().location.toString()
     }
 
-    /** P27：本 pass 的 color[0] 纹理 native handle。 */
     fun colorTargetHandle(): Long {
         return this.colorTargetHandle
     }
 
-    /** P101c：本 pass 是否是 GUI 离屏图集 pass（usage==13 且带深度，几何整体 Y 翻转）。 */
+    /** 本 pass 是否是 GUI 离屏图集 pass（usage==13 且带深度，几何整体 Y 翻转）。 */
     fun isFlipY(): Boolean {
         return this.flipY
     }
 
-    /** P27：本 pass 的渲染输出尺寸（用于 dump tag 区分不同图集）。 */
     fun outputWidth(): Int {
         return this.outputWidth
     }
@@ -182,7 +136,6 @@ class D3D12RenderPassBackend(
         return this.outputHeight
     }
 
-    /** P27：本 pass 的 renderArea 目标区域（图集 blit 时为 sprite 在图集中的位置）。 */
     fun areaX(): Int {
         val area = this.renderArea
         return area?.x() ?: 0
@@ -215,23 +168,15 @@ class D3D12RenderPassBackend(
         MCDR_ABI.D3D12WriteTimestamp(this.ctx,
             (pool as D3D12GpuQueryPool).nativeHandle(), index)
     }
-    // -----------------------------------------------------------------------
-    // Pipeline + descriptors
-    // -----------------------------------------------------------------------
+    // ---- pipeline + descriptors ----
     override fun setPipeline(pipeline: BackendRenderPipeline) {
         val device = this.device
             ?: throw IllegalStateException("No D3D12 device bound to this render pass")
         val base = pipeline as? D3D12CompiledRenderPipeline
             ?: throw IllegalStateException(
                 "Pipeline ${pipeline.javaClass.name} is not a D3D12 compiled pipeline")
-        // 注：Java 里还有 `compiled == null` 分支；D3D12Device.getOrCompilePipeline 的
-        // Kotlin 声明是非空返回，该分支已不可达，故此处只保留 isValid 校验。
-        // P228b：**非 flipY 分支以前直接把 frontend 递进来的对象当结果用**，可前端自己的缓存里
-        // 留的是**上一次资源重载前**编译好的 `D3D12CompiledRenderPipeline` —— 重载时 vanilla 会
-        // close 掉它们（`handle` 置 0 ⇒ `isValid()==false`），于是 `setPipeline` 抛
-        // "Pipeline … is not valid"（开/关「高对比度」切换第二次必崩，且没有任何 COMPILE FAILED 日志，
-        // 因为根本没编译）。P228a 只补了 device 侧缓存，走不到这条路径上。
-        // 现在：flipY 变体、或递来的对象已失效，都回到 device 按 `info()` 重取（必要时重编）。
+        // 前端缓存里可能是上一次资源重载**前**编译的对象（vanilla 重载会把它们 close、handle 归 0 ⇒
+        // isValid()==false）→ 会抛 "not valid" 且没有 COMPILE FAILED 日志。故 flipY 变体或失效对象都重新取。
         val compiled = if (this.flipY || !base.isValid()) {
             device.getOrCompilePipeline(base.info(), this.flipY)
         } else {
@@ -243,33 +188,27 @@ class D3D12RenderPassBackend(
         }
         this.pipeline = compiled
 
-        // 26.3：vanilla 前端按「管线 uniform 列表下标」回调 setUniform(Int, Any?)，
-        // 下标 = `BackendRenderPipeline.CreateInfo.uniforms` 的位置（由 PipelineBuilder 按
-        // SPIR-V 描述符出现顺序编号），与 `flattenUniforms(bindGroupLayouts)` 的顺序**不同**。
-        // 名单在 D3D12Device.compilePipeline(CreateInfo) 里存进管线对象；flipY 变体是另一个
-        // 实例（CreateInfo 不会再走一次），把 base 的名单复制过去即可。
+        // vanilla 按「管线 uniform 列表下标」回调 setUniform(Int)，下标来自 `CreateInfo.uniforms`（≠
+        // flattenUniforms(bindGroupLayouts) 的顺序）。flipY 变体是另一个实例，把 base 的名单复制过去即可。
         if (compiled !== base) {
             compiled.setUniformNames(base.uniformNamesSnapshot())
         }
         this.uniformNames = compiled.uniformNamesSnapshot()
         if (this.uniformNames.isEmpty()) {
-            // 兜底：管线只经过自检路径（没有 CreateInfo）编译时名单为空，用 layouts 展平
-            // 顺序顶上；顺序可能与下标不一致，但比“下标全部忽略”更接近可用状态。
+            // 兜底：管线只经自检路径编译（无 CreateInfo）时名单为空，用 layouts 展平顺序顶上。
             this.uniformNames = BindGroupLayout.flattenUniforms(compiled.info().bindGroupLayouts)
                 .map { it.name() }
         }
         this.anyDescriptorDirty = true
-        // P22：desc.hasDepth 来自渲染 pass（是否有 depth attachment），但 PSO 变体选择
-        // 应基于管线本身是否有 DepthStencilState。GUI 管线没有 depthStencilState，
-        // 即使 pass 有 depth attachment 也不该启用深度测试（否则 withDepth PSO 的
-        // GREATER_EQUAL 测试会丢弃所有 fragment → 黑屏）。
+        // useDepth 必须看**管线**有没有 DepthStencilState，不能只看 pass 有没有深度附件：GUI 管线没有
+        // depthStencilState，套上 withDepth PSO 会让 GREATER_EQUAL 丢掉所有 fragment → 黑屏。
         val pipelineHasDepth = compiled.info().depthStencilState != null
         val useDepth = this.hasDepth && pipelineHasDepth
         val ok = MCDR_ABI.D3D12SetPipeline(this.ctx, compiled.handle(), useDepth)
         if (!ok) {
             throw IllegalStateException("dx12SetPipeline failed for ${base.info().location}")
         }
-        // P243：落实 setPipeline 之前挂起的顶点缓冲（早期显示是"先绑 buffer、后设管线"）。
+        // 落实 setPipeline 之前挂起的顶点缓冲（早期显示是"先绑 buffer、后设管线"）。
         if (this.pendingVertexBuffers.isNotEmpty()) {
             val formatBindings = compiled.info().vertexFormatBindings
             val pending = this.pendingVertexBuffers.entries.map { it.key to it.value }
@@ -287,13 +226,7 @@ class D3D12RenderPassBackend(
         }
     }
 
-    /**
-     * 26.3：vanilla 前端把 `setUniform(String, …)` 先解析成管线 uniform 列表里的下标，再回调
-     * 到这里（`FrontendRenderPass.setUniform(String, Object)` 字节码：`uniformIndices
-     * .getOrDefault(name, -1)` → `backend.setUniform(index, value)`；纹理对会被包成
-     * `com.mojang.renderpearl.util.TextureViewAndSampler`）。本类内部仍按名字绑定描述符
-     * （与 native `pushDescriptors` 的契约一致），所以这里先把下标翻回名字。
-     */
+    /** 把回调进来的 uniform 下标记翻回名字（本类内部按名字绑定描述符，与 native `pushDescriptors` 契约一致）。 */
     override fun setUniform(index: Int, value: Any?) {
         val name = this.uniformNames.getOrNull(index)
         if (name == null) {
@@ -315,10 +248,7 @@ class D3D12RenderPassBackend(
         }
     }
 
-    /**
-     * 26.3 新增的 push constant 通道。native 侧还没有根常量路径，先只告警一次而不是静默丢数据 ——
-     * 真出现视觉差异时能据此定位。
-     */
+    /** 26.3 新增的 push constant 通道：native 没有根常量路径，先告警一次而不是静默丢数据。 */
     override fun pushConstants(data: ByteBuffer) {
         if (!this.pushConstantsWarned) {
             this.pushConstantsWarned = true
@@ -342,11 +272,8 @@ class D3D12RenderPassBackend(
     }
 
     private fun setUniformByName(name: String, value: GpuBufferSlice) {
-        // P75：捕获时间性渲染需要的逐物体 UBO：`"DynamicTransforms"`（模型视图矩阵）与
-        // `"ChunkSection"`（区块模型矩阵 + 区块原点）。vanilla 的 DynamicTransforms 环由 CPU
-        // 直接写（MappableRingBuffer, usage 130），所以这里 map(read) 读回是安全的。
-        // 只在有深度附件的 pass（关卡主 pass）里记录：GUI/图集 blit 没有深度，
-        // 它们同样会 setUniform("DynamicTransforms")，混进来会让逐物体配对序号失真。
+        // 捕获时间性渲染要的逐物体 UBO（"DynamicTransforms" / "ChunkSection"）；vanilla 的 DynamicTransforms
+        // 环由 CPU 直接写（usage 130），map(read) 安全。只在有深度附件的 pass 记录：GUI/图集 blit 也 set 这两个名字，混进来会让配对序号失真。
         if (this.hasDepth) {
             D3D12Temporal.captureUniform(name, value)
         }
@@ -359,11 +286,7 @@ class D3D12RenderPassBackend(
         this.anyDescriptorDirty = true
     }
     /**
-     * 26.2 新增的 RenderPassBackend 抽象方法：转发到 native 的 RSSetViewports，
-     * 空值/失败处理风格与 [enableScissor] 一致（失败只记 error 日志，不抛异常）。
-     *
-     * 注意：此处与 enableScissor 不同，**未**做 D3D12 左上原点所需的 Y 翻转，
-     * 直接透传调用方给的 y（与 native 侧 dx12SetViewport 的约定保持一致）。
+     * 转发到 native 的 RSSetViewports。与 [enableScissor] 不同，这里**不**做 Y 翻转：直接透传调用方给的 y。
      */
     override fun setViewport(x: Int, y: Int, width: Int, height: Int) {
         if (!MCDR_ABI.D3D12SetViewport(this.ctx, x, y, width, height)) {
@@ -427,8 +350,7 @@ class D3D12RenderPassBackend(
             }
         }
         if (!MCDR_ABI.D3D12PushDescriptors(this.ctx, types, buffers, offsets, lengths, texelFormats, views)) {
-            // 带上 native 的具体原因：这里最常见的是 CBV 地址没按 256 字节对齐，
-            // 只报 "failed" 会把那条 offset 信息丢掉。
+            // 带上 native 的具体原因：最常见的是 CBV 地址没按 256 字节对齐，只报 "failed" 会丢掉那条 offset 信息。
             throw IllegalStateException("dx12PushDescriptors failed: ${MCDR_ABI.D3D12LastError()}")
         }
     }
@@ -439,24 +361,12 @@ class D3D12RenderPassBackend(
         if (buffer.isClosed) throw IllegalStateException("Uniform '${name}' buffer is closed")
         return value
     }
-    // -----------------------------------------------------------------------
-    // Scissor
-    // -----------------------------------------------------------------------
+    // ---- scissor ----
 
     override fun enableScissor(x: Int, y: Int, width: Int, height: Int) {
-        // RenderPass.enableScissor 沿用经典 OpenGL 约定：原点在左下角、Y 轴向上。
-        // 调用方（GuiRenderer / GuiItemAtlas / RenderType 的 scissorState）传入的 y 已按
-        // 该约定做过「GUI 自顶向下 → 自底向上」转换（如 window.height - bottom）。
-        //
-        // 而 D3D12 的 RSSetScissorRects 使用左上角原点、Y 轴向下。两者是否互为镜像，
-        // 取决于本 pass 有没有把几何做 Y 翻转（P101b 起 flipY pass 全体管线都翻）：
-        //  * 主窗口 pass（flipY=false）：几何不翻，写出行序 = D3D 行序（第 0 行在屏幕顶），
-        //    故 GL 底左矩形必须换算 → outputHeight - y - height。若原样直通，裁剪区会沿
-        //    屏幕中线镜像：列表项被上移裁剪（选中框缺上边框、首行文字被切）=「标签整体上移」。
-        //  * 离屏被采样 pass（flipY=true：GUI 物品图集 / PIP 玩家预览）：顶点着色器已把
-        //    gl_Position.y 取反，写出行序 = GL 行序（后续按 GL 约定 UV 采样才正确），
-        //    此时 GL 矩形与显存行号一一对应 → 原样直通。若此处仍换算，裁剪区会落到图集的
-        //    另一半条带上：物品整块空白，跨条带边界的只画出一半。
+        // GL 约定（左下原点）× RSSetScissorRects（左上原点），是否互为镜像取决于本 pass 有没有做几何 Y 翻转：
+        //  * flipY=false（主窗口）：几何不翻 → 必须换算 outputHeight - y - height，否则列表项被上移裁剪。
+        //  * flipY=true（GUI 图集 / PIP）：顶点着色器已取反 gl_Position.y → 原样直通，再换算会让物品整块空白。
         val scissorY = if (this.flipY) y else this.outputHeight - y - height
         if (!MCDR_ABI.D3D12SetScissor(this.ctx, x, scissorY, width, height)) {
             LOGGER.error("dx12SetScissor failed ({} {} {} {})", x, scissorY, width, height)
@@ -469,9 +379,7 @@ class D3D12RenderPassBackend(
         else this.enableScissor(0, 0, this.outputWidth, this.outputHeight)
     }
 
-    // -----------------------------------------------------------------------
-    // Vertex / index buffers + draws
-    // -----------------------------------------------------------------------
+    // ---- vertex / index buffers + draws ----
 
     override fun setVertexBuffer(slot: Int, vertexBuffer: GpuBufferSlice?) {
         if (vertexBuffer == null) return
@@ -494,21 +402,20 @@ class D3D12RenderPassBackend(
             }
         }
         if (stride == 0) {
-            // P243：管线还没设（早期显示先绑 buffer 后设管线）或该槽位没声明顶点布局。
-            // 挂起，等 setPipeline 拿到管线再应用；抛异常会让加载屏整条 draw 失败。
+            // 管线还没设（早期显示先绑 buffer 后设管线）或该槽位没声明顶点布局 → 挂起；抛异常会让加载屏整条 draw 失败。
             this.pendingVertexBuffers[slot] = (buffer as D3D12GpuBuffer) to vertexBuffer.offset()
             return
         }
         this.applyVertexBuffer(slot, buffer as D3D12GpuBuffer, vertexBuffer.offset(), stride)
     }
 
-    /** P243：按已知 stride 真正下发顶点缓冲绑定，并维护 slot0 的 meshlet 记账。 */
+    /** 按已知 stride 真正下发顶点缓冲绑定，并维护 slot0 的 meshlet 记账。 */
     private fun applyVertexBuffer(slot: Int, buffer: D3D12GpuBuffer, offset: Long, stride: Int) {
         if (!MCDR_ABI.D3D12SetVertexBuffer(this.ctx, slot, buffer.handle(), offset, stride)) {
             throw IllegalStateException("dx12SetVertexBuffer failed")
         }
         if (slot == 0) {
-            // P217：MDI 批次里每个段的 `baseVertex` 都相对这块切片，Stage 2 建段表要用。
+            // MDI 批次里每个段的 `baseVertex` 都相对这块切片，Stage 2 建段表要用。
             this.lastVertexSliceOffset = offset
             this.lastVertexBuffer = buffer
         }
@@ -522,11 +429,9 @@ class D3D12RenderPassBackend(
         if (!MCDR_ABI.D3D12SetIndexBuffer(this.ctx, (indexBuffer as D3D12GpuBuffer).handle(), if (indexType == IndexType.INT) 1 else 0)) throw IllegalStateException("dx12SetIndexBuffer failed")
     }
 
-    // ---- P3 插桩：绘制热路径的调用次数与主线程墙钟耗时（DX12_PROF=1 时由
-    // D3D12CommandEncoderBackend 每 300 帧汇总打印并清零）。用于判断帧时间到底
-    // 花在「mod 的绘制/提交路径」还是「MC 自身逻辑」上。
+    // ---- 绘制热路径插桩：PROF=1 时由 D3D12CommandEncoderBackend 每 300 帧汇总打印并清零 ----
     companion object {
-        /** P220（临时）：准星补画期间为 true，用来打印这一笔到底绑了什么管线。 */
+        /** 准星补画期间的诊断开关：打印这一笔绑了什么管线。 */
         @JvmStatic
         var replayProbe: Boolean = false
         @JvmStatic
@@ -543,48 +448,41 @@ class D3D12RenderPassBackend(
 
 
     @JvmField var gProfMultiBatches = 0L      // drawMultipleIndexed 批次数
-        @JvmField var gProfMultiDraws = 0L        // 批次内 core 总数
+        @JvmField var gProfMultiDraws = 0L        // 批次内 draw 总数
         @JvmField var gProfMultiPathNs = 0L       // 批量入口主线程墙钟耗时
         @JvmField var gProfDrawIndexedCalls = 0L  // drawIndexed 调用次数
-        @JvmField var gProfDrawIndexedNs = 0L     // drawIndexed（pushDescriptors + JNI）耗时
-        // P3b：把并行批量路径拆成四段，定位主线程串行开销（8 worker 相对 4 worker 无收益，
-        // 说明瓶颈在主线程串行段而非 worker 并行度）。
-        @JvmField var gProfBuildNs = 0L      // materialize + 逐 core 参数/描述符取值
-        @JvmField var gProfPrepareNs = 0L    // dx12AsyncPrepare{CBV,Index,Texture} 三连 JNI
-        @JvmField var gProfWorkersNs = 0L    // dispatch 8 worker + CountDownLatch.await
-        @JvmField var gProfExecuteNs = 0L    // ExecuteBundle 回放
-        @JvmField var gProfFallbacks = 0L    // 并行录制失败回退串行次数
-        // P62 诊断：统计区块批量内各 core 是否共享顶点/索引缓冲。若共享，则可用
-        // ExecuteIndirect（单次 indirect 覆盖整批，配合统一 VB/IB 绑定）替代逐 core
-        // 录制，直接消掉 workers（bundle 内 1086 次 DrawIndexed）那 0.24ms。
-        @JvmField var gProfSharedBatchDraws = 0L // 参与统计的 core 总数
-        @JvmField var gProfSameVbBuf = 0L        // vbBuf[d]==vbBuf[0] 的 core 数
-        @JvmField var gProfSameVbOff = 0L        // 且 vbOff[d]==vbOff[0]
-        @JvmField var gProfSameIbBuf = 0L        // idxBuf[d]==idxBuf[0]
-        @JvmField var gProfSameIdxType = 0L      // 且 idxType 一致
-        @JvmField var gProfBatches = 0L          // 走批量路径的批次数
-        @JvmField var gProfSharedDescBatches = 0L // 其中 blockUniform=true（P59 共享描述符）
-        @JvmField var gProfSingleBundles = 0L    // 其中单分区内联录制数
-        @JvmField var gProfSlotsTotal = 0L       // 累计描述符槽位需求
-        // P62b：逐 binding 变异性 —— 决定描述符写入能否从 n*bc 降到 n*变动数。
-        @JvmField var gProfBcTotal = 0L          // Σ bc
-        @JvmField var gProfCbvVary = 0L          // 逐 core 变化的 CBV 数
-        @JvmField var gProfCbvSame = 0L          // 逐 core 不变的 CBV 数
-        @JvmField var gProfSrvVary = 0L          // 逐 core 变化的 SRV 数
-        @JvmField var gProfSrvSame = 0L          // 逐 core 不变的 SRV 数
-        @JvmField var gProfVbSlotSame = 0L       // vbSlot 全批一致的 core 数
-        // B（拆根签名）：SRV 汇入单个 descriptor table 后整段只写一份，要求整批 SRV
-        // 绑定完全一致；不一致的批回退串行。此计数器统计回退批次数。
+        @JvmField var gProfDrawIndexedNs = 0L     // drawIndexed（pushDescriptors + downcall）耗时
+        // 并行批量路径四段拆分：定位主线程串行开销（8 worker 相对 4 worker 无收益）。
+        @JvmField var gProfBuildNs = 0L
+        @JvmField var gProfPrepareNs = 0L
+        @JvmField var gProfWorkersNs = 0L
+        @JvmField var gProfExecuteNs = 0L
+        @JvmField var gProfFallbacks = 0L
+        // 区块批量内 VB/IB 共享率：共享则可用 ExecuteIndirect 替代逐 core 录制。
+        @JvmField var gProfSharedBatchDraws = 0L
+        @JvmField var gProfSameVbBuf = 0L
+        @JvmField var gProfSameVbOff = 0L
+        @JvmField var gProfSameIbBuf = 0L
+        @JvmField var gProfSameIdxType = 0L
+        @JvmField var gProfBatches = 0L
+        @JvmField var gProfSharedDescBatches = 0L
+        @JvmField var gProfSingleBundles = 0L
+        @JvmField var gProfSlotsTotal = 0L
+        // 逐 binding 变异性：决定描述符写入能否从 n*bc 降到 n*变动数。
+        @JvmField var gProfBcTotal = 0L
+        @JvmField var gProfCbvVary = 0L
+        @JvmField var gProfCbvSame = 0L
+        @JvmField var gProfSrvVary = 0L
+        @JvmField var gProfSrvSame = 0L
+        @JvmField var gProfVbSlotSame = 0L
         @JvmField var gProfSrvVaryFallbacks = 0L
 
         /** 低于此批量时并行调度开销高于收益，直接走串行路径。 */
         private const val PARALLEL_MIN_DRAWS = 24
 
         /**
-         * P58：并行调度的固定开销（8 线程唤醒 + CountDownLatch）约 0.2ms/帧，且与 worker
-         * 数无关（实测 4 worker 相对 8 worker 无收益）。因此当一批 core 的 native 录制量
-         * 不足以摊薄该开销时，改为「在调用线程内联录一个 bundle」——同样只走一次
-         * {@code dx12AsyncBundleRecordPartition} JNI，但省去线程池往返。
+         * 并行调度的固定开销（线程唤醒 + CountDownLatch）约 0.2ms/帧且与 worker 数无关：一批的录制量摊不薄它时，
+         * 改为「在调用线程内联录一个 bundle」——同样只走一次录制 JNI，省去线程池往返。
          */
         private const val SERIAL_BUNDLE_MAX_DRAWS = 512
 
@@ -599,8 +497,7 @@ class D3D12RenderPassBackend(
     override fun drawIndexed(indexCount: Int, instanceCount: Int, firstIndex: Int,
         vertexOffset: Int, firstInstance: Int) {
         val profT0 = if (MCDR_ABI.PROF) System.nanoTime() else 0L
-        // P230：线管线有三角形变体 ⇒ 切过去。同一份索引（每段 4 顶点 6 索引）在 TRIANGLES
-        // 拓扑下摊成两个三角形，拼出 `LineWidth` 像素宽的带子；D3D12 的 LINELIST 恒为 1px。
+        // 线管线有三角形变体 ⇒ 切过去：同一份索引在 TRIANGLES 下摊成两个三角形，拼出 `LineWidth` 带宽；LINELIST 恒 1px。
         val lineQuad = this.pipeline?.takeIf { it.hasLineQuadVariant() }
         val lineQuadDepth = lineQuad?.let { it.info().depthStencilState != null } ?: false
         if (lineQuad != null) {
@@ -614,7 +511,7 @@ class D3D12RenderPassBackend(
             throw IllegalStateException("dx12DrawIndexed failed")
         }
         if (lineQuad != null) {
-            // 恢复本 pass 的常规管线，后续 draw 不受影响（描述符表随 PSO 变化需要重推）。
+            // 恢复本 pass 的常规管线（描述符表随 PSO 变化，需要重推）。
             if (!MCDR_ABI.D3D12SetPipeline(this.ctx, lineQuad.handle(), lineQuadDepth)) {
                 throw IllegalStateException("dx12SetPipeline (restore after line quad) failed")
             }
@@ -626,12 +523,7 @@ class D3D12RenderPassBackend(
         }
     }
 
-    /**
-     * P72: DispatchMesh 的 Java 入口，与 [drawIndexed] 同级：先推描述符再下发。
-     *
-     * 与 core 的差别只在 native 侧——调用的是 ID3D12GraphicsCommandList6::DispatchMesh，
-     * 没有 IA 状态、没有顶点/索引缓冲；这里仍然只负责推送绑定和错误转换。
-     */
+    /** DispatchMesh 入口：先推描述符再下发；没有 IA 状态、没有顶点/索引缓冲。 */
     fun dispatchMesh(x: Int, y: Int, z: Int) {
         this.pushDescriptors()
         if (!MCDR_ABI.D3D12DispatchMesh(this.ctx, x, y, z)) throw IllegalStateException("dx12DispatchMesh(${x}, ${y}, ${z}) failed")
@@ -656,19 +548,13 @@ class D3D12RenderPassBackend(
     override fun drawIndexedIndirect(commands: GpuBufferSlice, drawCount: Int) {
         val location = this.pipeline?.info()?.location?.toString() ?: ""
         if (gDrawIndirectLocations.add(location)) {
-            // P237：作用域白名单是"按管线名"判的，名字错了整条通路就是静默空转 ——
-            // 一次运行里每个见过的新名字打一行，方便对着 `isTerrain`/`terrainRateFor` 核对。
+            // 作用域白名单按管线名判：名字错了整条通路就是静默空转，所以每个新名字打一行方便核对。
             LOGGER.info("MDI terrain candidate '{}' terrain={} rate={}", location,
                 isTerrain(location), D3D12VariableShadingRate.terrainRateFor(location))
         }
-        // P217：地形**全部**（不透明 + OIT 半透明）只走 meshlet，没有 IMR 回退。
-        // 半透明能这么做的前提是 `GameRendererTransparencyMixin` 把 improved transparency
-        // （Wavelet OIT）强制打开 —— OIT 顺序无关，mesh 的线程组顺序才无所谓。
+        // 地形**全部**（不透明 + OIT 半透明）只走 meshlet，无 IMR 回退；OIT 顺序无关，mesh 的线程组顺序才无所谓。
         if (isTerrain(location)) {
-            // P232：着色率的**唯一作用域**。整批地形（meshlet 派发或 MDI）包在一次
-            // RSSetShadingRate(粗) … finally RSSetShadingRate(1X1) 之间 —— 白名单在
-            // D3D12VariableShadingRate.terrainRateFor 里，只有实心地形能变粗，cutout 的镂空
-            // 与 OIT 半透明保持 1X1。档位 OFF 时这里零 native 调用。
+            // 着色率唯一作用域：整批地形包在一次 scope 内，白名单在 `terrainRateFor`；档位 OFF 时零 native 调用。
             var drawn = false
             D3D12VariableShadingRate.scope(this.ctx, location) {
                 drawn = tryMeshletDraw(commands, drawCount)
@@ -685,7 +571,7 @@ class D3D12RenderPassBackend(
         }
     }
 
-    /** P217：管线名 → 上传注册表里的图层 key（`ChunkSectionLayer.name()`）。 */
+    /** 管线名 → 上传注册表里的图层 key（`ChunkSectionLayer.name()`）。 */
     private fun meshletLayerFor(location: String): String? = when {
         location.contains("solid_terrain") -> "SOLID"
         location.contains("cutout_terrain") -> "CUTOUT"
@@ -693,18 +579,18 @@ class D3D12RenderPassBackend(
         else -> null
     }
 
-    /** P217：地形管线（含 OIT 三段）；shadow 不属于本路径。 */
+    /** 地形管线（含 OIT 三段）；shadow 不属于本路径。 */
     private fun isTerrain(location: String): Boolean =
         location.contains("terrain") && !location.contains("shadow")
 
-    /** P217：地形批次的 mesh 派发失败时只记一次 —— 已去除 IMR 回退，不会再画一遍原版路径。 */
+    /** 地形批次的 mesh 派发失败只记一次（已无 IMR 回退，不会再画一遍原版路径）。 */
     private fun meshTerrainMissing(reason: String) {
         if (gMeshTerrainMissingLog.add(reason)) {
             LOGGER.error("terrain batch not drawn (mesh path unavailable): {}", reason)
         }
     }
 
-    /** P217：`tryMeshletDraw` 的静默前置失败也要留证（去重，一次运行每理由一条）。 */
+    /** `tryMeshletDraw` 的静默前置失败也要留证（去重，一次运行每理由一条）。 */
     private fun meshletSkip(reason: String): Boolean {
         if (gMeshSkipLogReasons.add("meshlet:" + reason)) {
             LOGGER.info("meshlet skipped: {}", reason)
@@ -713,10 +599,8 @@ class D3D12RenderPassBackend(
     }
 
     /**
-     * P217：meshlet 版地形派发 —— 一次 `DispatchMesh(meshletCount)` 覆盖整批 MDI 段。
-     *
-     * <p>返回 false 表示这批不归 mesh 管（调用方按"地形无回退"处理）。所有前置失败都会记一条
-     * 去重日志 —— 现在没有 IMR 回退，静默跳过等于画面缺块，必须能定位。
+     * meshlet 版地形派发：一次 `DispatchMesh(meshletCount)` 覆盖整批 MDI 段。返回 false 表示这批不归 mesh 管；
+     * 所有前置失败都记去重日志 —— 静默跳过等于画面缺块，必须能定位。
      */
     private fun tryMeshletDraw(commands: GpuBufferSlice, drawCount: Int): Boolean {
         if (!meshDispatchEnabled) return meshletSkip("mesh dispatch disabled")
@@ -737,8 +621,7 @@ class D3D12RenderPassBackend(
         val tables = D3D12MeshDrawCapture.buildTables(batch, layer, this.lastVertexSliceOffset)
             ?: return meshletSkip("meshlet tables incomplete (layer=$layer draws=${batch.drawCount})")
 
-        // P217 同会话 A/B：`run/dxrmc/meshlet_no_as` 存在时把 b8 的 `gCullEnabled` 置 0 ——
-        // 同一个 PSO、同一次派发，AS 全放行；像素差异只可能来自剔除本身。
+        // 同会话 A/B：`run/dxrmc/meshlet_no_as` 存在时把 b8 的 `gCullEnabled` 置 0 —— 同一 PSO、同一次派发，差异只来自剔除。
         val cullOn = !java.nio.file.Files.exists(
             java.nio.file.Path.of(System.getProperty("user.dir"), "dxrmc", "meshlet_no_as"))
         if (gMeshletLastCull != cullOn) {
@@ -753,8 +636,7 @@ class D3D12RenderPassBackend(
         val globalsBytes = ByteBuffer.allocate(256).order(ByteOrder.LITTLE_ENDIAN)
         globalsBytes.putInt(tables.meshletCount)
         globalsBytes.putInt(if (cullOn) 1 else 0)
-        // P233：b8 的 gVrsBand（近带 / 中带 / 保留 / 启用位）。启用位=0 时 MS 恒写 1X1，
-        // 也就是"这个批次不做逐图元降速"，与档位 OFF 等价。
+        // b8 的 gVrsBand（近带 / 中带 / 保留 / 启用位）：启用位=0 时 MS 恒写 1X1，与档位 OFF 等价。
         val band = D3D12VariableShadingRate.msBand()
         globalsBytes.putFloat(band[0])
         globalsBytes.putFloat(band[1])
@@ -825,13 +707,10 @@ class D3D12RenderPassBackend(
         return 0
     }
     /**
-     * 把整批 core 按 worker 数切段：各 worker 在自己的描述符分区内写瞬时 CBV/SRV 并
-     * 录制成 D3D12 BUNDLE，最后由主列表按原顺序 {@code ExecuteBundle} 回放。
+     * 把整批 draw 按 worker 数切段，各 worker 在自己的描述符分区录一个 BUNDLE，最后由主列表按序 `ExecuteBundle`。
+     * bundle 内禁止 ResourceBarrier，故 CBV 缓冲/纹理视图先由主列表统一过渡（`AsyncPrepare*`）。
      *
-     * <p>bundle 内禁止 ResourceBarrier，因此本批用到的 CBV 缓冲与纹理视图先由主列表
-     * 统一过渡（{@code dx12AsyncPrepare*}）。描述符互不重叠，worker 之间无数据竞争。
-     *
-     * @return true = 已并行录制并回放；false = 未处理，调用方须走串行路径
+     * @return false = 未处理，调用方须走串行路径
      */
     private fun <T : Any> tryParallelDrawMultipleIndexed(draws: List<RenderPass.Draw<T>>,
         defaultIndexBuffer: GpuBuffer?, defaultIndexType: IndexType?,
@@ -864,7 +743,6 @@ class D3D12RenderPassBackend(
             bType[j] = if (type == D3D12BindGroupEntry.Type.UNIFORM_BUFFER) 0 else 1
         }
 
-        // 每 core 的绘制参数
         val idxBuf = LongArray(n)
         val idxType = IntArray(n)
         val idxCount = IntArray(n)
@@ -874,7 +752,7 @@ class D3D12RenderPassBackend(
         val vbBuf = LongArray(n)
         val vbOff = LongArray(n)
         val vbStride = IntArray(n)
-        // 每 (core, binding) 的描述符取值；n*bc 以 long 计算，防 int 溢出
+        // 每 (core, binding) 的描述符取值；n*bc 以 long 计算，防 int 溢出。
         val cells = n.toLong() * bc
         if (cells > Int.MAX_VALUE) {
             return false
@@ -885,17 +763,12 @@ class D3D12RenderPassBackend(
         val bView = LongArray(bBuf.size)
         val cbvBuffers = linkedSetOf<Long>()
         val textureViews = linkedSetOf<Long>()
-        // bundle 内禁止 barrier：顶点/索引缓冲也必须在主列表上先过渡（与串行路径的
-        // setVertexBuffer/setIndexBuffer 一致）。顶点缓冲目标状态与 CBV 相同，
-        // 汇入同一个集合；索引缓冲单独一组，过渡到 INDEX_BUFFER。
+        // bundle 内禁止 barrier：顶点/索引缓冲也必须在主列表先过渡；顶点缓冲目标状态与 CBV 相同，索引缓冲单独一组。
         val vbBuffers = linkedSetOf<Long>()
         val indexBuffers = linkedSetOf<Long>()
-        // P59：检测整批 core 的绑定是否完全一致（区块 renderGroup 的典型情形）。
-        // 一致时描述符块只需写一份，每 core 省掉 bc 次 CreateConstantBufferView/
-        // CopyDescriptorsSimple 与一次 SetGraphicsRootDescriptorTable。
+        // 整批绑定完全一致时（区块 renderGroup 的典型情形）描述符块只写一份，每 core 省掉 bc 次 CBV 写入。
         var blockUniform = true
-        // B（拆根签名）：CBV 走 root descriptor（可逐 core 变化），SRV 汇入单个
-        // descriptor table 且整段只写一份 -> 只要求 SRV 在整批内恒定。
+        // CBV 走 root descriptor（可逐 core 变化），SRV 汇入单个 descriptor table 且整段只写一份 → 只要求 SRV 恒定。
         var srvUniform = true
 
         // 方法引用在整批内恒定：提到循环外，避免每 core 一次 lambda 对象分配。
@@ -947,13 +820,10 @@ class D3D12RenderPassBackend(
                         return false
                     }
                     bView[o + j] = texture.view.handle()
-                    // SRV 视图集合不在此累加：srvUniform 保证整批一致，稍后只按
-                    // core 0 收集，省掉 n×srvCount 次装箱入集合。
+                    // SRV 视图集合不在此累加：srvUniform 保证整批一致，稍后只按 core 0 收集。
                 }
             }
-            // P59/B：与 core 0 的块比对。blockUniform = 整块一致（CBV+SRV）；
-            // srvUniform = 仅 SRV 一致（B 方案下 CBV 走 root descriptor，可逐 core
-            // 变化，但 SRV 表整段只写一份，故要求 SRV 恒定）。
+            // 与 core 0 的块比对：blockUniform = 整块一致；srvUniform = 仅 SRV 一致（CBV 走 root descriptor）。
             if (d > 0 && (blockUniform || srvUniform)) {
                 for (j in 0 until bc) {
                     val q = o + j
@@ -973,7 +843,7 @@ class D3D12RenderPassBackend(
             }
         }
         if (MCDR_ABI.PROF) {
-            // P62 诊断：本批是否共享 VB/IB（第二遍纯比对，仅 PROF 时执行）。
+            // 本批是否共享 VB/IB（第二遍纯比对，仅 PROF 时执行）。
             var sameVb = true
             var sameVbOff = true
             var sameIb = true
@@ -1012,9 +882,7 @@ class D3D12RenderPassBackend(
             if (sameSlot) {
                 gProfVbSlotSame += n
             }
-            // P62b：统计每个 binding 是否逐 core 变化（blockUniform 为 all-or-nothing，
-            // 这里要的是逐 binding 明细：若只有 1 个 CBV 变化，则可把不变的 SRV 只写
-            // 一份，描述符写入量从 n*bc 降到 n*变动数）。
+            // 统计每个 binding 是否逐 core 变化（仅 PROF）：若只有 1 个 CBV 变化，不变的 SRV 可只写一份。
             gProfBcTotal += bc
             for (j in 0 until bc) {
                 var vary = false
@@ -1044,16 +912,14 @@ class D3D12RenderPassBackend(
             }
         }
 
-        // B（拆根签名）：SRV 汇入单个 descriptor table 且整段只写一份，要求整批 SRV
-        // 绑定完全一致；否则回退串行（串行路径逐 core 推送描述符，语义正确）。
+        // SRV 汇入单个 descriptor table，要求整批 SRV 完全一致；否则回退串行（串行路径逐 core 推送，语义正确）。
         if (!srvUniform) {
             if (MCDR_ABI.PROF) {
                 gProfSrvVaryFallbacks++
             }
             return false
         }
-        // srvUniform 成立 => 整批 SRV 与 core 0 一致，主列表过渡只需收集 core 0 的
-        // srvCount 个视图。
+        // srvUniform 成立 ⇒ 整批 SRV 与 core 0 一致，主列表过渡只需收集 core 0 的 srvCount 个视图。
         for (j in 0 until bc) {
             if (bType[j] != 0) {
                 textureViews.add(bView[j])
@@ -1067,9 +933,7 @@ class D3D12RenderPassBackend(
         }
         val profP1 = if (MCDR_ABI.PROF) System.nanoTime() else 0L
         if (profP1 != 0L) gProfBuildNs += profP1 - profP0
-        // bundle 内禁止 barrier：本批所有 CBV 缓冲 / 顶点缓冲 / 索引缓冲 / 纹理视图
-        // 先在主列表上完成过渡。过渡失败则说明主列表状态异常，直接回退串行
-        // （串行路径会自行 transition）。
+        // bundle 内禁止 barrier：本批所有 CBV/顶点/索引缓冲与纹理视图先在主列表过渡；失败则回退串行（串行路径自行 transition）。
         cbvBuffers.addAll(vbBuffers)
         if (!MCDR_ABI.AsyncPrepareCBVBuffers(this.ctx, toLongArray(cbvBuffers))
             || !MCDR_ABI.AsyncPrepareIndexBuffers(this.ctx, toLongArray(indexBuffers))
@@ -1083,8 +947,7 @@ class D3D12RenderPassBackend(
         val alloc = async.descriptorAlloc()
         val pipelineHandle = pl.handle()
         val useDepth = this.hasDepth && pl.info().depthStencilState != null
-        // B（拆根签名）：CBV 走 root descriptor，不占描述符堆槽位；每段（单分区内联或
-        // 每个并行 worker）只需 srvCount 个槽放 SRV 表。故单分区几乎总能容纳整批。
+        // CBV 走 root descriptor 不占描述符堆槽位；每段只需 srvCount 个槽放 SRV 表，故单分区几乎总能容纳整批。
         val sharedDesc = blockUniform
         var srvCount = 0
         for (j in 0 until bc) {
@@ -1109,8 +972,7 @@ class D3D12RenderPassBackend(
         var workerCount = if (singleBundle) 1
             else async.workerCount().coerceAtMost(n).coerceAtLeast(1)
         if (workerCount == 1) {
-            // P58：单分区——在调用线程内联录一个 bundle。与并行路径共用同一条
-            // 录制原语 + 同一描述符分区，只是省掉线程池往返。
+            // 单分区：在调用线程内联录一个 bundle，与并行路径共用录制原语与描述符分区，只省掉线程池往返。
             var bundle = 0L
             var ok = false
             try {
@@ -1141,12 +1003,9 @@ class D3D12RenderPassBackend(
             if (!ok || bundle == 0L) {
                 MCDR_ABI.D3D12AsyncBundleEnd(pool, 0)  // 复位录制器
                 gProfFallbacks++
-                // P62：worker 0 分区每帧仅 3072 槽（24576/8），而单分区内联录制是
-                // bump 累积的——一帧内多批（区块 3 批 × ~2032 槽 ≈ 6100）必然把区域
-                // 耗尽 → 此前直接 return false 会掉进「全串行逐 core JNI」路径
-                // （每 core 一次 pushDescriptors + 3 次 JNI），实测 drawIndexedCalls
-                // 从 13/帧暴涨到 345/帧。改为升级到真正的并行分区（各 worker 独立
-                // 区域），代价仅 ~0.2ms 调度开销，远低于串行逐 core。
+                // worker 0 分区每帧仅 3072 槽，而单分区内联录制是 bump 累积的：一帧多批（区块 3 批 ≈ 6100 槽）
+                // 必然耗尽 → 直接 return false 会掉进「全串行逐 core JNI」（drawIndexedCalls 13/帧 → 345/帧）。
+                // 故改为升级到真正的并行分区（各 worker 独立区域），代价仅 ~0.2ms 调度开销。
                 workerCount = async.workerCount().coerceAtMost(n).coerceAtLeast(2)
                 if (IllusionLogger.debugEnabled()) {
                     LOGGER.warn("drawMultipleIndexed: single-bundle alloc failed,"
@@ -1185,8 +1044,7 @@ class D3D12RenderPassBackend(
                     // 一次性为本段分配 SRV 表槽位（CBV 走 root descriptor，不占槽）。
                     val base = MCDR_ABI.ID3D12AsyncDescriptorAllocate(alloc, frameSlot,
                         w, slotsNeeded)
-                    // P57：整段合并为单次 JNI（此前每 core ~8 次穿越：bc 次写描述符 +
-                    // 取 GPU 句柄 + 根描述符表 + 索引/顶点缓冲 + DrawIndexed）。
+                    // 整段合并为单次 JNI（否则每 core ~8 次穿越：bc 次写描述符 + 取句柄 + 根表 + 缓冲 + DrawIndexed）。
                     if (base < 0
                         || !MCDR_ABI.D3D12AsyncBundleBegin(pool, w, frameSlot,
                             frameValue)
@@ -1245,8 +1103,7 @@ class D3D12RenderPassBackend(
             }
         }
         if (MCDR_ABI.PROF) gProfExecuteNs += System.nanoTime() - profP3
-        // bundle 内改写了根描述符表/PSO 等父列表状态，强制下次撤销 anyDescriptorDirty 快速路径，
-        // 让后续 core 重新推送描述符（否则会复用 bundle 留下的根表）。
+        // bundle 内改写了根描述符表/PSO 等父列表状态：强制撤销 anyDescriptorDirty 快速路径，让后续 core 重推描述符。
         this.anyDescriptorDirty = true
         return true
     }
@@ -1259,8 +1116,7 @@ class D3D12RenderPassBackend(
         }
         return out
     }
-    // 26.3：多批次索引绘制已上移到前端 RenderPass（它自己按 Draw 摊平成 multiDrawIndexed），
-    // backend SPI 不再有这个方法；保留实现供本类内部/后续 mesh 批处理复用。
+    // 多批次索引绘制已上移到前端 RenderPass（自己按 Draw 摊平成 multiDrawIndexed），backend SPI 不再有这个方法。
     fun <T : Any> drawMultipleIndexed(draws: Collection<RenderPass.Draw<T>>,
         defaultIndexBuffer: GpuBuffer?, defaultIndexType: IndexType?,
         dynamicUniforms: Collection<String>, uniformArgument: T) {
@@ -1269,10 +1125,8 @@ class D3D12RenderPassBackend(
         }
         val profT0 = if (MCDR_ABI.PROF) System.nanoTime() else 0L
         val batch = materialize(draws)
-        // P217：地形不再走这里 —— 26.3 的 MDI 地形用的是 drawIndexedIndirect，由它统一接管。
-        // 这条路径只剩非地形管线（水/粒子/实体等），保持并行/串行 IMR。
-        // P33：批量足够大时走并行 bundle 录制（worker pool）；任何条件不满足或录制失败
-        // 都回退到下面的串行路径，保证功能等价。
+        // 地形不再走这里（MDI 地形走 drawIndexedIndirect），只剩非地形管线（水/粒子/实体）的 IMR。
+        // 批量足够大时走并行 bundle 录制；条件不满足或录制失败都回退下面的串行路径，保证功能等价。
         val parallel = this.tryParallelDrawMultipleIndexed(batch, defaultIndexBuffer,
             defaultIndexType, uniformArgument)
         if (!parallel) {
@@ -1285,8 +1139,7 @@ class D3D12RenderPassBackend(
         }
     }
 
-    /** P137：串行 IMR 逐 draw 绘制（原 [drawMultipleIndexed] 的内联循环，抽出来给回退与
-     *  "淡入中的段"共用）。 */
+    /** 串行 IMR 逐 draw 绘制（回退路径与"淡入中的段"共用）。 */
     private fun <T : Any> drawSerially(draws: List<RenderPass.Draw<T>>, defaultIndexBuffer: GpuBuffer?,
         defaultIndexType: IndexType?, uniformArgument: T) {
         for (draw in draws) {

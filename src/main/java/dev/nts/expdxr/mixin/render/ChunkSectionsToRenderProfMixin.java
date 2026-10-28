@@ -11,7 +11,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-/** P51：区块实际绘制 pass（OPAQUE + TRANSLUCENT 合计），含 multidraw 批量提交。 */
+/** 区块实际绘制的 pass（OPAQUE + TRANSLUCENT 合计），含 multidraw 批量提交。 */
 @Mixin(ChunkSectionsToRender.class)
 public class ChunkSectionsToRenderProfMixin {
     @Inject(method = "renderGroup", at = @At("HEAD"), remap = false)

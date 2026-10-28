@@ -11,15 +11,12 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import java.util.List;
 
 /**
- * P217（mesh 重构 Stage 2 的前置）：捕获 26.3 每帧写出的 MDI 段列表与逐段信息。
+ * 捕获每帧写出的 MDI 段列表与逐段信息。
  *
- * <p>为什么选这两个方法：`DynamicGpuData` 的 `IndexedDraw` / `ChunkSectionInfo` 都是 **public**
- * record（不像 `LevelRenderer$ChunkDrawGroup` 那样是包私有），mixin 可以直接引用类型；
- * 而且 `writeChunkSectionCommands` 返回的 `GpuBufferSlice[]` 就是绘制时
- * `drawIndexedIndirect` 收到的那块间接参数缓冲 —— 用 `slice.offset()` 就能把
- * "这批参数是哪些段" 精确对回去（参数缓冲本身在 UPLOAD 堆、CPU 读不到，见 P194）。
- *
- * <p>只在 HEAD/RETURN 读实参，不改任何状态。
+ * <p>`IndexedDraw` / `ChunkSectionInfo` 都是 public record，mixin 可以直接引用类型。
+ * `writeChunkSectionCommands` 返回的 `GpuBufferSlice[]` 就是绘制时 `drawIndexedIndirect` 收到的间接
+ * 参数缓冲，用 `slice.offset()` 把「这批参数是哪些段」对回去（缓冲本身在 UPLOAD 堆、CPU 读不到）。
+ * 只在 HEAD / RETURN 读实参，不改状态。
  */
 @Mixin(DynamicGpuData.class)
 public abstract class DynamicGpuDataCaptureMixin {

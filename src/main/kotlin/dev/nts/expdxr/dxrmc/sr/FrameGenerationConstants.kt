@@ -8,15 +8,9 @@ import java.lang.foreign.ValueLayout
 import dev.nts.expdxr.misc.IllusionLogger
 
 /**
- * 帧生成自己的帧常量（view / projection / jitter / mvScale / resetHistory）。
- *
- * 为什么要独立于 SR 后端：这些常量是**插帧**的输入，不是超分的输入。DLSS 的 constants 属于
- * Streamline 私有状态，翻它等于让 FG 依赖 SR 的实现细节（P305z）。native 侧
- * `mcdr_dx12FgSetConstants` 只保存，由使用它的 provider 取走。
- *
- * 为什么不能只在 DLSS 路径里推：`options.txt` 里 SR 换成 FSR/XeSS 之后 DLSS 的常量推送
- * 不会跑，XeSS-FG 拿不到相机矩阵 —— 表现是 `xefgSwapChainSetEnabled(1)` 返回成功、但
- * `GetLastPresentStatus.isFrameGenEnabled` 一直是 0（P306z：包装成功却 1:1 出帧）。
+ * 帧生成自己的帧常量（view / projection / jitter / mvScale / resetHistory）。独立于 SR 后端：这些是**插帧**的输入，
+ * 而 DLSS 的 constants 属于 Streamline 私有状态。native 侧 `mcdr_dx12FgSetConstants` 只保存，由 provider 取走。
+ * 见 docs/superresolution/README.md §7。
  */
 internal object FrameGenerationConstants {
 
@@ -25,8 +19,7 @@ internal object FrameGenerationConstants {
         val proj = D3D12Temporal.currentProjection() ?: return
         val view = D3D12Temporal.currentCameraView() ?: return
         val camPos = D3D12Temporal.currentCameraPosition()
-        // 世界层是相机相对空间：`view` 只有旋转。`clipToPrevClip` 必须含相机平移，
-        // 否则「静止正常、一走动就拖影」（P119 在 DLSS 路径上踩过同一个坑）。
+        // 世界层是相机相对空间：`view` 只有旋转。`clipToPrevClip` 必须含相机平移，否则「静止正常、一走动就拖影」。
         val worldView = worldSpaceView(view, camPos?.get(0) ?: 0.0f, camPos?.get(1) ?: 0.0f,
             camPos?.get(2) ?: 0.0f)
         try {

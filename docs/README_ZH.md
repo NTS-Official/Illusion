@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo_flat_white.jpg">
+<img src="../assets/logo_flat_white.jpg">
 <br>
 <img src="https://img.shields.io/github/actions/workflow/status/NTS-Official/Illusion/build.yml?style=for-the-badge">
 <br>
@@ -17,7 +17,7 @@
 
 # DirectX Minecraft 图形实验项目
 
-[[English](README.md)] | [简体中文]
+[[English](../README.md)] | [[简体中文](README_ZH.md)]
 
 > [!CAUTION]
 > 这是一个实验性项目，可能永远不会被引入真正的生产环境。
@@ -45,6 +45,11 @@ Illusion（幻光影现） 是一个基于微软 DirectX 12 后端的 Minecraft 
 
 ### 简介
 因为学（chao）的是 Radiance，所以项目组织方式也抄了一手，动态链接库单独放个仓库里，名字就叫 **[MCDR](https://github.com/NTS-Official/MCDR)**，其实是比较草率的一手决定。
+
+## 设计文档
+
+设计文档都在 [`docs/overview.md`](overview.md)，从总览开始读——它把每个子系统对应的文档列成了一张表。<br>
+源码注释只保留"读代码时立刻会踩坑"的那几条约束；设计意图、数据流和架构取舍都写在文档里。
 
 ## 一些细枝末节
 

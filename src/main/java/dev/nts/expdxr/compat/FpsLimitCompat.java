@@ -9,26 +9,11 @@ import net.minecraft.client.InactivityFpsLimit;
 import net.minecraft.util.StringRepresentable;
 
 /**
- * "Inactivity FPS limit: Never" 的实现核心（Java 版）。
+ * 运行期往 {@code InactivityFpsLimit} 里补一个 NEVER 常量。
  *
- * <p>原实现来自独立模组 whynotkeepyourfpsup（Fabric + Kotlin mixin，用 ClassTweaker 验证了
- * Kotlin mixin 可行性）。移植到 NeoForge 时改成 Java：本仓库的 mixin 允许 Java，而 Kotlin 在
- * 这里有两处硬伤——{@code @Shadow} 的 static 字段要求 {@code @JvmField}，而 Kotlin 的
- * {@code @JvmField} 必须带初始化器（{@code lateinit} 不允许），初始化器会被并进目标类的
- * {@code <clinit>} 把 CODEC 写成 null。
- *
- * <p>做法与原来一致，只是换成 Java 语法：
- * <ol>
- *   <li>用 {@code privateLookupIn} 拿到 {@code InactivityFpsLimit} 的私有构造器，造一个
- *       "NEVER" 实例（枚举常量在运行期补不出来，只能这样造）；</li>
- *   <li>把它塞进 {@code $VALUES}——{@code privateLookupIn} 的 lookupClass 就是该枚举类，
- *       按 JLS 允许写入本类的 final 字段，所以 {@code findStaticVarHandle} 能写；</li>
- *   <li>把 {@code CODEC} 换成含新值的 {@code fromEnum} 结果（字段本身由
- *       {@code InactivityFpsLimitMixin} 的 {@code @Mutable} 去了 final，这里用反射写）。</li>
- * </ol>
- *
- * <p>这个类必须在 mixin 包之外：Mixin 的 {@code IllegalClassLoadError} 禁止被注入的代码引用
- * {@code dev.nts.expdxr.mixin.*} 下的类。
+ * <p>构造器描述符必须写满四参 {@code (String,int,String,String)} —— name / ordinal 由 javac 隐式加入。
+ * 写字段用普通反射而非 VarHandle。这个类必须在 mixin 包之外：被注入的代码不能引用
+ * {@code dev.nts.expdxr.mixin.*}（{@code IllegalClassLoadError}）。见 docs/misc/mixins-and-earlywindow.md §3.9</p>
  */
 public final class FpsLimitCompat {
     private static volatile InactivityFpsLimit never;
@@ -52,11 +37,7 @@ public final class FpsLimitCompat {
         try {
             MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(
                 InactivityFpsLimit.class, MethodHandles.lookup());
-            // 枚举构造器在字节码里是 `(String name, int ordinal, String serializedName, String key)`：
-            // 源码上只声明了两个参数，但 javac 会把枚举的 name/ordinal 作为前两个隐式参数加进去
-            // （javap 的源码视图不显示它们，-p 看 descriptor 才是
-            // `(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)V`）。
-            // MethodType 必须用这个完整的 4 参描述符，否则 findConstructor 直接抛 NoSuchMethodException。
+            // 描述符是 (String,int,String,String)：少写就 NoSuchMethodException。
             MethodHandle ctor = lookup.findConstructor(InactivityFpsLimit.class, MethodType.methodType(
                 void.class, String.class, int.class, String.class, String.class));
 
@@ -75,13 +56,7 @@ public final class FpsLimitCompat {
         }
     }
 
-    /**
-     * 写目标类的 static 字段。
-     *
-     * <p>字段的 ACC_FINAL 由 {@code InactivityFpsLimitMixin} 的 {@code @Mutable} 去掉，
-     * 因此这里用普通反射即可 —— VarHandle 那条路会抛
-     * {@code UnsupportedOperationException: set}（final 字段不可写）。
-     */
+    /** 反射写 static 字段：{@code @Mutable} 已去掉 final，VarHandle 那条路会抛 {@code UnsupportedOperationException}。 */
     private static void writeStatic(String name, Object value)
         throws ReflectiveOperationException {
         Field field = InactivityFpsLimit.class.getDeclaredField(name);

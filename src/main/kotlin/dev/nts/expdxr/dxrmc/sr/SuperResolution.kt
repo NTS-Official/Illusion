@@ -17,7 +17,7 @@ import dev.nts.expdxr.d3d12.render.core.D3D12GpuTexture
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuTextureView
 import dev.nts.expdxr.dxrmc.sr.dlss.DLSSOutput
 import dev.nts.expdxr.dxrmc.sr.dlss.DeepLearningSuperSampling
-import dev.nts.expdxr.misc.D3D12Settings
+import dev.nts.expdxr.misc.settings.D3D12Settings
 import dev.nts.expdxr.misc.IllusionLogger
 import java.lang.foreign.Arena
 import java.lang.foreign.MemorySegment
@@ -33,123 +33,86 @@ import net.minecraft.client.gui.components.CycleButton
 import com.mojang.serialization.Codec
 import java.util.Optional
 import net.minecraft.network.chat.Component
+import kotlin.math.ceil
 
 /**
- * P282：超分抽象层的 JVM 门面：`[sr] backend` 选哪一家，就在这一层分流。
- *
- * **DLSS 分支原样委托给 [DeepLearningSuperSampling]**：那条路径有 2000 行状态机、P108/P112
- * 的交接约定和 Streamline 的打点，任何"顺手统一一下"的改动都会立刻变成实机回归。所以本类只做
- * 两件事：把配置翻成 native 的后端号、给 FSR / XeSS 打包 [MCDRLayout.SR_DISPATCH]。
- *
- * FSR / XeSS 的通路与 DLSS 完全不同：它们没有"feature 建一次、之后每帧 evaluate"之外的状态交接
- * （native 侧 `d3d12_fsr.cpp` / `d3d12_xess.cpp` 自己管上下文、自己发屏障），因此本类每帧只做
- * 四步：记速度通道、打包、`mcdr_dx12SrEvaluate`、成功就 `markWorldLayerDone()`。
+ * 超分门面：按 `[sr] backend` 分流。DLSS 原样委托 [DeepLearningSuperSampling]（那条链路的状态机不可合并）；
+ * FSR / XeSS 每帧只做：打包 -> `mcdr_dx12SrEvaluate` -> blit / 交接。见 docs/superresolution/README.md §2。
  */
 object SuperResolution {
 
-    /** 与 `Projection.setupPerspective(0.05F, ...)` 同源（`Camera.java:110`）。 */
     private const val NEAR_PLANE = 0.05f
 
-    /** 载荷里的 `preExposure`：本工程没有曝光纹理，1.0 = 原样（P289 再谈）。 */
     private const val PRE_EXPOSURE = 1.0f
 
-    /** 运动矢量已是像素空间（`D3D12Velocity` 写的是 `(uv - prevUv) * screenSize`），故为 1。 */
     private const val MOTION_VECTOR_SCALE = 1.0f
 
-    /**
-     * P211n 定下的上报约定：`(+Jx, -Jy)`。亚像素抖动只有一个源（`D3D12Temporal` 的 Halton(2,3)），
-     * DLSS 侧实机 A/B 的结论是这套符号；FSR / XeSS 沿用同一份值，待真机复验（`sr_plan.md` A8/A9）。
-     */
+    /** 上报给后端的 jitter 固定 `(+Jx, -Jy)`：只翻 y。 */
     private const val JITTER_SIGN_Y = -1.0f
 
-    /** 兜底相机远平面：取不到 `CameraRenderState.depthFar` 时的值（与原版默认渲染距离同量级）。 */
     private const val FALLBACK_FAR = 512.0f
 
     private var lastState: String = ""
 
-    /** 上一次成功的 (backend, 渲染尺寸, 显示尺寸)；变了就要求后端 reset 一次历史。 */
+    /** 上一组 (backend, 尺寸, 比例)；变化即要求后端 reset 历史。 */
     private var lastKey: String = ""
 
-    /** 已经为哪一组尺寸建过上下文。`mcdr_dx12SrCreate` 幂等，但没必要每帧付一次 ABI 往返。 */
+    /** 已建上下文的 key：`mcdr_dx12SrCreate` 幂等，但不必每帧付一次 ABI 往返。 */
     private var createdFor: String = ""
 
     private var lastFrameNanos: Long = 0L
 
-    /** 渲染比例"100% 没活可干"的自愈只做一次（否则用户故意拖回 100% 时会跟他抢）。 */
+    /** 「100% 没活可干」的自愈只做一次，否则会跟故意拖回 100% 的用户抢。 */
     private var autoScaleAdjusted = false
 
-    /** [cachedCaps] 的缓存与时间戳（地形路径每帧问一次，按秒缓存）。 */
     private var capsCache: MCDR_ABI.SrCaps? = null
     private var capsCacheNanos = 0L
 
-    /**
-     * P284b：录制一帧超分（含把载荷写进堆内存、跨 ABI 调用）与随后那次 blit 的**CPU 时间**。
-     *
-     * <p>这不是 GPU 时间：dispatch 是异步的，这里量的是渲染线程为这一帧花掉的墙上时间。
-     * 要 GPU 时间得开 timestamp query（`mcdr_dx12WriteTimestamp` 已在，但需要成对的 query heap），
-     * 那是另一条链（P284b 的下一半）。
-     */
+    /** 录制一帧（打包 + 跨 ABI 调用）与随后 blit 的 **CPU 墙上时间**，不是 GPU 开销。 */
     private val evalSamples = LongArray(COST_SAMPLES)
     private val blitSamples = LongArray(COST_SAMPLES)
     private var sampleCursor = 0
 
-    /** 让位动作是否已排到帧边界（避免每帧往主线程队列里塞一个 Runnable）。 */
+    /** 让位已排到帧边界，避免每帧往主线程队列塞 Runnable。 */
     private var standDownScheduled = false
-    /** P291l/P291m：启动期配置自检只跑一次（放在第一次进世界，客户端已就位）。 */
     private var startupChecked = false
 
     /**
-     * P284b GPU side: real super-resolution cost, measured with timestamp queries.
-     *
-     * <p>One TIMESTAMP before and after evaluate, then a single
-     * [MCDR_ABI.D3D12ReadQueryValues] for the whole pool every [GPU_SAMPLES] frames. It must not be
-     * read per frame: the native resolveQuery builds a command list and calls flushAndWait every time.
+     * GPU 侧真实开销：evaluate 前后各一次 TIMESTAMP，每 [GPU_SAMPLES] 帧读回一次整池。
+     * 不能每帧读：native 的 resolve 会建命令列表并 flushAndWait。
      */
     private var gpuPool = 0L
     private var gpuFrame = 0
     private var gpuPoolWarned = false
     private val gpuSamples = LongArray(GPU_SAMPLES)
 
-    /** 数据面（jitter / 速度通道）是不是**我们**打开的 —— 关掉 SR 时要还原成配置原值。 */
+    /** 数据面是**我们**打开的 —— 关掉 SR 时要还原成配置原值。 */
     private var forcedTemporal = false
     private var forcedVelocity = false
 
-    /** 速度通道闩锁的重试限速（P108e 的教训：一票否决的自我关闭只能靠外部清）。 */
     private var lastVelocityRetryNanos = Long.MIN_VALUE
 
-    /** P282 诊断：上一次打"速度通道为什么没纹理"的时间戳（0 = 还没打过）。 */
+    /** 诊断心跳的限速时间戳（0 = 还没打过）。 */
     private var lastVelocityDiagNanos = 0L
 
-    /** P282 诊断：上一次打"门面被调用"心跳的时间戳（0 = 还没打过）。 */
     private var lastEnterDiagNanos = 0L
 
-    /** 那条诊断的最小间隔（1 秒）。 */
     private const val VELOCITY_DIAG_NANOS = 1_000_000_000L
 
     private const val VELOCITY_RETRY_NANOS = 1_000_000_000L
 
-    /**
-     * 切到 FSR / XeSS 时若渲染比例还在 100%，就降到这个值。
-     *
-     * <p>75 是**滑条实际能停住**的档位：非 DLSS 模式下取值域按 25% 步进吸附
-     * （`D3D12RenderScale` 的 `PercentRange.snap`），写 67 会被吸附成 75，日志与生效值对不上。
-     */
-    /** 后两家的最小渲染尺寸（与 caps 里 native 报的 320x180 一致）。 */
+    /** 后两家的最小渲染尺寸（与 native 能力面的 320x180 一致）。 */
 private const val MIN_RENDER_WIDTH = 320
 private const val MIN_RENDER_HEIGHT = 180
 
 private const val DEFAULT_RENDER_PERCENT = 75
 
-    /** caps 缓存的存活时间（见 [cachedCaps]）。 */
     private const val CAPS_TTL_NANOS = 1_000_000_000L
 
-    /** P284b：参与统计的帧数（环形缓冲长度）。 */
     private const val COST_SAMPLES = 128
 
-    /** P284b：攒够这么多帧就打一行统计。 */
     private const val COST_LOG_EVERY = 120
 
-    /** P284b GPU side: frames per timestamp batch (two queries per frame). */
     private const val GPU_SAMPLES = 120
 
     // 载荷字段偏移：一次性查好，别每帧做 28 次 PathElement 查找。
@@ -188,13 +151,8 @@ private const val DEFAULT_RENDER_PERCENT = 75
     fun backendId(): Int = currentBackend().id
 
     /**
-     * 速度通道 / 相机矩阵的**生产者**仍住在 `DeepLearningSuperSampling.captureMotionVectors()` 里
-     * （P76c / P108d 的历史落点：挂点、深度快照、MV 约定都在那），但 FSR / XeSS 一样需要这份数据。
-     *
-     * <p>那个挂点原先把闸门写成「DLSS 开着」，于是选了 FSR 却把 DLSS 关掉时，速度通道一帧都不跑 ——
-     * 实测 `D3D12Velocity.debugState()` 会一直是 `recorded=-1 current=false previous=false`，
-     * 门面只能每帧报 "no motion-vector texture"，一帧都升采样不了。这个谓词就是给那个闸门用的：
-     * 「DLSS 关着、但另一家超分在跑」时它要继续工作。
+     * 速度通道 / 相机矩阵的生产者仍在 [DeepLearningSuperSampling.captureMotionVectors] 里，FSR / XeSS 也要用；
+     * 这个谓词供那个挂点的闸门使用：DLSS 关着但另一家超分在跑时它必须继续工作。
      */
     @JvmStatic
     fun needsVelocityPass(): Boolean = when (currentBackend()) {
@@ -203,27 +161,19 @@ private const val DEFAULT_RENDER_PERCENT = 75
     }
 
     /**
-     * 是否真的有一家超分在跑（地形 mip bias 与界面用它）。
-     *
-     * <p>DLSS 这一档不能只看后端号：`[sr] backend` 的默认值就是 DLSS，而 DLSS 自己的开关在 NVIDIA 段
-     * 那一行。所以 DLSS 档要再问一次 [DeepLearningSuperSampling.isEnabled] —— 否则"选了 DLSS 却从没
-     * 打开它"会被当成在超分，地形 mip bias 就先糊了（P220 的边界）。
+     * 是否真有一家超分在跑（地形 mip bias 与界面用）。DLSS 档要再问 [DeepLearningSuperSampling.isEnabled]；
+     * FSR / XeSS 档必须问能力面，否则「配了但运行库不在」会先把地形糊掉。
      */
     @JvmStatic
     fun isEnabled(): Boolean = when (val wanted = currentBackend()) {
         SrBackend.NONE -> false
         SrBackend.DLSS -> DeepLearningSuperSampling.isEnabled()
         // 非 NVIDIA 两档还要问一次「这家到底能不能跑」：配置里写着 FSR 但运行库不在时，超分
-        // 一帧都不会发生，可地形 mip bias 会照糊 —— P220 那条边界就破了。
+        // 一帧都不会发生，可地形 mip bias 会照糊。
         else -> cachedCaps(wanted.id)?.available == true
     }
 
-    /**
-     * caps 的一秒缓存。
-     *
-     * <p>[isEnabled] 在地形采样路径上**每帧**被问一次，而 [MCDR_ABI.querySrCaps] 是一次跨 ABI
-     * 调用；结果一秒内不会变（运行库加载幂等、驱动也不会在帧中间换），所以按秒缓存。
-     */
+    /** caps 的一秒缓存：[isEnabled] 在地形路径上每帧被问，而 querySrCaps 是一次跨 ABI 调用。 */
     private fun cachedCaps(backend: Int): MCDR_ABI.SrCaps? {
         val now = System.nanoTime()
         val cached = capsCache
@@ -237,14 +187,8 @@ private const val DEFAULT_RENDER_PERCENT = 75
     }
 
     /**
-     * 一个后端的一行状态（给视频设置页的只读说明行用）：可用 / 不可用 + 原因。
-     *
-     * 数据源是 `mcdr_dx12SrQueryCaps` 的 `note`（native 侧如实写 "cannot load …"、
-     * "not implemented yet" 等）。**不要在这里自己判断"运行库在不在"** —— 那会变成第二处真值，
-     * 而 native 已经问过运行库了。
-     *
-     * 会触发一次 LoadLibrary 尝试（FSR / XeSS），native 侧首次之后有缓存；所以它只该在打开设置页时
-     * 调，不要挂到每帧路径上。
+     * 一个后端的一行状态。内容全部来自 native 的 `note`：**不要在这里自己判断运行库在不在**（那是第二处真值）。
+     * 会触发一次 LoadLibrary，所以只在设置页打开时调。
      */
     @JvmStatic
     fun statusLine(backend: Int): Component {
@@ -258,12 +202,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
         }
     }
 
-    /**
-     * 运行中的一句话状态（P292g）：与 DLSS 那行对等 —— native 的 `mcdr_dx12SrQuery` 会给出
-     * `active/picked/eval ok/fail/size/caps/why/last`，直接摊在设置页上，省得玩家为了看这行去翻日志。
-     *
-     * <p>只在这一家就是当前后端时返回内容；每帧一次跨 ABI 调用，且只在设置页打开时才会被调。
-     */
+    /** 运行中的一句话状态（native `mcdr_dx12SrQuery` 直出）；只在设置页打开时调。 */
     @JvmStatic
     fun runtimeLine(backend: Int): Component {
         if (backendId() != backend) {
@@ -284,12 +223,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
         }
     }
 
-    /**
-     * 该后端现在是不是**缺东西**（运行库 / 驱动 / ABI 入口）。
-     *
-     * 只给界面上色用：缺东西时那行状态显示成红色 —— 灰色小字在一屏幕设置里太容易被
-     * 当成装饰跳过，而「打了勾但根本跑不了」正是最需要被看见的一种状态。
-     */
+    /** 该后端是否缺东西（运行库 / 驱动 / ABI）；界面据此标红。 */
     @JvmStatic
     fun isBackendMissing(backend: Int): Boolean = MCDR_ABI.querySrCaps(backend)?.available == false
     /** 后端 id → 显示名（**专有名词不翻译**：DLSS / FSR / XeSS 在各语言里都这么写）。 */
@@ -304,18 +238,14 @@ private const val DEFAULT_RENDER_PERCENT = 75
     /** 后端自己报的可用性/原因；DLL 没有该导出时返回 null。 */
     @JvmStatic
     fun caps(): MCDR_ABI.SrCaps? = MCDR_ABI.querySrCaps(backendId())
-    // ------------------------------------------------------------------
-    // 用户 m01923：把 SR 的开关接进「视频设置 → Illusion 设置」。
-    // 两个厂商开关共用**一个**当前后端（[SrBackend]），所以点开一家会把另一家关掉；
-    // DLSS 的开关留在 NVIDIA 段（它同时管渲染比例与挡位），不参与这套互斥。
-    // ------------------------------------------------------------------
+    // 两个厂商开关共用一个当前后端（互斥）；DLSS 的开关在 NVIDIA 段，不参与。
 
     /** `options.txt` 键：选中的后端（[SrBackend] 的枚举名）。 */
     const val OPTIONS_KEY_BACKEND: String = "dxrMcSrBackend"
 
     /** `options.txt` 键：锐度百分比（0..100，打包进载荷时除以 100）。 */
     const val OPTIONS_KEY_SHARPNESS: String = "dxrMcSrSharpness"
-    /** P292b：半透明遮罩开关。UI 里能改，默认取 TOML 的 `[sr] mask`。 */
+    /** 半透明遮罩开关；未设置时跟随 TOML `[sr] mask`。 */
     const val OPTIONS_KEY_MASK: String = "dxrMcSrMask"
 
     /** 当前后端；`null` = 还没初始化（首次访问从 `[sr] backend` 取初始值）。 */
@@ -325,7 +255,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
     /** 正在同步两个开关时置位，避免 `OptionInstance.set` 的回调打回来。 */
     private var syncingOptions = false
 
-    /** P292b：null = 还没被 options.txt 或界面覆盖过，此时跟随 TOML 的 `[sr] mask`。 */
+    /** null = 未被 options.txt / 界面覆盖过，此时跟随 TOML `[sr] mask`。 */
     @Volatile
     private var maskOverride: Boolean? = null
 
@@ -364,22 +294,16 @@ private const val DEFAULT_RENDER_PERCENT = 75
     /** `options.txt` 键：XeSS 的质量档（[QUALITY_NAMES] 下标）。 */
     const val QUALITY_OPTIONS_KEY_XESS: String = "dxrMcSrXessQuality"
 
-    /**
-     * 质量档名，与 DLSS 的 `QUALITY_NAMES` 同序同名：0=极致性能、1=性能、2=平衡、3=质量、
-     * 4=原生分辨率（FSR 的 NativeAA / XeSS 的 AA —— 这一档不再降渲染比例）。
-     */
+    /** 与 DLSS `QUALITY_NAMES` 同序同名；下标 4 = 原生分辨率（不降比例）。 */
     private val QUALITY_NAMES: List<String> =
         listOf("ultra_performance", "performance", "balanced", "quality", "native_aa")
 
     /** 「原生分辨率」那一档的下标；选中它就不替用户降渲染比例。 */
     private const val NATIVE_AA_TIER: Int = 4
 
-    /** 质量档 -> 渲染比例百分比。前四档与 DLSS 的 `percentForTier` 完全一致。 */
+    /** 质量档 -> 渲染比例（前四档与 DLSS `percentForTier` 一致）。 */
     private fun percentForQuality(tier: Int): Int = when {
-        // P291f（用户 m03752）：DLSS 的极致性能档不能用 33% —— NGX 要求 render >= target/3
-        // （2560/3 = 853.33），33% 只给 844x440，NGX 会报「Dynamic scaling error ... outside
-        // of Min ... Max」并交出一张空纹理（世界黑、GUI 正常）。这一档向上取整到 34%；
-        // 对 FSR / XeSS 只是多画 1% 的像素。
+        // 极致性能档必须 34 不能 33：NGX 要求 render >= target/3，33% 会报 Dynamic scaling error 并交回空纹理（世界全黑）。
         tier <= 0 -> 34
         tier == 1 -> 50
         tier == 2 -> 59
@@ -432,12 +356,8 @@ private const val DEFAULT_RENDER_PERCENT = 75
     }
 
     /**
-     * 质量档拨动时把渲染比例推到对应百分比。
-     *
-     * 只在该后端**正在跑**时动手：否则用户在 FSR 那一行上拨档，会悄悄改掉 DLSS / XeSS 的渲染比例。
-     * 走 [D3D12RenderScale.setPercentAtFrameBoundary]（P282c）：帧中间改比例会让本帧后半段的
-     * world-layer 目标与主目标附件尺寸不一致，`RenderTarget.copyDepthFrom` 直接抛
-     * IllegalArgumentException。
+     * 拨档位时把渲染比例推到该档标称值；只在该后端**正在跑**时动手（否则会改掉别家的比例）。
+     * 走 [D3D12RenderScale.setPercentAtFrameBoundary]：帧中间改会让 copyDepthFrom 抛尺寸不匹配。
      */
     private fun applyQuality(target: SrBackend, tier: Int) {
         if (currentBackend() != target) {
@@ -471,30 +391,20 @@ private const val DEFAULT_RENDER_PERCENT = 75
     @JvmStatic
     fun maskOption(): OptionInstance<Boolean> = MASK_OPTION
 
-    /** P292b：界面 / options.txt 的覆盖优先，没覆盖就跟随 TOML。 */
+    /** 界面 / options.txt 的覆盖优先，没覆盖就跟随 TOML。 */
     @JvmStatic
     fun mask(): Boolean = maskOverride ?: D3D12Settings.srMask
 
-    /**
-     * 当前后端是否吃遮罩。DLSS 走 NGX，没有遮罩输入（caps.takesMasks == 0），那一行拨了也不会有
-     * 效果，设置页据此置灰。
-     */
+    /** 当前后端是否吃遮罩；DLSS 的 `takesMasks == 0`，设置页据此置灰。 */
     @JvmStatic
     fun maskSupported(): Boolean = (cachedCaps(backendId())?.takesMasks ?: 0) != 0
 
     /**
-     * 启动期的配置自检（P291l）：把"档位与渲染比例不匹配"这类**会在进世界后变成黑屏或糊屏**的
-     * 组合提前说出来，而不是等玩家看到画面才发现。只读配置、不碰设备，可以在客户端初始化时调用。
-     *
-     * <p>DLSS 那条的判据来自 P291f/P291h：`percent < 100/nominal` 时 NGX 会拒帧（世界黑），
-     * 我们会在第一帧把比例抬上去 —— 但"偷偷改玩家的设置"这件事本身就该在日志里留痕。
+     * 启动期配置自检：只读配置、不碰设备，把「档位与渲染比例不匹配」这类会变成黑屏的组合提前说出来。
      */
     @JvmStatic
     fun validateAtStartup() {
-        // P291m：只能在客户端建好之后调（模组构造期 Minecraft.getInstance() 为 null）。
-        if (Minecraft.getInstance() == null) {
-            return
-        }
+        // 只能在客户端建好之后调（模组构造期 Minecraft.getInstance() 为 null）。
         val wanted = currentBackend()
         if (wanted != SrBackend.DLSS) {
             return
@@ -518,12 +428,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
     fun backend(): SrBackend = currentBackend()
 
     /**
-     * DLSS 那一行被拨动时同步"当前后端"（P239）。
-     *
-     * `[sr] backend` 的默认值是 [SrBackend.NONE]，而 DLSS 自己的开关在 NVIDIA 段，是另一条管道。
-     * 结果是「后端 = NONE + DLSS 勾上」时 [isEnabled] 仍是 false（一次都不升采样），而视频设置又把
-     * DLSS 那一行按"后端不是 DLSS"置灰 —— 两边合起来就是死锁（用户 m03463 实测"超分被锁了开不起来"）。
-     * 所以 DLSS 打开时顺手认领后端；关掉时只在后端本来就是 DLSS 的情况下退回 NONE，不碰 FSR / XeSS。
+     * DLSS 开关拨动时认领 / 归还「当前后端」：后端 = NONE 而 DLSS 勾上会让 [isEnabled] 恒 false、那行又置灰（死锁）。
      */
     @JvmStatic
     fun onDlssToggle(enabled: Boolean) {
@@ -538,8 +443,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
 
     private fun currentBackend(): SrBackend {
         backend?.let { return it }
-        // 首次访问：`[sr] backend` 是初始值。`options.txt` 里有记录时 [load] 会覆盖它，
-        // 于是"配置文件给默认、游戏内改动落在 options.txt"两件事各归各位。
+        // 首次访问取 `[sr] backend`；options.txt 的 [load] 会覆盖它。
         val initial = D3D12Settings.srBackend
         backend = initial
         syncOptions(initial)
@@ -548,12 +452,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
     }
 
     private fun syncOptions(selected: SrBackend) {
-        // P291m：`OptionInstance.set` 内部会问 `Minecraft.getInstance().isRunning()`，而模组构造期
-        // 那个单例还是 null —— 启动自检因此把游戏打崩过一次。选项值只是界面镜像，客户端没建好
-        // 之前不同步也不丢信息（真值在 `[sr] backend` 与 `options.txt` 里）。
-        if (Minecraft.getInstance() == null) {
-            return
-        }
+        // `OptionInstance.set` 会问 `Minecraft.getInstance().isRunning()`，模组构造期那个单例是 null。
         syncingOptions = true
         try {
             FSR_OPTION.set(selected == SrBackend.FSR)
@@ -564,24 +463,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
     }
 
     /**
-     * 两个开关共用一个当前后端。
-     *
-     * <p>这里**不**调 `mcdr_dx12SrDestroy`：那会在可能还有打开命令列表时销毁上下文。换成把
-     * [createdFor] / [lastKey] 清空 —— 下一帧 `createKey` 里带着后端号，native 的
-     * `ensureProvider` 会先放掉旧 provider 再建新的（它自己保证 GPU 追平）。
-     */
-    /**
-     * P300b：把「用户选的是哪一家超分」告诉 native。
-     *
-     * <p>为什么需要：帧生成的可用性判据要问「SR 是不是 DLSS」，而 native 原来只有 `gSrPicked`，
-     * 只有 `mcdr_dx12SrPick` 会写它 —— JVM 侧**从来没调过**这个导出（只调 `SrCreate`），于是那个
-     * 判据恒等于"没选后端"，等于没有门控（2026-10-27 实测：`[sr] backend` 选 XESS + 帧生成开，
-     * `[FG]` 仍报 `available=1 note="DLSS-G ready"`）。
-     *
-     * <p>为什么按「选的」而不是「正在跑的」：比例 100% 时 FSR / XeSS 根本不跑（门面会拦下并记
-     * `xess did not run this frame`），但这时 DLSS 也已经 stand down（日志：`P108: standing down:
-     * the SR backend in options.txt is XESS`）—— 按「正在跑的」判会把这种情况当成"没超分"，
-     * 那是假的。选的那家才是意图。
+     * 把「用户选的是哪一家」推给 native：帧生成的可用性判据读它。推的是**选中**的后端，不是正在跑的那个。
      */
     private fun pushBackendToNative(selected: SrBackend) {
         try {
@@ -591,6 +473,10 @@ private const val DEFAULT_RENDER_PERCENT = 75
         }
     }
 
+    /**
+     * 切后端。**不调 `mcdr_dx12SrDestroy`**：那一刻可能还有打开的命令列表；只清 [createdFor] / [lastKey]，
+     * 由 native 的 `ensureProvider` 放掉旧 provider（它自己保证 GPU 已追平）。
+     */
     private fun requestBackend(requested: SrBackend) {
         if (syncingOptions) {
             return
@@ -600,8 +486,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
             return
         }
         if (requested == SrBackend.FSR || requested == SrBackend.XESS) {
-            // DLAA 把渲染比例锁在 100%（锁在 [D3D12RenderScale.setPercent] 里），而 100% 时没有东西
-            // 可以升采样。与其"勾了没反应"，不如明确拒绝并把原因写清楚。
+            // DLAA 把比例锁在 100%，那里没有可放大的东西：明确拒绝并写清原因。
             if (D3D12RenderScale.isLockedByDlaa()) {
                 Illusion.LOGGER.warn(
                     "cannot switch to {} while DLAA is active; turn DLAA off first",
@@ -610,11 +495,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
                 syncOptions(previous)
                 return
             }
-            // 100% 时 FSR / XeSS 无事可做（门面会拦下并记一条 note）。用户刚在界面上勾了它，就把比例
-            // 降到一个能用的默认档，而不是让画面看起来"什么都没发生"。
-            // 勾上这一家就等于"按它自己的质量档出图"：以前只在比例还是 100% 时才设，结果从
-            // DLSS 的 58% 切到 FSR 时比例停在 58%，而 FSR 那行显示的是"极致性能"（33%/34%）——
-            // 行的数值与实际不符。现在只要不是"原生分辨率"档就对齐到该档的名义比例。
+            // 勾上这一家 = 按它自己的质量档出图：不对齐会让「行的显示值」与实际比例不符（如从 DLSS 的 58% 切来）。
             val tier = qualityOf(requested)
             val nominal = percentForQuality(tier)
             if (tier != NATIVE_AA_TIER && D3D12RenderScale.percent() != nominal) {
@@ -671,14 +552,8 @@ private const val DEFAULT_RENDER_PERCENT = 75
         createdFor = ""
         lastKey = ""
         lastState = ""
-        // 读盘时就把「另一个后端要用」这件事落实：`options.txt` 里 backend 是 FSR / XeSS、而
-        // `dxrMcDlss` 还是 true 是**升级上来最常见**的组合（DLSS 曾经是唯一的超分）。
-        // 不在这里让位，DLSS 会先跑起来、把渲染缩放切到它自己的档（58%），再被门面在帧中间关掉 ——
-        // 实测那种顺序会让速度通道此后一直没纹理（`recorded=-1 current=false`），FSR 一帧都评不了。
-        //
-        // P239：`NONE` 不算"另一家"——它只是"还没选过后端"。此时 `dxrMcDlss` 若为 true（P239 之前
-        // DLSS 是唯一超分，升级上来就是这种组合），把它认作 DLSS，而不是把用户唯一能用的超分静默关掉
-        // （用户 m03463 的"超分被锁了开不起来"就是这条 standDown 加上行锁一起造成的死锁）。
+        // options.txt 里 backend = FSR/XeSS 而 dxrMcDlss 仍为 true 是升级用户最常见的组合：必须在这里让位，
+        // 否则 DLSS 先跑起来改了比例再被中途关掉，速度通道此后一直没纹理。NONE 不算「另一家」。
         val wanted = currentBackend()
         if (wanted == SrBackend.NONE && DeepLearningSuperSampling.isEnabled()) {
             requestBackend(SrBackend.DLSS)
@@ -718,30 +593,21 @@ private const val DEFAULT_RENDER_PERCENT = 75
         }
     }
 
-    /**
-     * 帧内挂点（`GameRendererSmaaWorldMixin`）：世界层已画完、GUI 还没开始的那一刻。
-     *
-     * DLSS 分支一行不改地委托出去；FSR / XeSS 走 [evaluateOther]。
-     */
+    /** 帧内挂点（`GameRendererSmaaWorldMixin`：SMAA 之后、`prepareForGui` 之前）。DLSS 原样委托。 */
     @JvmStatic
     fun applyIfEnabled() {
         when (backendId()) {
             MCDR_ABI.SR_BACKEND_NONE -> releaseIfCreated()
             MCDR_ABI.SR_BACKEND_DLSS -> {
-                // 从 FSR / XeSS 切回 DLSS：先把**我们**打开的数据面还原，让 DLSS 用自己的记账
-                // 重新打开它（否则 ownership 落在本类手里，DLSS 退出时不会关掉 jitter，
-                // 就成了 P218 那个形态）。同一帧内 DLSS 会立刻再置 true，不存在空档。
+                // 从 FSR / XeSS 切回 DLSS：先还原我们打开的数据面，让 DLSS 用自己的记账重新打开。
                 if (forcedTemporal || forcedVelocity) {
                     releaseDataPlane()
                 }
                 DeepLearningSuperSampling.applyIfEnabled()
             }
             else -> {
-                // 心跳只在调试级别：它每帧都会被调用，INFO 会刷屏。
-                // 一家在写、另一家必须让位：DLSS 与 FSR/XeSS 都往同一张颜色图上写，而
-                // `reconcileAntiAliasing` 每帧按 `options.dlss` 重新对齐 native 闸门，所以只关闸门不够。
-                // 让位动作排到帧边界（`Minecraft.schedule`）：它会把渲染缩放从 DLSS 档切回普通档，
-                // 帧中间改比例正是 P282c 那次 `copyDepthFrom` 崩溃的形态。
+                // 一家在写、另一家必须让位：只关闸门不够（`reconcileAntiAliasing` 每帧按 options.dlss 对齐）。
+                // 让位排到帧边界：它会把渲染比例从 DLSS 档切回普通档，帧中间改会打穿 `copyDepthFrom`。
                 if (DeepLearningSuperSampling.isDlaaActive()) {
                     return note(
                         "DLAA is engaged (anti-aliasing = DLAA); switch it off to let " +
@@ -779,10 +645,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
         }
     }
 
-    /**
-     * 换后端 / 关掉时把 native 的上下文放掉。`mcdr_dx12SrDestroy` 在 native 侧幂等
-     * （provider 为空就什么都不做），所以这里不必重复判断。
-     */
+    /** 放掉 native 上下文（`mcdr_dx12SrDestroy` 幂等）并还回数据面。 */
     @JvmStatic
     fun releaseIfCreated() {
         if (createdFor.isNotEmpty()) {
@@ -794,13 +657,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
         releaseDataPlane()
     }
 
-    /**
-     * 把**我们**打开的数据面还回去。
-     *
-     * 与 `DeepLearningSuperSampling.leaveDlssMode` 同一条纪律：只还原"是我们打开的"那两个字段，
-     * 配置本来就要它们时不动。不还原会让 `[sr] backend = none` 之后 jitter / 速度通道继续跑 ——
-     * 那正是 P218「关了超分画面还在抖」的形态。
-     */
+    /** 只还原**我们**打开的那两个字段；否则 backend=none 之后 jitter / 速度通道还在跑（画面还在抖）。 */
     private fun releaseDataPlane() {
         if (forcedTemporal) {
             forcedTemporal = false
@@ -813,12 +670,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
         lastVelocityRetryNanos = Long.MIN_VALUE
     }
 
-    /**
-     * FSR / XeSS 与 DLSS 一样吃 jitter + 运动矢量两条数据，而这两条在构建期默认关闭
-     * （`Illusion\build.gradle` 的 `dxrmc.temporal*`）。这里做 DLS 的
-     * `ensureDataPlaneReady` + `retryVelocityIfLatched` 的等价动作，**幂等**且只在满足前提后调用
-     * （否则就会重演 P218：没有任何消费者却一直在抖）。
-     */
+    /** 幂等：补齐 jitter + 速度通道（构建期默认关闭）。只在这一帧真的会升采样之后调。 */
     private fun ensureDataPlane() {
         if (!D3D12Temporal.enabled) {
             D3D12Temporal.enabled = true
@@ -838,8 +690,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
         if (!D3D12Velocity.isLatched()) {
             return
         }
-        // 速度通道的自我关闭是一票否决的：只把 enabled 置回去不撤不回失败的构建步骤，
-        // 必须清闩锁。限速一秒一次，别每帧重建资源（P108e）。
+        // 速度通道的自我关闭是一票否决：必须清闩锁，且限速一秒一次，别每帧重建资源。
         val now = System.nanoTime()
         if (lastVelocityRetryNanos != Long.MIN_VALUE
             && now - lastVelocityRetryNanos < VELOCITY_RETRY_NANOS) {
@@ -849,12 +700,10 @@ private const val DEFAULT_RENDER_PERCENT = 75
         D3D12Velocity.forceEnable()
     }
 
-    // ------------------------------------------------------------------
     // FSR / XeSS 的每帧路径
-    // ------------------------------------------------------------------
 
     private fun evaluateOther() {
-        // P291l/P291m：启动自检放在这里 —— 第一次真正要跑超分的那一帧，客户端与配置都已就位。
+        // 启动自检放在这里：第一次真要跑超分的那一帧，客户端与配置都已就位。
         if (!startupChecked) {
             startupChecked = true
             try {
@@ -885,11 +734,8 @@ private const val DEFAULT_RENDER_PERCENT = 75
         if (depth == null) {
             return note("the main render target has no D3D12 depth texture")
         }
-        // 世界切换/维度加载时主目标会整批重建：旧纹理的 Java 对象可能还在（我们延迟销毁），
-        // 但 native 资源已经释放。这一帧若还把它们塞进 SR/FG 的 dispatch，native 侧
-        // `ffxApiGetResourceDX12` 会在 `pRes->GetDesc()` 上撞野指针直接崩（2026-10-28 12:58
-        // 的 hs_err：ffxApiGetResourceDX12+0x4f ← applyFrameLocked ← tagFrameInputs）。
-        // 宁可让这一帧不升采样/不插帧，也不能崩。
+        // 世界切换 / 维度加载会整批重建主目标：Java 对象可能还在但 native 资源已释放，塞进 dispatch 会在
+        // native 里撞野指针。宁可这一帧不升采样。
         if (color.isClosed() || depth.isClosed()) {
             return note("the world layer's color/depth was released this frame (world transition)")
         }
@@ -910,17 +756,15 @@ private const val DEFAULT_RENDER_PERCENT = 75
         val renderHeight = color.getHeight(0)
         val displayWidth = guiColor.getWidth(0)
         val displayHeight = guiColor.getHeight(0)
-        // P291i：低于能力下限（caps 里报的 320x180）时后两端都给不出有效结果，直接被 SDK 拒绝；
-        // 与 DLSS 那条"低于名义输入就抬比例"的兜底同理，这里也把比例抬到够用为止（只做一次，
-        // 否则玩家故意拖小会被反复顶回去）。
-        // SrCaps 目前没有把 min 尺寸透出来（native 里是 320x180 写死的），先与 native 保持一致。
+        // 低于能力下限（320x180）后两端都会被 SDK 拒绝：抬一次比例（只做一次，否则会跟故意拖小的玩家抢）。
+        // SrCaps 没透出 min 尺寸，这里与 native 写死的值保持一致。
         val minRenderWidth = MIN_RENDER_WIDTH
         val minRenderHeight = MIN_RENDER_HEIGHT
         if (renderWidth < minRenderWidth || renderHeight < minRenderHeight) {
             if (!autoScaleAdjusted) {
                 val needed = maxOf(
-                    Math.ceil(minRenderWidth * 100.0 / renderWidth).toInt(),
-                    Math.ceil(minRenderHeight * 100.0 / renderHeight).toInt(),
+                    ceil(minRenderWidth * 100.0 / renderWidth).toInt(),
+                    ceil(minRenderHeight * 100.0 / renderHeight).toInt(),
                 ).coerceIn(D3D12RenderScale.minimumPercent(), 100)
                 autoScaleAdjusted = true
                 D3D12RenderScale.setPercentAtFrameBoundary(needed)
@@ -928,24 +772,18 @@ private const val DEFAULT_RENDER_PERCENT = 75
             }
             return note("render ${renderWidth}x$renderHeight is below the ${backendName(backend)} minimum of ${minRenderWidth}x$minRenderHeight; raise the render scale")
         }
-        if (renderWidth <= 0 || renderHeight <= 0 || displayWidth <= 0 || displayHeight <= 0) {
+        if (displayWidth <= 0 || displayHeight <= 0) {
             return note("degenerate sizes: render ${renderWidth}x$renderHeight, "
                 + "display ${displayWidth}x$displayHeight")
         }
-        // **输出必须是带 `USAGE_STORAGE` 的纹理**：native 的 `textureFlags()` 只有看到
-        // `usage & 32` 才加 `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS`，而 FSR / XeSS 都要
-        // 往输出上写 UAV。GUI 目标是普通 `RenderTarget`（没有 STORAGE），直接当 `pColorOutput`
-        // 会让那次 UNORDERED_ACCESS 屏障在 `Close()` 时报 E_INVALIDARG（实测
-        // `endCommandList: Close HRESULT 0x80070057`），所以借用 DLSS 那张 JVM 建的 UAV 纹理，
-        // 成功后再 blit 进 GUI 目标。
+        // **输出必须是带 `USAGE_STORAGE` 的纹理**：native 的 textureFlags() 只在 `usage & 32` 时加
+        // ALLOW_UNORDERED_ACCESS；拿 GUI 目标当 pColorOutput 会让 UAV 屏障在 Close() 报 E_INVALIDARG。
         val output = DLSSOutput.textureForFrame(displayWidth, displayHeight)
         if (output == null) {
             return note("could not create the display-sized UAV output texture")
         }
         if (renderWidth == displayWidth && renderHeight == displayHeight) {
-            // 100% 时没有东西可以升采样。界面上的勾选（`requestBackend`）已经会顺手降档，但配置
-            // 文件里写死 `backend = "FSR"` + 100% 时仍然会撞到这里，所以这里再自愈一次：降一次档，
-            // 下一帧就有活干了。DLAA 锁死 100% 的情况除外（那本来就不该用 FSR / XeSS）。
+            // 100% 没有可放大的内容（options.txt 里写死 backend + 100% 会撞到这里）：降一次档到滑条吸附值 75。
             if (!autoScaleAdjusted && D3D12RenderScale.percent() >= 100
                 && !D3D12RenderScale.isLockedByDlaa()
             ) {
@@ -958,21 +796,18 @@ private const val DEFAULT_RENDER_PERCENT = 75
                 + "set the render scale below 100% so there is a real upscale to do")
         }
 
-        // 相位长度：把后端期望的样本数交给唯一的抖动源（P274）。DLSS 是"让后端接受我们的序列"，
-        // FSR 换到它自己的相位表长度，XeSS 保持 8。
+        // 相位长度交给唯一的抖动源：DLSS 接受我们的序列，FSR / XeSS 用自己相位表的长度。
         D3D12Temporal.adoptPhaseCount(backend,
             MCDR_ABI.D3D12SrJitterPhaseCount(backend, renderWidth, displayWidth))
 
-        // 数据面：jitter 与速度通道在构建期默认关闭，选了 SR 必须打开（否则 native 拿到空句柄）。
-        // 放在所有"这次真的会升采样"的前提之后，避免重演 P218（没有消费者却在抖）。
+        // 数据面：jitter / 速度通道构建期默认关闭；放在「这一帧真会升采样」之后，避免没有消费者却在抖。
         ensureDataPlane()
 
-        // 速度通道：与 DLSS 同一个挂点、同一份兜底调用（本帧已录过时它自己会跳过）。
-        // 首帧没有历史（上一帧没有 jitter 数据）→ 必然为空，第二帧起才有值。
+        // 与 DLSS 同一个挂点、同一份兜底（本帧已录过时会自己跳过）；首帧没有历史必然为空。
         encoder.recordVelocityPass()
         val motionVectors = D3D12Velocity.currentHandle()
         if (motionVectors == 0L) {
-            // 每帧都会到这里时，一行诊断比"什么都没跑"有用（按秒限流，不刷屏）。
+            // 每帧都到这里时，一行诊断比「什么都没跑」有用（按秒限流）。
             val now = System.nanoTime()
             if (now - lastVelocityDiagNanos > VELOCITY_DIAG_NANOS) {
                 lastVelocityDiagNanos = now
@@ -1001,12 +836,11 @@ private const val DEFAULT_RENDER_PERCENT = 75
         lastKey = frameKey
 
         val camera = minecraft.gameRenderer.gameRenderState().levelRenderState.cameraRenderState
-        val farPlane = if (camera != null && camera.depthFar > 0.0f) camera.depthFar else FALLBACK_FAR
+        val farPlane = if (camera.depthFar > 0.0f) camera.depthFar else FALLBACK_FAR
         val fov = fovFromProjection(D3D12Temporal.currentProjection())
         val sharpness = sharpness()
 
-        // P276：可选 reactive / responsive 掩码。产生器必须与 evaluate 用同一条命令列表，
-        // 所以在这里做（列表已打开、还没提交）；关掉配置时传 0 = "没有这张纹理"。
+        // 掩码产生器必须与 evaluate 同一条命令列表；关掉配置时传 0（= 没有这张纹理）。
         val mask = if (mask()) D3D12SrMask.produce(encoder, renderWidth, renderHeight) else 0L
         if (mask() && mask == 0L) {
             note("the super-resolution mask producer did not run: " + D3D12SrMask.note())
@@ -1032,8 +866,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
                 desc.set(F32, OFF_FOV, fov)
                 desc.set(F32, OFF_SHARPNESS, sharpness)
                 desc.set(I32, OFF_RESET, if (reset) 1 else 0)
-                // P288 之前一律按 SDR 处理：native 侧据此决定要不要置 FSR 的
-                // FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE。
+                // 一律按 SDR 处理：native 据此决定要不要置 FSR 的 HIGH_DYNAMIC_RANGE。
                 desc.set(I32, OFF_HDR, 0)
                 desc.set(I32, OFF_BACKEND, backend)
                 desc.set(I32, OFF_FLAGS, 0)
@@ -1041,15 +874,13 @@ private const val DEFAULT_RENDER_PERCENT = 75
                 desc.set(PTR, OFF_COLOR_OUT, MemorySegment.ofAddress(output.handle()))
                 desc.set(PTR, OFF_DEPTH, MemorySegment.ofAddress(depth.handle()))
                 desc.set(PTR, OFF_MV, MemorySegment.ofAddress(motionVectors))
-                // P276：掩码由 D3D12SrMask 在同一条列表上先画出（0 = 没做成，native 侧跳过）；
-                // 曝光仍传 0（native 把 preExposure 当常数用）。
+                // 掩码在同一条列表上先画好（0 = 没做成，native 跳过）；曝光传 0，native 用 preExposure。
                 desc.set(PTR, OFF_MASK, MemorySegment.ofAddress(mask))
                 desc.set(PTR, OFF_EXPOSURE, MemorySegment.ofAddress(0L))
                 desc.set(I32, OFF_DEPTH_FORMAT, depth.format.ordinal)
                 desc.set(F32, OFF_ASPECT, displayWidth.toFloat() / displayHeight.toFloat())
                 desc.set(F32, OFF_METERS, 1.0f)
-                // P306z：插帧用的相机常量不依赖 SR 后端 —— 每次真出帧都推一份给 FG。
-                // jitter 用与 dispatch 同一个「已加到投影上」的值（含 Y 符号约定）。
+                // 帧生成常量不依赖 SR 后端：每次真出帧都推一份，jitter 用与 dispatch 同一份值。
                 FrameGenerationConstants.push(jitter[0].toFloat(), jitter[1].toFloat() * JITTER_SIGN_Y,
                     reset)
                 MCDR_ABI.D3D12SrEvaluate(encoder.nativeHandle(), desc)
@@ -1063,11 +894,8 @@ private const val DEFAULT_RENDER_PERCENT = 75
         val evalNanos = System.nanoTime() - evalStarted
         when (result) {
             1 -> {
-                // 后端把升采样结果写进了那张 UAV 纹理。
-                //
-                // P306ac：hudless 呈现下它**就是**呈现源 —— 不能搬进 GUI 目标（那张现在是 UI 层：
-                // 透明底 + 界面），直接把世界层交给最终 blit，UI 由帧生成后端合成一次。
-                // 合成模式保持原路径：搬进 GUI 目标，本帧的 prepareForGui 据此跳过自己的世界层 blit。
+                // hudless 下这张 UAV 就是呈现源（不能搬进 GUI 目标，那是 UI 层）；否则搬进 GUI 目标，
+                // 本帧的 prepareForGui 据此跳过世界层 blit。
                 val blitStarted = System.nanoTime()
                 if (D3D12GUISplit.isHudlessArmed()) {
                     D3D12GUISplit.markWorldLayer(output)
@@ -1149,12 +977,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
         }
     }
 
-    /**
-     * Read the whole pool back, drop implausible pairs, log GPU-side p50 / p95.
-     *
-     * <p>Filtering prefers losing a sample to reporting a fake one: a zero front value (the GPU has
-     * not reached that query yet), back <= front, and anything above 100 ms (window rebuilds).
-     */
+    /** 读回整池、丢掉不可信样本，打 GPU 侧 p50 / p95：宁可丢样本也不报假数据（前值 0 / back<=front / >100ms）。 */
     private fun flushGpuSamples() {
         if (gpuPool == 0L) {
             return
@@ -1180,7 +1003,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
         for (i in 0 until GPU_SAMPLES) {
             val front = values[i * 2]
             val back = values[i * 2 + 1]
-            if (front <= 0L || back <= front) {
+            if (front !in 1..<back) {
                 continue
             }
             val ticks = back - front
@@ -1204,13 +1027,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
         )
     }
 
-    /**
-     * 记一帧的录制成本；攒够 [COST_LOG_EVERY] 帧打一行 p50 / p95。
-     *
-     * <p>统计的是**渲染线程的墙上时间**：跨 ABI 调用 + 载荷打包。GPU 那边是异步的，
-     * 所以这几微秒不等于超分的真实开销（真实开销要看 GPU timestamp，P284b 的下一半）。
-     * 它的用处是排除我自己引入的 CPU 抖动（例如每帧多做几次 PathElement 查找）。
-     */
+    /** 记一帧的**渲染线程墙上时间**（跨 ABI + 打包），攒够 [COST_LOG_EVERY] 帧打一行；不是 GPU 开销。 */
     private fun recordCost(evalNanos: Long, blitNanos: Long) {
         evalSamples[sampleCursor % COST_SAMPLES] = evalNanos
         blitSamples[sampleCursor % COST_SAMPLES] = blitNanos
@@ -1243,7 +1060,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
         return ms.toFloat().coerceIn(1.0f, 200.0f)
     }
 
-    /** 透视投影反算垂直 FOV（弧度）：m11 = 1/tan(fovY/2)，列主序落 index 5。与 P275 的 DLSS 侧一致。 */
+    /** 透视投影反算垂直 FOV（弧度）：m11 = 1/tan(fovY/2)，列主序在 index 5。 */
     private fun fovFromProjection(proj: FloatArray?): Float {
         if (proj != null && proj.size > 5) {
             val m11 = proj[5]

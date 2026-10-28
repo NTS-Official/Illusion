@@ -7,7 +7,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-/** P51：地形顶点/索引每帧上传到 GPU 的耗时（可能是同步气泡）。 */
+/** 地形顶点/索引每帧上传到 GPU 的耗时（可能是同步气泡）。 */
 @Mixin(SectionRenderDispatcher.class)
 public class SectionRenderDispatcherProfMixin {
     @Inject(method = "uploadTerrainBuffersToGpu", at = @At("HEAD"), remap = false)
