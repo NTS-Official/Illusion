@@ -8,7 +8,7 @@ import java.lang.foreign.ValueLayout
 import java.util.*
 
 /**
- * Mirror of the C aggregates declared in `MCDR/include/mcdr_abi.h`; see docs/misc/ffm-abi.md §2.2.
+ * Mirror of the C aggregates declared in `MCDR/include/mcdr_abi.h`; see docs/misc/ffm-abi.md §1.2.
  *
  * <p><b>[MemoryLayout.structLayout] inserts NO padding.</b> Every pad byte the C compiler would
  * insert must appear here explicitly — named `_padN` where the header names one, else
@@ -259,7 +259,7 @@ object MCDRLayout {
         MemoryLayout.sequenceLayout(16L, F32).withName("projection")
     ).withName("mcdr_dlss_constants")
 
-    // mcdr_sr_caps — 字段名/顺序必须与 mcdr_abi.h 的 typedef 逐字一致（见 docs/misc/ffm-abi.md §2.2）。
+    // mcdr_sr_caps — 字段名/顺序必须与 mcdr_abi.h 的 typedef 逐字一致（见 docs/misc/ffm-abi.md §1.2）。
     // `note` 是 `char note[28]`：必须写成**一个有名字段**，拆成 28 个 I8 会让 describe() 的名字对不上。
     @JvmField
     val SR_CAPS: MemoryLayout = MemoryLayout.structLayout(

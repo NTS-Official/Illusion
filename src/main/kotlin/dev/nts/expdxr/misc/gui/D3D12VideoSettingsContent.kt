@@ -19,7 +19,19 @@ import net.minecraft.network.chat.Component
 import java.util.Optional
 import java.util.concurrent.CopyOnWriteArrayList
 
-class D3D12VideoSettingsPage(val name: Component, val entries: List<D3D12VideoSettingsEntry>)
+/**
+ * 一页设置。有 `subPages` 时：`entries` 固定在子页签上方，`trailingEntries` 接在子页内容下方；
+ * 没有子页时两者按顺序铺在一起。
+ */
+class D3D12VideoSettingsPage(
+    val name: Component,
+    val entries: List<D3D12VideoSettingsEntry> = emptyList(),
+    val subPages: List<D3D12VideoSettingsSubPage> = emptyList(),
+    val trailingEntries: List<D3D12VideoSettingsEntry> = emptyList(),
+)
+
+/** 二级子页：标题与行。 */
+class D3D12VideoSettingsSubPage(val name: Component, val entries: List<D3D12VideoSettingsEntry>)
 
 sealed interface D3D12VideoSettingsEntry {
     class Heading(val text: Component) : D3D12VideoSettingsEntry
@@ -109,80 +121,107 @@ open class D3D12VideoSettingsContent {
         )
     }
 
-    protected open fun illusionPage(): D3D12VideoSettingsPage = D3D12VideoSettingsPage(
-        translatable("dxr_mc.video.tab.illusion"),
-        listOfNotNull(
-            D3D12VideoSettingsEntry.Setting(D3D12RenderScale.option()),
-            D3D12VideoSettingsEntry.Heading(Component.empty()),
-            D3D12VideoSettingsEntry.Heading(translatable("dxr_mc.video.group.vrs")),
-            D3D12VideoSettingsEntry.Setting(D3D12VariableShadingRate.option()),
-            D3D12VideoSettingsEntry.Heading(Component.empty()),
-            D3D12VideoSettingsEntry.Heading(translatable("dxr_mc.video.group.nvidia")),
-            D3D12VideoSettingsEntry.Note(DeepLearningSuperSampling.statusLine()),
-            D3D12VideoSettingsEntry.Setting(DeepLearningSuperSampling.option()),
-            D3D12VideoSettingsEntry.Setting(DeepLearningSuperSampling.presetOption()),
-            D3D12VideoSettingsEntry.Setting(DeepLearningSuperSampling.qualityOption()),
-            D3D12VideoSettingsEntry.Setting(NvidiaReflex.option()),
-            // 帧生成按厂商分段各一个开关，点开一家另外两家自动关（互锁在 FrameGeneration.requestBackend），
-            // 全灭就是不启用；倍率滑条只跟着亮着的那家出现。
-            FrameGeneration.backendOption(MCDR_ABI.FG_BACKEND_DLSSG)?.let { D3D12VideoSettingsEntry.Setting(it) },
-            if (FrameGeneration.isEnabled() && FrameGeneration.activeBackend() == MCDR_ABI.FG_BACKEND_DLSSG) {
-                D3D12VideoSettingsEntry.Setting(FrameGeneration.framesOption())
-            } else {
-                null
-            },
-            // 状态行只说"为什么不能开 / 已就绪"；运行状态行摊 native 的 `[fg] picked=… rebuilds=…`，省得翻日志。
-            if (FrameGeneration.isAvailable() || FrameGeneration.isEnabled()) {
-                D3D12VideoSettingsEntry.Note(FrameGeneration.statusLine(), !FrameGeneration.isAvailable())
-            } else {
-                null
-            },
-            if (FrameGeneration.isEnabled()) D3D12VideoSettingsEntry.Note(FrameGeneration.runtimeLine()) else null,
-            // native 侧回滚了（例如开着帧生成把 SR 后端换成 FSR/XeSS），而行上还写着「开」时
-            // 必须说出来，否则就是界面在说假话。返 null 时不占高度。
-            FrameGeneration.rollbackLine()?.let { D3D12VideoSettingsEntry.Note(it, warning = true) },
-            // 两家非 NVIDIA 后端共用门面里的一个"当前后端"，点开一家另一家自动关（见 SuperResolution.requestBackend）；
-            // 每段形状与 DLSS 段对齐：状态行 -> 开关 -> 质量档，下面再接两家共用的项。
-            D3D12VideoSettingsEntry.Heading(Component.empty()),
-            D3D12VideoSettingsEntry.Heading(translatable("dxr_mc.video.group.amd")),
-            D3D12VideoSettingsEntry.Note(
-                SuperResolution.statusLine(MCDR_ABI.SR_BACKEND_FSR),
-                SuperResolution.isBackendMissing(MCDR_ABI.SR_BACKEND_FSR),
+    protected open fun illusionPage(): D3D12VideoSettingsPage {
+        val nvidia = vendorPage(
+            Component.literal("NVIDIA"), MCDR_ABI.SR_BACKEND_DLSS, MCDR_ABI.FG_BACKEND_DLSSG,
+            DeepLearningSuperSampling.statusLine(), false,
+            listOf(
+                D3D12VideoSettingsEntry.Setting(DeepLearningSuperSampling.option()),
+                D3D12VideoSettingsEntry.Setting(DeepLearningSuperSampling.presetOption()),
+                D3D12VideoSettingsEntry.Setting(DeepLearningSuperSampling.qualityOption()),
+                D3D12VideoSettingsEntry.Setting(NvidiaReflex.option()),
             ),
-            D3D12VideoSettingsEntry.Setting(SuperResolution.fsrOption()),
-            D3D12VideoSettingsEntry.Setting(SuperResolution.fsrQualityOption()),
-            D3D12VideoSettingsEntry.Note(SuperResolution.runtimeLine(MCDR_ABI.SR_BACKEND_FSR)),
-            // AMD 段的帧生成开关（FSR-FG）。互锁见 FrameGeneration.requestBackend。
-            FrameGeneration.backendOption(MCDR_ABI.FG_BACKEND_FSRFG)?.let { D3D12VideoSettingsEntry.Setting(it) },
-            // FSR-FG 的 SDK 只插 1 张（2×），倍率行对它没有意义：给一行说明而不是一个永远只出 2× 的选项。
-            if (FrameGeneration.isEnabled() && FrameGeneration.activeBackend() == MCDR_ABI.FG_BACKEND_FSRFG) {
+        )
+        val amd = vendorPage(
+            Component.literal("AMD"), MCDR_ABI.SR_BACKEND_FSR, MCDR_ABI.FG_BACKEND_FSRFG,
+            SuperResolution.statusLine(MCDR_ABI.SR_BACKEND_FSR),
+            SuperResolution.isBackendMissing(MCDR_ABI.SR_BACKEND_FSR),
+            listOf(
+                D3D12VideoSettingsEntry.Setting(SuperResolution.fsrOption()),
+                D3D12VideoSettingsEntry.Setting(SuperResolution.fsrQualityOption()),
+            ),
+        )
+        val intel = vendorPage(
+            Component.literal("Intel"), MCDR_ABI.SR_BACKEND_XESS, MCDR_ABI.FG_BACKEND_XESSFG,
+            SuperResolution.statusLine(MCDR_ABI.SR_BACKEND_XESS),
+            SuperResolution.isBackendMissing(MCDR_ABI.SR_BACKEND_XESS),
+            listOf(
+                D3D12VideoSettingsEntry.Setting(SuperResolution.xessOption()),
+                D3D12VideoSettingsEntry.Setting(SuperResolution.xessQualityOption()),
+            ),
+        )
+
+        return D3D12VideoSettingsPage(
+            translatable("dxr_mc.video.tab.illusion"),
+            // 与厂商无关的行固定在子页签上方，切子页时不动。
+            entries = listOf(
+                D3D12VideoSettingsEntry.Heading(translatable("dxr_mc.video.group.scale")),
+                D3D12VideoSettingsEntry.Setting(D3D12RenderScale.option()),
+                D3D12VideoSettingsEntry.Heading(Component.empty()),
+                D3D12VideoSettingsEntry.Heading(translatable("dxr_mc.video.group.vrs")),
+                D3D12VideoSettingsEntry.Setting(D3D12VariableShadingRate.option()),
+                D3D12VideoSettingsEntry.Heading(Component.empty()),
+                D3D12VideoSettingsEntry.Heading(translatable("dxr_mc.video.group.sr_and_fg"))
+            ),
+            subPages = listOf(nvidia, amd, intel),
+            trailingEntries = listOf(
+                D3D12VideoSettingsEntry.Heading(Component.empty()),
+                D3D12VideoSettingsEntry.Heading(translatable("dxr_mc.video.group.sr_shared")),
+                D3D12VideoSettingsEntry.Setting(SuperResolution.maskOption()),
+                D3D12VideoSettingsEntry.Setting(SuperResolution.sharpnessOption()),
+                D3D12VideoSettingsEntry.Note(translatable("dxr_mc.video.sr.framegen_absent")),
+                D3D12VideoSettingsEntry.Note(translatable("dxr_mc.video.sr.latency_absent")),
+            ),
+        )
+    }
+
+    /** 厂商子页：空行 + 可用性/运行状态，再空一行接该厂商的设置，帧生成开关排在设置最后。 */
+    private fun vendorPage(
+        label: Component,
+        srBackend: Int,
+        fgBackend: Int,
+        srStatus: Component,
+        srMissing: Boolean,
+        vendorSettings: List<D3D12VideoSettingsEntry>,
+    ): D3D12VideoSettingsSubPage {
+        val entries = arrayListOf<D3D12VideoSettingsEntry>()
+        entries += D3D12VideoSettingsEntry.Heading(Component.empty())
+        entries += D3D12VideoSettingsEntry.Note(srStatus, srMissing)
+        val srRuntime = SuperResolution.runtimeLine(srBackend)
+        if (srRuntime.string.isNotEmpty()) {
+            entries += D3D12VideoSettingsEntry.Note(srRuntime)
+        }
+
+        entries += D3D12VideoSettingsEntry.Note(
+            FrameGeneration.statusLine(fgBackend),
+            FrameGeneration.isBackendUnavailable(fgBackend),
+        )
+        if (FrameGeneration.isEnabled() && FrameGeneration.activeBackend() == fgBackend) {
+            val fgRuntime = FrameGeneration.runtimeLine()
+            if (fgRuntime.string.isNotEmpty()) {
+                entries += D3D12VideoSettingsEntry.Note(fgRuntime)
+            }
+            FrameGeneration.rollbackLine()?.let { entries += D3D12VideoSettingsEntry.Note(it, warning = true) }
+        }
+
+        entries += D3D12VideoSettingsEntry.Heading(Component.empty())
+        entries += vendorSettings
+        entries += frameGenerationSettings(fgBackend)
+        return D3D12VideoSettingsSubPage(label, entries)
+    }
+
+    /** 帧生成开关 + 倍率行；FSR-FG 固定只插 1 张，用一行说明代替倍率。 */
+    private fun frameGenerationSettings(fgBackend: Int): List<D3D12VideoSettingsEntry> = listOfNotNull(
+        FrameGeneration.backendOption(fgBackend)?.let { D3D12VideoSettingsEntry.Setting(it) },
+        if (FrameGeneration.isEnabled() && FrameGeneration.activeBackend() == fgBackend) {
+            if (fgBackend == MCDR_ABI.FG_BACKEND_FSRFG) {
                 D3D12VideoSettingsEntry.Note(translatable("dxr_mc.video.fg.fsr.fixed2x"))
             } else {
-                null
-            },
-            D3D12VideoSettingsEntry.Heading(Component.empty()),
-            D3D12VideoSettingsEntry.Heading(translatable("dxr_mc.video.group.intel")),
-            D3D12VideoSettingsEntry.Note(
-                SuperResolution.statusLine(MCDR_ABI.SR_BACKEND_XESS),
-                SuperResolution.isBackendMissing(MCDR_ABI.SR_BACKEND_XESS),
-            ),
-            D3D12VideoSettingsEntry.Setting(SuperResolution.xessOption()),
-            D3D12VideoSettingsEntry.Setting(SuperResolution.xessQualityOption()),
-            D3D12VideoSettingsEntry.Note(SuperResolution.runtimeLine(MCDR_ABI.SR_BACKEND_XESS)),
-            // Intel 段的帧生成开关（XeSS-FG）。
-            FrameGeneration.backendOption(MCDR_ABI.FG_BACKEND_XESSFG)?.let { D3D12VideoSettingsEntry.Setting(it) },
-            if (FrameGeneration.isEnabled() && FrameGeneration.activeBackend() == MCDR_ABI.FG_BACKEND_XESSFG) {
                 D3D12VideoSettingsEntry.Setting(FrameGeneration.framesOption())
-            } else {
-                null
-            },
-            D3D12VideoSettingsEntry.Heading(Component.empty()),
-            D3D12VideoSettingsEntry.Heading(translatable("dxr_mc.video.group.sr_shared")),
-            D3D12VideoSettingsEntry.Setting(SuperResolution.maskOption()),
-            D3D12VideoSettingsEntry.Setting(SuperResolution.sharpnessOption()),
-            D3D12VideoSettingsEntry.Note(translatable("dxr_mc.video.sr.framegen_absent")),
-            D3D12VideoSettingsEntry.Note(translatable("dxr_mc.video.sr.latency_absent")),
-        ),
+            }
+        } else {
+            null
+        },
     )
 
     /** 分辨率滑条（原版 `options.fullscreen.exclusive.mode`）：-1 = 跟随当前模式，其余是 Monitor 的模式下标。 */

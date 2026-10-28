@@ -1,12 +1,15 @@
 package dev.nts.expdxr.misc.gui
 
+import com.mojang.blaze3d.platform.InputConstants
 import net.minecraft.client.Minecraft
 import dev.nts.expdxr.mixin.options.OptionInstanceAccessor
 import dev.nts.expdxr.mixin.options.TooltipAccessor
 import net.minecraft.client.OptionInstance
 import net.minecraft.network.chat.Component
+import net.minecraft.util.ARGB
 import net.minecraft.util.Mth
 import java.util.function.Function
+import kotlin.math.roundToInt
 
 /** 一整行的标题（深色底 + 居中白字）。 */
 class D3D12TitleWidget(x: Int, y: Int, width: Int, private val text: Component) :
@@ -93,6 +96,58 @@ class D3D12TabWidget(
         const val WIDTH: Int = 120
         const val HEIGHT: Int = 25
         private const val TEXT_INSET: Int = 8
+    }
+}
+
+/** 内容区顶部的二级页签：横排，宽度由屏幕按标题文本算好传入；选中时下缘一条紫线。 */
+class D3D12SubTabWidget(
+    x: Int,
+    y: Int,
+    width: Int,
+    private val label: Component,
+    private val selected: () -> Boolean,
+    private val onSelect: () -> Unit,
+) : D3D12Widget(x, y, width, HEIGHT) {
+
+    private var animation: Double = if (selected()) 1.0 else 0.0
+
+    override fun render(renderer: D3D12WidgetRenderer, mouseX: Int, mouseY: Int, delta: Float) {
+        animation = if (selected()) {
+            Mth.clamp(animation + delta * 6.0, 0.0, 1.0)
+        } else {
+            Mth.clamp(animation - delta * 6.0, 0.0, 1.0)
+        }
+
+        renderer.rect(x, y, x + width, y + height, if (isMouseOver(mouseX, mouseY)) BG_HOVERED else BG)
+        val available = width - TEXT_INSET
+        val flat = label.string
+        val shown = if (renderer.textWidth(label) > available) {
+            Minecraft.getInstance().font.plainSubstrByWidth(flat, available - renderer.textWidth("...")) + "..."
+        } else {
+            flat
+        }
+        renderer.text(shown, x + (width - renderer.textWidth(shown)) / 2, centerTextY(renderer), if (selected()) WHITE else DISABLED)
+
+        if (animation > 0.0) {
+            renderer.pushAlpha(animation)
+            renderer.rect(x, y + height - 1, x + width, y + height, ACCENT)
+            renderer.popAlpha()
+        }
+    }
+
+    override fun mouseClicked(mouseX: Double, mouseY: Double, button: Int): Boolean {
+        if (!isMouseOver(mouseX, mouseY)) {
+            return false
+        }
+
+        playClickSound()
+        onSelect()
+        return true
+    }
+
+    companion object {
+        const val HEIGHT: Int = 18
+        private const val TEXT_INSET: Int = 4
     }
 }
 
@@ -491,7 +546,7 @@ class D3D12OptionWidget<T : Any>(
         val values = cycleValues?.let { all -> if (allowed == null) all else all.filter { it in allowed } }
         if (values != null && values.isNotEmpty()) {
             val current = values.indexOf(displayValue())
-            val step = if (button == 1) -1 else 1
+            val step = if (button == InputConstants.MOUSE_BUTTON_RIGHT) -1 else 1
             val next = values[(current + step + values.size) % values.size]
             stage(next)
             playClickSound()
@@ -632,6 +687,172 @@ class D3D12ButtonWidget(
         return true
     }
 }
+
+/**
+ * 右侧滚动条：轨道铺满滚动区的可见高度，滑块长度按「可见高度 / 内容总高」算 —— 内容只溢出一点时滑块
+ * 很长，翻几屏才到底时滑块很短。按住滑块拖动或点击轨道就能在不碰滚轮的情况下移动页面。
+ *
+ * <p>条只有 [WIDTH] 像素宽，命中区左右各放宽 [HIT_PADDING]：按 4 像素去抓一条线太费劲。
+ *
+ * <p>自动隐藏：用过滚轮之后，滚轮停下 1 秒淡出，再滚一下又淡入；指针停在条上或正在拖动时不隐藏。
+ * 从未用过滚轮时一直显示，否则鼠标玩家找不到这个入口。淡入淡出 0.3 秒。
+ *
+ * <p>计时用 [System.nanoTime] 而不是 `partialTick`：后者在一帧里会重复取值，停顿菜单里也不推进，
+ * 动画会抖或卡在半透明。见 docs/misc/settingscreen/README.md §6.9。
+ */
+class D3D12ScrollBarWidget(
+    /** 屏幕持有的滚动量（像素）。 */
+    private val scrollProvider: () -> Double,
+    /** 回写滚动量：屏幕负责夹到 `[0, maxScroll]` 并重排行的位置。 */
+    private val onScroll: (Double) -> Unit,
+) : D3D12Widget(0, 0, WIDTH, 0) {
+
+    /** 内容总高（可见高度 + 可滚动距离），每次重排时由屏幕传来。 */
+    private var contentHeight: Int = 0
+
+    /** 0..1 的淡入淡出进度；到 0 就不画、也不接受点击。 */
+    private var alpha: Double = 1.0
+    private var hoverAnimation: Double = 0.0
+    private var lastRenderNanos: Long = 0L
+    private var wheelUsed: Boolean = false
+    private var lastWheelNanos: Long = 0L
+    private var dragging: Boolean = false
+
+    /** 按下时指针相对滑块顶端的距离：拖动时保持它不变，滑块才不会跳到指针中心。 */
+    private var grabOffset: Int = 0
+
+    private val maxScroll: Double
+        get() = (contentHeight - height).toDouble().coerceAtLeast(0.0)
+
+    /** 屏幕在重排之后调用：决定横坐标、轨道范围与内容总高。 */
+    fun layout(left: Int, trackTop: Int, trackHeight: Int, totalContentHeight: Int) {
+        setPosition(left, trackTop)
+        height = trackHeight.coerceAtLeast(0)
+        contentHeight = totalContentHeight.coerceAtLeast(height)
+    }
+
+    /** 滚轮刚滚过页面：从这一刻起 1 秒后淡出。 */
+    fun notifyWheel() {
+        wheelUsed = true
+        lastWheelNanos = System.nanoTime()
+    }
+
+    /** 内容放得下就没有可滚的距离：整条不画、也不接受点击。 */
+    fun isActive(): Boolean = maxScroll > 0.0 && height > 0
+
+    /** 指针是否落在命中区（比可见的条宽，见 [HIT_PADDING]）。 */
+    fun isOverBar(mouseX: Double, mouseY: Double): Boolean =
+        mouseY >= y && mouseY < y + height &&
+            mouseX >= x - HIT_PADDING && mouseX < x + width + HIT_PADDING
+
+    override fun render(renderer: D3D12WidgetRenderer, mouseX: Int, mouseY: Int, delta: Float) {
+        val now = System.nanoTime()
+        // 首帧没有上一帧，步长为 0；夹到 0.25 秒，避免切窗口/卡顿后一次性跳完整段动画。
+        val seconds = if (lastRenderNanos == 0L) {
+            0.0
+        } else {
+            ((now - lastRenderNanos) / 1e9).coerceIn(0.0, 0.25)
+        }
+        lastRenderNanos = now
+
+        val hovered = isActive() && isOverBar(mouseX.toDouble(), mouseY.toDouble())
+        val kept = !wheelUsed || dragging || hovered || now - lastWheelNanos < AUTO_HIDE_NANOS
+        alpha = approach(alpha, if (kept) 1.0 else 0.0, seconds / FADE_SECONDS)
+        hoverAnimation = approach(hoverAnimation, if (hovered || dragging) 1.0 else 0.0, seconds / HOVER_SECONDS)
+
+        if (alpha < 0.001 || !isActive()) {
+            return
+        }
+
+        renderer.pushAlpha(alpha)
+        renderer.rect(x, y, x + width, y + height, TRACK)
+        val top = thumbTop()
+        renderer.rect(x, top, x + width, top + thumbLength(), blend(ACCENT, WHITE, hoverAnimation))
+        renderer.popAlpha()
+    }
+
+    /** 滑块长度按可见高度占内容总高的比例算，并留一个最短长度，否则内容很长时只剩几个像素、抓不住。 */
+    private fun thumbLength(): Int {
+        if (maxScroll <= 0.0) {
+            return height
+        }
+
+        val raw = (height.toDouble() * height / contentHeight).roundToInt()
+        return raw.coerceIn(MIN_THUMB.coerceAtMost(height), height)
+    }
+
+    private fun thumbTop(): Int {
+        val travel = height - thumbLength()
+        if (travel <= 0) {
+            return y
+        }
+
+        return y + (travel * (scrollProvider() / maxScroll).coerceIn(0.0, 1.0)).roundToInt()
+    }
+
+    override fun mouseClicked(mouseX: Double, mouseY: Double, button: Int): Boolean {
+        if (!isActive() || alpha < 0.001 || button != InputConstants.MOUSE_BUTTON_LEFT || !isOverBar(mouseX, mouseY)) {
+            return false
+        }
+
+        val top = thumbTop()
+        val length = thumbLength()
+        val onThumb = mouseY >= top && mouseY < top + length
+        grabOffset = if (onThumb) (mouseY - top).toInt() else length / 2
+        dragging = true
+        if (!onThumb) {
+            // 点在轨道上：滑块中心直接跳到指针处，而不是翻一页 —— 拖一下就到的距离，翻页反而要点多次。
+            applyDrag(mouseY)
+        }
+        return true
+    }
+
+    override fun mouseDragged(mouseX: Double, mouseY: Double, button: Int, dragX: Double, dragY: Double): Boolean {
+        if (!dragging) {
+            return false
+        }
+
+        applyDrag(mouseY)
+        return true
+    }
+
+    override fun mouseReleased(mouseX: Double, mouseY: Double, button: Int): Boolean {
+        dragging = false
+        return false
+    }
+
+    private fun applyDrag(mouseY: Double) {
+        val travel = height - thumbLength()
+        if (travel <= 0) {
+            return
+        }
+
+        val fraction = ((mouseY - grabOffset - y) / travel.toDouble()).coerceIn(0.0, 1.0)
+        onScroll(fraction * maxScroll)
+    }
+
+    companion object {
+        const val WIDTH: Int = 4
+
+        /** 命中区在条两侧各放宽的像素：条本身太细，按可见宽度抓不住。 */
+        const val HIT_PADDING: Int = 2
+
+        /** 滑块最短长度：内容很长时仍然抓得住。 */
+        private const val MIN_THUMB: Int = 18
+
+        private const val AUTO_HIDE_NANOS: Long = 1_000_000_000L
+        private const val FADE_SECONDS: Double = 0.3
+        private const val HOVER_SECONDS: Double = 0.15
+
+        /** 轨道：半透明浅色，压在深色背景与黑底行之间都看得出来；条只有 4 像素宽，太淡就整条消失。 */
+        private val TRACK: Int = ARGB.color(72, 255, 255, 255)
+
+        /** 每帧朝目标推进固定步长：掉帧时不会一口气跳完整段动画。 */
+        private fun approach(value: Double, target: Double, step: Double): Double =
+            if (value < target) (value + step).coerceAtMost(target) else (value - step).coerceAtLeast(target)
+    }
+}
+
 private fun ellipsizeRight(font: net.minecraft.client.gui.Font, text: String, maxWidth: Int): String {
     if (maxWidth <= 0) {
         return ""

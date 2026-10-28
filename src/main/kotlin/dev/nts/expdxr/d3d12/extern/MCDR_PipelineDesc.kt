@@ -9,7 +9,7 @@ import java.nio.charset.StandardCharsets
 /**
  * Builder for `mcdr_pipeline_desc` — fill the lists with the fluent `with*` helpers, then [pack] it
  * into an arena that outlives the downcall. Mirror layout: [MCDRLayout.PIPELINE_DESC]
- * (docs/misc/ffm-abi.md §2.5).
+ * (docs/misc/ffm-abi.md §1.5).
  *
  * 互操作：`ColorTarget` / `InputElement` / `Binding` 是**嵌套类**（Kotlin 默认即 Java 的 static
  * nested，不能写成 `inner class`），`MAX_*` 用 `const val` 以便 Java 侧静态读取。

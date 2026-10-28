@@ -141,6 +141,8 @@
   "dxr_mc.video.group.quality": "Graphics Quality",
   "dxr_mc.video.group.sr_shared": "Super resolution (shared)",
   "dxr_mc.video.group.vrs": "Variable Rate Shading",
+  "dxr_mc.video.group.scale": "Adjustments",
+  "dxr_mc.video.group.sr_and_fg": "Super Resolution & Frame Generation",
   "dxr_mc.video.lock.aa_dlss": "DLSS upscaling already handles temporal resolve; adding TAA/SMAA would double-process",
   "dxr_mc.video.lock.dlss_dlaa": "Anti-aliasing is set to DLAA, which owns the DLSS toggle and preset",
   "dxr_mc.video.lock.dlss_framegen": "DLSS cannot be turned off while frame generation is on: generated frames are interpolated from the DLSS output",

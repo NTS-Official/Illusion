@@ -141,6 +141,8 @@
   "dxr_mc.video.group.quality": "画面品质表现",
   "dxr_mc.video.group.sr_shared": "超分共用",
   "dxr_mc.video.group.vrs": "可变着色速率",
+  "dxr_mc.video.group.scale": "调整",
+  "dxr_mc.video.group.sr_and_fg": "超分辨率 & 帧生成",
   "dxr_mc.video.lock.aa_dlss": "DLSS 上采样已接管时域消解，再叠加 TAA/SMAA 会重复处理",
   "dxr_mc.video.lock.dlss_dlaa": "抗锯齿选择了 DLAA：DLSS 的开关与挡位都由 DLAA 决定",
   "dxr_mc.video.lock.dlss_framegen": "帧生成开启时无法关闭 DLSS：生成的帧由 DLSS 的输出插值而来",

@@ -15,6 +15,8 @@ import kotlin.math.roundToInt
  *
  * <p>本类只负责布局尺寸、滚动、绘制与输入；内容（有哪几页、哪几行、为什么被锁）在
  * [D3D12VideoSettingsContent]。改动先暂存，"应用"才落盘。见 docs/misc/settingscreen/README.md §6。
+ *
+ * <p>页可以再分二级子页（[D3D12VideoSettingsPage.subPages]）：标题横排在内容区顶部，宽度按文本自适应。
  */
 class D3D12VideoSettingsScreen @JvmOverloads constructor(
     private val parent: Screen,
@@ -38,6 +40,27 @@ class D3D12VideoSettingsScreen @JvmOverloads constructor(
     private var scroll = 0.0
     private var maxScroll = 0
     private var dragging: D3D12Widget? = null
+
+    /** 右侧滚动条：位置与长度每次重排时由 [layoutScrollBar] 重算，滚动量取自 [scroll]。 */
+    private val scrollBar = D3D12ScrollBarWidget({ scroll }, { moveTo(it) })
+
+    /** 二级子页下标，按页记。 */
+    private val subPageByPage: MutableMap<Int, Int> = mutableMapOf()
+
+    /** 二级页签：固定不滚动。 */
+    private val subTabs: MutableList<D3D12Widget> = ArrayList()
+
+    /** 有子页时，页自己的行固定在页签上方，不参与滚动。 */
+    private val headerRows: MutableList<Pair<D3D12Widget, Int>> = ArrayList()
+
+    /** `headerRows` 里的控件快照：区分"固定在页签上方"与"会滚动的行"两块区域用。 */
+    private val headerWidgets: MutableSet<D3D12Widget> = HashSet()
+
+    /** 二级页签行的 y，由上方固定行的高度决定。 */
+    private var tabY = 0
+
+    /** 二级页签控件属于哪一页；换页才重建。 */
+    private var subTabsPage = -1
 
     private var contentLeft = 0
     private var contentTop = 0
@@ -79,17 +102,134 @@ class D3D12VideoSettingsScreen @JvmOverloads constructor(
         buildActionButtons(optimalWidth)
     }
 
+    // ------------------------------------------------------------ 嵌套子页
+
+    private fun subPages(): List<D3D12VideoSettingsSubPage> = pages[page].subPages
+
+    /** 当前页选中的二级子页；没有子页时恒为 0。 */
+    private fun activeSubPage(): Int {
+        val count = subPages().size
+        if (count == 0) {
+            return 0
+        }
+
+        return (subPageByPage[page] ?: 0).coerceIn(0, count - 1)
+    }
+
+    /** 本页要铺的行：子页内容（或整页行）+ 页尾行。 */
+    private fun visibleEntries(): List<D3D12VideoSettingsEntry> {
+        val group = subPages()
+        val pageData = pages[page]
+        return if (group.isEmpty()) {
+            pageData.entries + pageData.trailingEntries
+        } else {
+            group[activeSubPage()].entries + pageData.trailingEntries
+        }
+    }
+
+    /** 内容区首行的 y（有二级页签时让出页签那一行）。 */
+    private fun rowsTop(): Int = tabY + if (subPages().isEmpty()) 0 else D3D12SubTabWidget.HEIGHT + GAP
+
+    /** 清空页签并强制下次重建。离开有子页的页面时必须调用，否则残留的页签会叠在新页面的行上。 */
+    private fun clearSubTabs() {
+        subTabs.clear()
+        subTabsPage = -1
+    }
+
+    /** 按"标题像素宽 + 内边距"横排二级页签；排不下先压内边距，仍排不下按内容区截断。
+     * 同一页内只挪位置不重建，否则选中动画会被打回起点。 */
+    private fun buildSubTabs() {
+        val group = subPages()
+        if (group.isEmpty()) {
+            clearSubTabs()
+            return
+        }
+
+        val rebuild = subTabsPage != page || subTabs.size != group.size
+
+        val font = Minecraft.getInstance().font
+        val textWidths = group.map { font.width(it.name) }
+        val gaps = SUB_TAB_GAP * (group.size - 1)
+        var pad = SUB_TAB_PAD
+        while (pad > SUB_TAB_MIN_PAD && textWidths.sum() + gaps + pad * 2 * group.size > contentWidth) {
+            pad--
+        }
+
+        if (rebuild) {
+            subTabs.clear()
+        }
+
+        var x = contentLeft
+        group.forEachIndexed { index, subPage ->
+            val width = (textWidths[index] + pad * 2)
+                .coerceIn(SUB_TAB_MIN_WIDTH.coerceAtMost(contentWidth), contentWidth)
+            if (rebuild) {
+                subTabs += D3D12SubTabWidget(
+                    x, tabY, width, subPage.name,
+                    { activeSubPage() == index },
+                    { selectSubPage(index) },
+                )
+            } else {
+                subTabs[index].setPosition(x, tabY)
+            }
+            x += width + SUB_TAB_GAP
+        }
+        subTabsPage = page
+    }
+
+    private fun selectSubPage(index: Int) {
+        if (subPages().isEmpty() || activeSubPage() == index) {
+            return
+        }
+
+        subPageByPage[page] = index
+        scroll = 0.0
+        // 页签不重建：选中状态是 lambda 现算的，重建会把淡入淡出打断。
+        buildRows()
+    }
+
     private fun buildRows() {
         // 切页签/重新布局会重建行，未点"应用"的暂存值必须跟着走。
-        val carried = optionRows.mapNotNull { (option, widget) ->
+        val carried = optionRows.mapNotNull { [option, widget] ->
             widget.pendingOrNull()?.let { option to it }
         }.toMap()
 
         rows.clear()
         optionRows.clear()
+        headerRows.clear()
+        headerWidgets.clear()
 
+        val pageData = pages[page]
         var y = contentTop
-        for (entry in pages[page].entries) {
+        if (pageData.subPages.isEmpty()) {
+            tabY = contentTop
+            clearSubTabs()
+            y = layoutEntries(visibleEntries(), contentTop, carried, rows)
+        } else {
+            // 页自己的行固定在页签上方：行区从页签下面开始，滚动不带走它们。
+            y = layoutEntries(pageData.entries, contentTop, carried, headerRows)
+            headerRows.forEach { headerWidgets += it.first }
+            tabY = y + GAP
+            buildSubTabs()
+            y = layoutEntries(visibleEntries(), rowsTop(), carried, rows)
+        }
+
+        val top = rowsTop()
+        maxScroll = (y - top - (contentBottom - top)).coerceAtLeast(0)
+        scroll = scroll.coerceIn(0.0, maxScroll.toDouble())
+        applyScroll()
+        layoutScrollBar()
+    }
+
+    /** 把一组条目铺进 `target`，返回下一个可用 y。 */
+    private fun layoutEntries(
+        entries: List<D3D12VideoSettingsEntry>,
+        start: Int,
+        carried: Map<OptionInstance<*>, Any?>,
+        target: MutableList<Pair<D3D12Widget, Int>>,
+    ): Int {
+        var y = start
+        for (entry in entries) {
             val widget: D3D12Widget = when (entry) {
                 is D3D12VideoSettingsEntry.Heading -> D3D12HeadingWidget(contentLeft, y, contentWidth, entry.text)
                 is D3D12VideoSettingsEntry.Note -> D3D12NoteWidget(contentLeft, y, contentWidth, entry.text, entry.warning)
@@ -101,15 +241,13 @@ class D3D12VideoSettingsScreen @JvmOverloads constructor(
                 }
             }
 
-            rows += widget to y
+            target += widget to y
             // 折叠控件展开后会多占一行，后面的行整体下移（不叠加、不覆盖）。
             y += D3D12Widget.DEFAULT_HEIGHT +
                 if (entry is D3D12VideoSettingsEntry.Setting && expandedOptions.contains(entry.option)) D3D12OptionWidget.SLIDER_LINE else 0
         }
 
-        maxScroll = (y - contentTop - (contentBottom - contentTop)).coerceAtLeast(0)
-        scroll = scroll.coerceIn(0.0, maxScroll.toDouble())
-        applyScroll()
+        return y
     }
 
     @Suppress("UNCHECKED_CAST")
@@ -195,7 +333,12 @@ class D3D12VideoSettingsScreen @JvmOverloads constructor(
 
     private fun snapshotBaseline() {
         baseline.clear()
-        for (page in pages) for (entry in page.entries) if (entry is D3D12VideoSettingsEntry.Setting) baseline[entry.option] = entry.option.get()
+        for (page in pages) {
+            val entries = page.entries + page.trailingEntries + page.subPages.flatMap { it.entries }
+            for (entry in entries) {
+                if (entry is D3D12VideoSettingsEntry.Setting) baseline[entry.option] = entry.option.get()
+            }
+        }
     }
 
     private fun hasChanges(): Boolean = optionRows.any { [_, widget] -> widget.hasPendingChange() }
@@ -219,7 +362,7 @@ class D3D12VideoSettingsScreen @JvmOverloads constructor(
     }
 
     private fun undo() {
-        for ((_, widget) in optionRows) {
+        for ([_, widget] in optionRows) {
             widget.clearPending()
         }
     }
@@ -233,18 +376,30 @@ class D3D12VideoSettingsScreen @JvmOverloads constructor(
         super.extractRenderState(extractor, mouseX, mouseY, partialTick)
 
         val renderer = D3D12WidgetRenderer(extractor)
-        val scissored = maxScroll > 0 && contentBottom > contentTop
-        if (scissored) {
-            renderer.enableScissor(contentLeft, contentTop, contentRight, contentBottom)
+
+        // 页签上方那一块固定不动。
+        for ([widget, _] in headerRows) {
+            widget.render(renderer, mouseX, mouseY, partialTick)
         }
 
-        for ((widget, _) in rows) {
+        val top = rowsTop()
+        val scissored = maxScroll > 0 && contentBottom > top
+        if (scissored) {
+            renderer.enableScissor(contentLeft, top, contentRight, contentBottom)
+        }
+
+        for ([widget, _] in rows) {
             widget.render(renderer, mouseX, mouseY, partialTick)
         }
 
         if (scissored) {
             renderer.disableScissor()
         }
+
+        // 二级页签固定不滚动。
+        subTabs.forEach { it.render(renderer, mouseX, mouseY, partialTick) }
+
+        scrollBar.render(renderer, mouseX, mouseY, partialTick)
 
         widgets.forEach { it.render(renderer, mouseX, mouseY, partialTick) }
         drawTooltip(renderer, mouseX, mouseY)
@@ -271,10 +426,13 @@ class D3D12VideoSettingsScreen @JvmOverloads constructor(
             return
         }
 
-        // 内容区外的行（被下半部分按钮挡住 / 滚出边界）不能弹提示。
-        if (mouseY < contentTop || mouseY > contentBottom) return
-        val hovered = optionRows.lastOrNull { (_, widget) ->
-            widget.y >= contentTop && widget.y + widget.height <= contentBottom &&
+        // 内容区外的行（被下半部分按钮挡住 / 滚出边界）不能弹提示：滚动区里的行还要额外越过页签，
+        // 否则滚到页签底下、已经裁掉的行仍会压着指针弹提示。
+        if (mouseY !in contentTop..contentBottom) return
+        val scrollTop = rowsTop()
+        val hovered = optionRows.lastOrNull { [_, widget] ->
+            val regionTop = if (headerWidgets.contains(widget)) contentTop else scrollTop
+            widget.y >= regionTop && widget.y + widget.height <= contentBottom &&
                 widget.isMouseOver(mouseX.toDouble(), mouseY.toDouble())
         }
             ?.second ?: return
@@ -284,7 +442,8 @@ class D3D12VideoSettingsScreen @JvmOverloads constructor(
         val caption = hovered.captionComponent()
         val lineHeight = renderer.textHeight()
         val pad = HINT_PAD
-        val freeRight = width - (contentRight + GAP) - OUTER_MARGIN
+        // 内容区右边这一列留给滚动条，提示块必须整列让开，否则会压在滚动条上。
+        val freeRight = width - (contentRight + HINT_COLUMN_OFFSET) - OUTER_MARGIN
         val anchored = freeRight >= MIN_HINT_WIDTH
 
         // 换行宽度：固定块用右侧实际余量（上限便于阅读），悬浮提示用固定宽度。
@@ -310,7 +469,7 @@ class D3D12VideoSettingsScreen @JvmOverloads constructor(
         val boxX: Int
         val boxY: Int
         if (anchored) {
-            boxX = contentRight + GAP
+            boxX = contentRight + HINT_COLUMN_OFFSET
             boxY = TITLE_Y
         } else {
             boxX = (mouseX + 12).coerceIn(4, (width - boxWidth - 4).coerceAtLeast(4))
@@ -394,8 +553,24 @@ class D3D12VideoSettingsScreen @JvmOverloads constructor(
             }
         }
 
-        if (mouseY >= contentTop && mouseY <= contentBottom) {
-            for ((widget, _) in rows) {
+        // 二级页签在行之上，先判。
+        for (widget in subTabs) {
+            if (widget.mouseClicked(mouseX, mouseY, event.button())) {
+                return true
+            }
+        }
+
+        // 页签上方的固定行（渲染缩放、VRS）也带滑条。
+        for ([widget, _] in headerRows) {
+            if (widget.mouseClicked(mouseX, mouseY, event.button())) {
+                dragging = widget
+                return true
+            }
+        }
+
+        // 滚动区只认页签下面那块：指针在固定的行或页签上时，不该滚走子页内容。
+        if (mouseY >= rowsTop() && mouseY <= contentBottom && mouseX >= contentLeft && mouseX <= contentRight) {
+            for ([widget, _] in rows) {
                 if (widget.mouseClicked(mouseX, mouseY, event.button())) {
                     dragging = widget
                     return true
@@ -403,11 +578,20 @@ class D3D12VideoSettingsScreen @JvmOverloads constructor(
             }
         }
 
+        // 滚动条在内容区之外，点它不经过任何行。
+        if (scrollBar.mouseClicked(mouseX, mouseY, event.button())) {
+            dragging = scrollBar
+            return true
+        }
+
         return super.mouseClicked(event, doubleClick)
     }
 
     override fun mouseReleased(event: MouseButtonEvent): Boolean {
+        val widget = dragging
         dragging = null
+        // 必须转发：滑条与滚动条靠这一下结束拖拽状态，否则松手后它们仍以为自己还在被拖。
+        widget?.mouseReleased(event.x, event.y, event.button())
         return super.mouseReleased(event)
     }
 
@@ -422,9 +606,15 @@ class D3D12VideoSettingsScreen @JvmOverloads constructor(
     }
 
     override fun mouseScrolled(mouseX: Double, mouseY: Double, scrollX: Double, scrollY: Double): Boolean {
-        if (maxScroll > 0) {
-            scroll = (scroll - scrollY * SCROLL_STEP).coerceIn(0.0, maxScroll.toDouble())
-            applyScroll()
+        // 滚轮只作用于指针所在的区域：页签上方的固定行与页签本身都不滚；指针压在右侧滚动条上照滚。
+        val overBar = scrollBar.isActive() && scrollBar.isOverBar(mouseX, mouseY)
+        val inScrollRegion = maxScroll > 0 &&
+            (overBar ||
+                (mouseY >= rowsTop() && mouseY <= contentBottom && mouseX >= contentLeft && mouseX <= contentRight))
+        if (inScrollRegion) {
+            moveTo(scroll - scrollY * SCROLL_STEP)
+            // 滚轮滚过才启用自动隐藏：没滚过就淡出的话，鼠标玩家会连入口都看不到。
+            scrollBar.notifyWheel()
             return true
         }
 
@@ -433,9 +623,28 @@ class D3D12VideoSettingsScreen @JvmOverloads constructor(
 
     private fun applyScroll() {
         val offset = scroll.roundToInt()
-        for ((widget, baseY) in rows) {
+        for ([widget, baseY] in rows) {
             widget.setPosition(contentLeft, baseY - offset)
         }
+    }
+
+    /**
+     * 滚动条的横坐标跟着内容区右边界走：平时在边界之外，有二级子页时整条向内收缩一点 ——
+     * 这时它滚的是子页内容、不是整页，位置要能看出这一层。
+     */
+    private fun layoutScrollBar() {
+        val inset = if (pages[page].subPages.isEmpty()) SCROLLBAR_OFFSET else SCROLLBAR_NESTED_OFFSET
+        // 窗口窄到内容区右边界贴着画面时把条夹回窗口内：留在外面就是整条不可见、也点不到。
+        val left = minOf(contentRight + inset, width - D3D12ScrollBarWidget.WIDTH)
+        val top = rowsTop()
+        val viewport = (contentBottom - top).coerceAtLeast(0)
+        scrollBar.layout(left, top, viewport, viewport + maxScroll)
+    }
+
+    /** 滚动量唯一的写入点：夹到可用范围后立刻重排行位置。 */
+    private fun moveTo(value: Double) {
+        scroll = value.coerceIn(0.0, maxScroll.toDouble())
+        applyScroll()
     }
 
     private fun optimalWidth(): Int {
@@ -452,7 +661,7 @@ class D3D12VideoSettingsScreen @JvmOverloads constructor(
 
     override fun onClose() {
         // 关界面不等于应用：没点"应用"的改动一律丢弃。
-        for ((_, widget) in optionRows) {
+        for ([_, widget] in optionRows) {
             widget.clearPending()
         }
 
@@ -482,10 +691,23 @@ class D3D12VideoSettingsScreen @JvmOverloads constructor(
         const val GAP: Int = 8
         const val TAB_GAP: Int = 4
 
+        /** 二级页签：内边距（排不下时先压缩）、间隙与最小宽度。 */
+        const val SUB_TAB_PAD: Int = 12
+        const val SUB_TAB_MIN_PAD: Int = 4
+        const val SUB_TAB_GAP: Int = 4
+        const val SUB_TAB_MIN_WIDTH: Int = 36
+
         /** "需要重启"提示行的高度：常驻预留，避免提示出现时压到动作按钮。 */
         const val HINT_LINE: Int = 12
 
         const val HINT_PAD: Int = 6
+
+        /** 右侧滚动条：距内容区右边界的外扩距离，以及有二级子页时向内收缩后的距离。 */
+        const val SCROLLBAR_OFFSET: Int = 6
+        const val SCROLLBAR_NESTED_OFFSET: Int = 2
+
+        /** 右侧提示块给滚动条让出的整列宽度（滚动条 + 外扩距离 + 一点间隙）。 */
+        const val HINT_COLUMN_OFFSET: Int = SCROLLBAR_OFFSET + D3D12ScrollBarWidget.WIDTH + 4
 
         /** 右侧至少要留这么宽才把提示画成固定块，否则整体退化成悬浮提示。 */
         const val MIN_HINT_WIDTH: Int = 96

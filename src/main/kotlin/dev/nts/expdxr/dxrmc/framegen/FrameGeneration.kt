@@ -232,8 +232,11 @@ object FrameGeneration {
 
     /** 设置页状态行 = `available` + native 的 note；会跨 ABI，只在打开设置页时调。 */
     @JvmStatic
-    fun statusLine(): Component {
-        val backend = activeBackend()
+    fun statusLine(): Component = statusLine(activeBackend())
+
+    /** 某一家的状态行：厂商子页各问自己那一家，不跟着"当前选中的后端"走。 */
+    @JvmStatic
+    fun statusLine(backend: Int): Component {
         // 一家都没选是默认状态，不是「ABI 太旧」——别去查 capsFor(0)。
         if (backend == 0) {
             return Component.translatable("dxr_mc.video.fg.off")
@@ -245,6 +248,15 @@ object FrameGeneration {
             Component.translatable("dxr_mc.video.fg.unavailable", caps.note)
         }
     }
+
+    /** 这一家是否明确不可用；查不到能力表（老 DLL）时不算不可用。 */
+    @JvmStatic
+    fun isBackendUnavailable(backend: Int): Boolean = capsFor(backend)?.available == false
+
+    /** 某一家的运行状态行：只有该家真的开着才有内容。 */
+    @JvmStatic
+    fun runtimeLine(backend: Int): Component =
+        if (isEnabled() && activeBackend() == backend) runtimeLine() else Component.empty()
 
     /** 运行中状态行：native 原文（picked/applied/chain/mode/rebuilds/tracks/latency）。
      * 未开启时返回空，免得设置页挂一串空状态。 */
@@ -396,7 +408,7 @@ object FrameGeneration {
                 MCDR_ABI.D3D12FgSetMode(desc)
             }
         } catch (t: Throwable) {
-            // 以前只写 System.err，玩家日志里看不到，等于静默降级。
+            // 必须走 IllusionLogger：只写 System.err 玩家日志里看不到，等于静默降级。
             IllusionLogger.warnMessage("frame generation: ABI v4 push failed: $t")
             Int.MIN_VALUE
         }

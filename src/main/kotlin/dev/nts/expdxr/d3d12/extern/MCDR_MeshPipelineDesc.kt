@@ -6,7 +6,7 @@ import java.lang.foreign.MemorySegment
 import java.lang.foreign.ValueLayout
 
 /**
- * Structured mirror of `mcdr_mesh_pipeline_desc` (see docs/misc/ffm-abi.md §2.5).
+ * Structured mirror of `mcdr_mesh_pipeline_desc` (see docs/misc/ffm-abi.md §1.5).
  *
  * <p>The three blobs are **DXIL bytecode**, not HLSL: D3DCompile stops at SM 5.1, so the native side
  * compiles through DXC. No input layout and no topology — a mesh pipeline has no input assembler,
