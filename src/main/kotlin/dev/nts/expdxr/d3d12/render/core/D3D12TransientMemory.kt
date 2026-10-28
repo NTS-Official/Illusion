@@ -219,7 +219,7 @@ class D3D12TransientMemory(private val ctx: Long, private val ensureListOpen: Ru
             block.close()
         } catch (t: Throwable) {
             IllusionLogger.warnFormat(
-                "[backend-java] transientMemory: closing an unmappable staging block threw %s%n", t)
+                "transientMemory: closing an unmappable staging block threw %s%n", t)
         }
     }
 
@@ -227,7 +227,7 @@ class D3D12TransientMemory(private val ctx: Long, private val ensureListOpen: Ru
     private fun reportStagingMapFailure(block: D3D12GpuBuffer, offset: Long, total: Long,
         attempt: Int, failure: Throwable) {
         IllusionLogger.warnFormat(
-            "[backend-java] transientMemory: staging block 0x%x (%d bytes, closed=%s) could not be "
+            "transientMemory: staging block 0x%x (%d bytes, closed=%s) could not be "
                 + "mapped at offset=%d length=%d (attempt %d): %s — discarding it and taking a fresh "
                 + "block; the upload continues. This used to crash the frame with "
                 + "'dx12MapBuffer returned null'.%n",
@@ -323,7 +323,7 @@ class D3D12TransientMemory(private val ctx: Long, private val ensureListOpen: Ru
                 // 而池中块不在 frames 队列里）。真出现就说明块的归属记错了 —— 记一行，丢弃它，
                 // 继续往下新建，避免把一块已关闭的缓冲交给 uploadStaging 去 map。
                 IllusionLogger.warnFormat(
-                    "[backend-java] transientMemory: the staging pool handed out an already-closed "
+                    "transientMemory: the staging pool handed out an already-closed "
                         + "block 0x%x (%d bytes); discarding it instead of mapping it%n",
                     pooled.handle(), pooled.size())
                 System.err.flush()
@@ -461,7 +461,7 @@ class D3D12TransientMemory(private val ctx: Long, private val ensureListOpen: Ru
         }
         this.closed = true
         if (IllusionLogger.debugEnabled()) {
-            IllusionLogger.debugMessage("[backend-java] transientMemory.close: current=${this.frame.size}"
+            IllusionLogger.debugMessage("transientMemory.close: current=${this.frame.size}"
                 + " queuedFrames=${this.frames.size}")
         }
         for (buffer in this.frame) {
@@ -496,7 +496,7 @@ class D3D12TransientMemory(private val ctx: Long, private val ensureListOpen: Ru
             uboRing[i] = null
         }
         if (IllusionLogger.debugEnabled()) {
-            IllusionLogger.debugMessage("[backend-java] transientMemory.close: done")
+            IllusionLogger.debugMessage("transientMemory.close: done")
         }
     }
 

@@ -68,7 +68,7 @@ class D3D12GpuSurface(hwnd: Long) : GpuSurfaceBackend {
         // 卡死 Present 并锁住 Alt+Tab（见 known_bugs.md P196）。独占全屏交给 SDL 切显示模式。
         val ok = MCDR_ABI.D3D12ConfigureSurface(this.handle, config.width(), config.height(),
             config.presentMode().ordinal)
-        IllusionLogger.debugMessage("[backend-java] configureSurface: ${config.width()}x${config.height()}"
+        IllusionLogger.debugMessage("configureSurface: ${config.width()}x${config.height()}"
                 + " mode=${config.presentMode()} ok=${ok}")
         if (!ok) {
             throw SurfaceException("Failed to configure DX12 surface to "
@@ -106,7 +106,7 @@ class D3D12GpuSurface(hwnd: Long) : GpuSurfaceBackend {
         if (MCDR_ABI.D3D12AcquireSurface(this.handle)) {
             return true
         }
-        IllusionLogger.warnMessage("[backend-java] [P48] deferred acquire failed — skipping blit this frame")
+        IllusionLogger.warnMessage("deferred acquire failed — skipping blit this frame")
         System.err.flush()
         this.acquireDeferredFailed = true
         return false
@@ -127,10 +127,11 @@ class D3D12GpuSurface(hwnd: Long) : GpuSurfaceBackend {
         // 传 texture.handle()（底层纹理对象），而非 view.handle()（SRV view 对象）。
         // view 是 texture 的视图包装，CopyTextureRegion 需要的是纹理资源本身。
         // P106：世界层与界面解耦后，GUI 画在自己的窗口尺寸目标上，呈现的源就不一定是 vanilla
-        // 传进来的主渲染目标了。D3D12GUISplit 只在「拆分启用且本帧确实把世界层搬了过去」时换源，
-        // 其余情况原样返回入参 ⇒ 100% 缩放或任何回退路径都与 vanilla 完全一致。
-        val tex = (D3D12GUISplit.presentSourceView(textureView) as D3D12GpuTextureView).texture()
-            as D3D12GpuTexture
+        // 传进来的主渲染目标了。D3D12GUISplit 只在「拆分启用且本帧确实把世界层搬了过去」时换成
+        // GUI 目标；P306ac 的 hudless 模式下则换成"不含 UI 的世界层"，其余情况原样返回入参
+        // ⇒ 100% 缩放或任何回退路径都与 vanilla 完全一致。
+        val fallback = (textureView as D3D12GpuTextureView).texture() as D3D12GpuTexture
+        val tex = D3D12GUISplit.presentSourceTexture(fallback)
         // P76a 增量 2：速度（运动矢量）pass 在 blit 之前录进同一条命令列表 —— 此刻本帧渲染
         // 已全部完成、主深度仍然有效（见 D3D12Velocity）。开关关闭时是纯 no-op。
         encoder.recordVelocityPass()
@@ -162,14 +163,24 @@ class D3D12GpuSurface(hwnd: Long) : GpuSurfaceBackend {
         // 这里是纵深防御，顺带省掉一次无谓的调用。
         if (this.blitSkipped) {
             this.blitSkipped = false
-            IllusionLogger.debugMessage("[backend-java] [P95] present skipped — no blit this frame")
+            IllusionLogger.debugMessage("present skipped — no blit this frame")
             return
         }
         D3D12RenderProf.begin(D3D12RenderProf.PRESENT)
         MCDR_ABI.D3D12PresentSurface(handle)
         D3D12RenderProf.end(D3D12RenderProf.PRESENT)
         // F3 的 output 计数：这里是"真正提交给交换链"的那一行（帧生成接上后生成帧也得经过它）。
-        D3D12FrameStats.onFramePresented(MCDR_ABI.D3D12DlssgPresentedFrames())
+        // `D3D12FgPresented` 按**当前生效的** provider 取数：DLSS-G 仍是 SL 的计数，XeSS-FG /
+        // FSR-FG 各自从自己的 SDK 报。以前写死 `D3D12DlssgPresentedFrames`，另外两家在 F3 上
+        // 永远是 1×，看起来就像"帧生成没生效"。
+        val presented = MCDR_ABI.D3D12FgPresented()
+        D3D12FrameStats.onFramePresented(
+            if (presented > 0) presented else MCDR_ABI.D3D12DlssgPresentedFrames()
+        )
+        // P306ac：帧边界裁决"下一帧走 hudless 还是合成层"。必须放在 present **之后**：
+        // 世界层的去向（搬进 GUI 目标 vs 直接呈现）要与下一帧 SR 的行为一致，而 SR 的挂点排在
+        // prepareForGui 之前（见 GameRendererSmaaWorldMixin）。同一帧里不能换模式。
+        D3D12GUISplit.armUiComposition()
     }
 
     override fun supportedPresentModes(): Collection<GpuSurface.PresentMode> {
@@ -184,9 +195,9 @@ class D3D12GpuSurface(hwnd: Long) : GpuSurfaceBackend {
         // 退出路径计时：26.3 关窗先关 surface 再关 SDL window，destroySurface 里要等
         // pending present / deviceWaitIdle，慢在这里就会表现为"窗口先灰几秒才消失"。
         val started = System.nanoTime()
-        IllusionLogger.debugMessage("[backend-java] destroySurface begin")
+        IllusionLogger.debugMessage("destroySurface begin")
         MCDR_ABI.D3D12DestroySurface(this.handle)
-        IllusionLogger.debugMessage("[backend-java] destroySurface took ${(System.nanoTime() - started) / 1_000_000} ms")
+        IllusionLogger.debugMessage("destroySurface took ${(System.nanoTime() - started) / 1_000_000} ms")
     }
 }
 

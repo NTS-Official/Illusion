@@ -278,7 +278,7 @@ class D3D12RenderPassBackend(
                 val stride = formatBindings.getOrNull(slot)?.vertexSize ?: 0
                 if (stride == 0) {
                     LOGGER.warn(
-                        "P243: vertex buffer slot {} has no format in pipeline {} (dropped)",
+                        "vertex buffer slot {} has no format in pipeline {} (dropped)",
                         slot, base.info().location)
                     continue
                 }
@@ -658,7 +658,7 @@ class D3D12RenderPassBackend(
         if (gDrawIndirectLocations.add(location)) {
             // P237：作用域白名单是"按管线名"判的，名字错了整条通路就是静默空转 ——
             // 一次运行里每个见过的新名字打一行，方便对着 `isTerrain`/`terrainRateFor` 核对。
-            LOGGER.info("[dxrmc] MDI terrain candidate '{}' terrain={} rate={}", location,
+            LOGGER.info("MDI terrain candidate '{}' terrain={} rate={}", location,
                 isTerrain(location), D3D12VariableShadingRate.terrainRateFor(location))
         }
         // P217：地形**全部**（不透明 + OIT 半透明）只走 meshlet，没有 IMR 回退。
@@ -700,14 +700,14 @@ class D3D12RenderPassBackend(
     /** P217：地形批次的 mesh 派发失败时只记一次 —— 已去除 IMR 回退，不会再画一遍原版路径。 */
     private fun meshTerrainMissing(reason: String) {
         if (gMeshTerrainMissingLog.add(reason)) {
-            LOGGER.error("[dxrmc] P217 terrain batch not drawn (mesh path unavailable): {}", reason)
+            LOGGER.error("terrain batch not drawn (mesh path unavailable): {}", reason)
         }
     }
 
     /** P217：`tryMeshletDraw` 的静默前置失败也要留证（去重，一次运行每理由一条）。 */
     private fun meshletSkip(reason: String): Boolean {
         if (gMeshSkipLogReasons.add("meshlet:" + reason)) {
-            LOGGER.info("[dxrmc] P217 meshlet skipped: {}", reason)
+            LOGGER.info("meshlet skipped: {}", reason)
         }
         return false
     }
@@ -743,7 +743,7 @@ class D3D12RenderPassBackend(
             java.nio.file.Path.of(System.getProperty("user.dir"), "dxrmc", "meshlet_no_as"))
         if (gMeshletLastCull != cullOn) {
             gMeshletLastCull = cullOn
-            LOGGER.info("[dxrmc] P217 AS cull toggle: cull={} meshletAs={}", cullOn, compiled.meshletAs)
+            LOGGER.info("AS cull toggle: cull={} meshletAs={}", cullOn, compiled.meshletAs)
         }
 
         val sectionsSlice = this.transientMemory.uploadStaging(
@@ -798,7 +798,7 @@ class D3D12RenderPassBackend(
         }
         if (System.nanoTime() - gMeshletLogNanos > 2_000_000_000L) {
             gMeshletLogNanos = System.nanoTime()
-            LOGGER.info("[dxrmc] P217 meshlet dispatch: draws={} meshlets={} layer={} " +
+            LOGGER.info("meshlet dispatch: draws={} meshlets={} layer={} " +
                 "totals[solid={} cutout={} translucent={}]",
                 drawCount, tables.meshletCount, layer, gMeshletSolid, gMeshletCutout, gMeshletTranslucent)
         }

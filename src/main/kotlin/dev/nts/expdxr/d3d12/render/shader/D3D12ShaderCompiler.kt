@@ -173,7 +173,7 @@ class D3D12ShaderCompiler : AutoCloseable {
             val before = vertexHlsl
             vertexHlsl = injectVertexYFlip(vertexHlsl)
             if (before == vertexHlsl) {
-                IllusionLogger.warnMessage("[backend-java] [P28] WARN: no gl_Position assignment found in ${pipelineLocation}"
+                IllusionLogger.warnMessage("no gl_Position assignment found in ${pipelineLocation}"
                     + " vertex HLSL, Y-flip NOT injected")
             }
         }
@@ -190,7 +190,7 @@ class D3D12ShaderCompiler : AutoCloseable {
             if (fragmentHlsl.contains(needle)) {
                 fragmentHlsl = fragmentHlsl.replace(needle, repl)
             } else {
-                IllusionLogger.warnMessage("[backend-java] [FIX] WARN: frag_main needle not found for "
+                IllusionLogger.warnMessage("[FIX] WARN: frag_main needle not found for "
                     + pipeline.location)
             }
         }
@@ -214,7 +214,7 @@ class D3D12ShaderCompiler : AutoCloseable {
             if (fragmentHlsl.contains(needle)) {
                 fragmentHlsl = fragmentHlsl.replace(needle, repl)
             } else {
-                IllusionLogger.warnMessage("[backend-java] [P224] WARN: frag_main needle not found for "
+                IllusionLogger.warnMessage("frag_main needle not found for "
                     + pipelineLocation)
             }
         }
@@ -281,7 +281,7 @@ class D3D12ShaderCompiler : AutoCloseable {
                 uniformDescription = BindGroupLayout.flattenUniforms(pipeline.bindGroupLayouts).stream()
                     .filter { d -> d.name() == name }.findFirst()
                 if (uniformDescription.isEmpty) {
-                    IllusionLogger.debugFormat("[backend-java] addToBindGroup: uniform '%s' not found in %s%n",
+                    IllusionLogger.debugFormat("addToBindGroup: uniform '%s' not found in %s",
                         name, pipeline.location)
                     throw ShaderCompileException("Unable to find shader defined uniform ($name)")
                 }
@@ -302,7 +302,7 @@ class D3D12ShaderCompiler : AutoCloseable {
                     uniformDescription.get().type() == UniformType.TEXEL_BUFFER
                 if (isTexelBuffer) {
                     if (sampler.dimensions() != 5) {
-                        IllusionLogger.debugFormat("[backend-java] addToBindGroup: UTB '%s' in %s has dim %d (expected 5)%n",
+                        IllusionLogger.debugFormat("addToBindGroup: UTB '%s' in %s has dim %d (expected 5)",
                             name, pipeline.location, sampler.dimensions())
                         throw ShaderCompileException("UTB ($name) must have type of SpvDimBuffer")
                     }
@@ -323,12 +323,12 @@ class D3D12ShaderCompiler : AutoCloseable {
                 if (samplerNames.stream().noneMatch { u ->
                         u.type() == UniformType.COMBINED_IMAGE_SAMPLER && u.name() == name
                     }) {
-                    IllusionLogger.debugFormat("[backend-java] addToBindGroup: sampler '%s' not found in %s%n",
+                    IllusionLogger.debugFormat("addToBindGroup: sampler '%s' not found in %s",
                         name, pipeline.location)
                     throw ShaderCompileException("Unable to find shader defined uniform ($name)")
                 }
                 if (sampler.dimensions() != 1 && sampler.dimensions() != 3) {
-                    IllusionLogger.debugFormat("[backend-java] addToBindGroup: sampled texture '%s' in %s has dim %d (expected 1 or 3)%n",
+                    IllusionLogger.debugFormat("addToBindGroup: sampled texture '%s' in %s has dim %d (expected 1 or 3)",
                         name, pipeline.location, sampler.dimensions())
                     throw ShaderCompileException(
                         "Sampled texture ($name) must have type of SpvDim2D or SpvDimCube"
@@ -400,7 +400,7 @@ private fun expandIncludesRecursive(source: String, includeResolver: (Identifier
         val included = try {
             includeResolver(Identifier.parse(idText))
         } catch (e: Exception) {
-            IllusionLogger.debugFormat("[backend-java] include '%s' unresolved: %s%n", idText, e.message)
+            IllusionLogger.debugFormat("include '%s' unresolved: %s", idText, e.message)
             null
         }
         if (included == null) {
@@ -412,7 +412,7 @@ private fun expandIncludesRecursive(source: String, includeResolver: (Identifier
         }
         last = matcher.end()
         if (out.length > MAX_EXPANDED_CHARS) {
-            IllusionLogger.warnFormat("[backend-java] shader include expansion exceeded %d chars, truncated%n", MAX_EXPANDED_CHARS)
+            IllusionLogger.warnFormat("shader include expansion exceeded %d chars, truncated", MAX_EXPANDED_CHARS)
             break
         }
     } while (matcher.find())

@@ -447,7 +447,7 @@ object D3D12Velocity {
             this.height = h
             // 这一步成功了：清掉"已放弃"标记，否则它会把后续帧全部短路掉。
             abandonedSteps = abandonedSteps and STEP_RESOURCES.inv()
-            LOGGER.info("[backend] velocity: allocated {}x{} {} (ping-pong)", w, h, FORMAT)
+            LOGGER.info("velocity: allocated {}x{} {} (ping-pong)", w, h, FORMAT)
             true
         } catch (t: Throwable) {
             releaseResources()
@@ -470,7 +470,7 @@ object D3D12Velocity {
             this.depthViewFor = handle
             abandonedSteps = abandonedSteps and STEP_DEPTH_VIEW.inv()
             // 注意：SLF4J 只认 `{}`，`{:#x}` 会退化成"占位符数量不匹配"告警并把原样文本打出来。
-            LOGGER.info("[backend] velocity: depth SRV view created for texture {} (fmt={})",
+            LOGGER.info("velocity: depth SRV view created for texture {} (fmt={})",
                 handle.toULong().toString(16), depth.format)
             true
         } catch (t: Throwable) {
@@ -503,7 +503,7 @@ object D3D12Velocity {
         }
         this.pipeline = handle
         abandonedSteps = abandonedSteps and STEP_PIPELINE.inv()
-        LOGGER.info("[backend] velocity: pipeline compiled (handle={})", handle.toULong().toString(16))
+        LOGGER.info("velocity: pipeline compiled (handle={})", handle.toULong().toString(16))
         return true
     }
 
@@ -531,7 +531,7 @@ object D3D12Velocity {
         val rows = try {
             D3D12ObjectMotion.writeWorldRows(this.objectScratch, camera[0], camera[1], camera[2])
         } catch (t: Throwable) {
-            LOGGER.warn("[backend] velocity: object row read failed — {}", t.toString())
+            LOGGER.warn("velocity: object row read failed — {}", t.toString())
             0
         }
         this.objectCount = rows
@@ -546,7 +546,7 @@ object D3D12Velocity {
             }
             rows
         } catch (t: Throwable) {
-            LOGGER.warn("[backend] velocity: object row upload failed — {}", t.toString())
+            LOGGER.warn("velocity: object row upload failed — {}", t.toString())
             this.objectCount = 0
             0
         }
@@ -682,7 +682,7 @@ object D3D12Velocity {
         }
         if (this.disabledReason == null) {
             this.disabledReason = reason
-            LOGGER.warn("[backend] velocity: disabling velocity pass — {}", reason)
+            LOGGER.warn("velocity: disabling velocity pass — {}", reason)
         }
         this.enabled = false
     }

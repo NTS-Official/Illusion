@@ -222,6 +222,6 @@ object D3D12TAA {
             return
         }
         this.disabledReason = reason
-        LOGGER.error("[backend] TAA 已关闭：{}", reason)
+        LOGGER.error("TAA disabled: {}", reason)
     }
 }

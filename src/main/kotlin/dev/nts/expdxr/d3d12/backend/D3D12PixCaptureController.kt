@@ -115,7 +115,7 @@ internal object D3D12PixCaptureController {
         }
         if (!D3D12Settings.pixTimingCapture) {
             LOGGER.info(
-                "[dxrmc] PIX capture key pressed, but [debug] pixTimingCapture is off - nothing started",
+                "PIX capture key pressed, but [debug] pixTimingCapture is off - nothing started",
             )
             return
         }
@@ -141,7 +141,7 @@ internal object D3D12PixCaptureController {
                     ),
                 )
                 LOGGER.info(
-                    "[dxrmc] PIX capture started: {} ({} frames, press {} again to stop early)",
+                    "PIX capture started: {} ({} frames, press {} again to stop early)",
                     path,
                     limit,
                     KEY.translatedKeyMessage.string,
@@ -149,17 +149,17 @@ internal object D3D12PixCaptureController {
             }
 
             0 -> {
-                LOGGER.warn("[dxrmc] PIX capture: PIX is already recording; nothing started")
+                LOGGER.warn("PIX capture: PIX is already recording; nothing started")
                 postFailure(TRANSLATION_FAIL_RECORDING)
             }
 
             Int.MIN_VALUE -> {
-                LOGGER.warn("[dxrmc] PIX capture: the loaded MCDR.dll has no mcdrStartPixTimingCapture")
+                LOGGER.warn("PIX capture: the loaded MCDR.dll has no mcdrStartPixTimingCapture")
                 postFailure(TRANSLATION_FAIL_MISSING)
             }
 
             else -> {
-                LOGGER.error("[dxrmc] PIX capture FAILED to start (HRESULT 0x%08X)".format(Locale.ROOT, status))
+                LOGGER.error("PIX capture FAILED to start (HRESULT 0x%08X)".format(Locale.ROOT, status))
                 postHresult(status)
             }
         }
@@ -180,7 +180,7 @@ internal object D3D12PixCaptureController {
             1 -> {
                 postChat(stopMessage(path, capturedFrames, seconds, cause))
                 LOGGER.info(
-                    "[dxrmc] PIX capture stopped ({}), {} frames in {} s: {} - PIX writes the file on its own thread",
+                    "PIX capture stopped ({}), {} frames in {} s: {} - PIX writes the file on its own thread",
                     cause.name.lowercase(Locale.ROOT),
                     capturedFrames,
                     String.format(Locale.ROOT, "%.1f", seconds),
@@ -188,9 +188,9 @@ internal object D3D12PixCaptureController {
                 )
             }
 
-            0 -> LOGGER.warn("[dxrmc] PIX capture: stop requested but nothing was recording")
+            0 -> LOGGER.warn("PIX capture: stop requested but nothing was recording")
             else -> {
-                LOGGER.error("[dxrmc] PIX capture: stop FAILED (HRESULT 0x%08X)".format(Locale.ROOT, status))
+                LOGGER.error("PIX capture: stop FAILED (HRESULT 0x%08X)".format(Locale.ROOT, status))
                 postHresult(status)
             }
         }
@@ -237,7 +237,7 @@ internal object D3D12PixCaptureController {
         try {
             Minecraft.getInstance().gui.hud.chat.addClientSystemMessage(message)
         } catch (t: Throwable) {
-            LOGGER.warn("[dxrmc] PIX capture: cannot post the capture state to chat: {}", t.toString())
+            LOGGER.warn("PIX capture: cannot post the capture state to chat: {}", t.toString())
         }
     }
 
@@ -300,14 +300,14 @@ internal object D3D12PixCaptureController {
             val next = highest + 1
             if (next > MAX_CAPTURE_INDEX) {
                 LOGGER.error(
-                    "[dxrmc] PIX capture: run/pix already holds captures up to number {}; remove some first",
+                    "PIX capture: run/pix already holds captures up to number {}; remove some first",
                     highest,
                 )
                 return null
             }
             directory.resolve("dxrmc-capture-$next.wpix")
         } catch (t: Throwable) {
-            LOGGER.error("[dxrmc] PIX capture: cannot prepare run/pix: {}", t.toString())
+            LOGGER.error("PIX capture: cannot prepare run/pix: {}", t.toString())
             null
         }
     }

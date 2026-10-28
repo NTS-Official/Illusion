@@ -75,19 +75,19 @@ public final class DxrmcEarlyWindowProvider implements ImmediateWindowProvider {
     @Override
     public void initialize(ProgramArgs args) {
         if (!SDLInit.SDL_Init(SDLInit.SDL_INIT_VIDEO)) {
-            LOGGER.error("[P268] SDL_Init failed: {}", SDLError.SDL_GetError());
+            LOGGER.error("SDL_Init failed: {}", SDLError.SDL_GetError());
             return;
         }
         window = SDLVideo.SDL_CreateWindow("Minecraft* NeoForge", INITIAL_WIDTH, INITIAL_HEIGHT,
                 SDLVideo.SDL_WINDOW_RESIZABLE);
         if (window == 0L) {
-            LOGGER.error("[P268] SDL_CreateWindow failed: {}", SDLError.SDL_GetError());
+            LOGGER.error("SDL_CreateWindow failed: {}", SDLError.SDL_GetError());
             return;
         }
         SDLVideo.SDL_SetWindowPosition(window, SDLVideo.SDL_WINDOWPOS_CENTERED, SDLVideo.SDL_WINDOWPOS_CENTERED);
         renderer = SDLRender.SDL_CreateRenderer(window, "software");
         if (renderer == 0L) {
-            LOGGER.warn("[P268] software renderer unavailable ({}), using default renderer",
+            LOGGER.warn("software renderer unavailable ({}), using default renderer",
                     SDLError.SDL_GetError());
             renderer = SDLRender.SDL_CreateRenderer(window, (CharSequence) null);
         }
@@ -95,20 +95,20 @@ public final class DxrmcEarlyWindowProvider implements ImmediateWindowProvider {
         logo = loadLogo();
         mojangles = loadImage(MOJANGLES_RESOURCE);
         System.setProperty(HANDLE_PROPERTY, Long.toString(window));
-        LOGGER.info("[P268] early window created handle={} renderer={} (single-window mode)", window, renderer);
-        LOGGER.info("[P272] loading screen: logo={} bar=purple caption='{}' (Mojangles glyphs={})", logo != null ? logo.getWidth() + "x" + logo.getHeight() : "missing", CAPTION, mojangles != null ? mojangles.getWidth() + "x" + mojangles.getHeight() : "missing");
+        LOGGER.info("early window created handle={} renderer={} (single-window mode)", window, renderer);
+        LOGGER.info("loading screen: logo={} bar=purple caption='{}' (Mojangles glyphs={})", logo != null ? logo.getWidth() + "x" + logo.getHeight() : "missing", CAPTION, mojangles != null ? mojangles.getWidth() + "x" + mojangles.getHeight() : "missing");
         redraw();
     }
 
     private BufferedImage loadLogo() {
         try (InputStream in = DxrmcEarlyWindowProvider.class.getResourceAsStream(LOGO_RESOURCE)) {
             if (in == null) {
-                LOGGER.warn("[P271] logo resource {} is missing from the early-window jar", LOGO_RESOURCE);
+                LOGGER.warn("logo resource {} is missing from the early-window jar", LOGO_RESOURCE);
                 return null;
             }
             return ImageIO.read(in);
         } catch (Throwable t) {
-            LOGGER.warn("[P271] cannot decode the loading screen logo: {}", t.toString());
+            LOGGER.warn("cannot decode the loading screen logo: {}", t.toString());
             return null;
         }
     }
@@ -168,12 +168,12 @@ public final class DxrmcEarlyWindowProvider implements ImmediateWindowProvider {
     private BufferedImage loadImage(String resource) {
         try (InputStream in = DxrmcEarlyWindowProvider.class.getResourceAsStream(resource)) {
             if (in == null) {
-                LOGGER.warn("[P271] {} is missing from the early-window jar", resource);
+                LOGGER.warn("{} is missing from the early-window jar", resource);
                 return null;
             }
             return ImageIO.read(in);
         } catch (Throwable t) {
-            LOGGER.warn("[P271] cannot decode {}: {}", resource, t.toString());
+            LOGGER.warn("cannot decode {}: {}", resource, t.toString());
             return null;
         }
     }
@@ -272,29 +272,29 @@ public final class DxrmcEarlyWindowProvider implements ImmediateWindowProvider {
     private void logTextureFailure(String what) {
         if (!textureFailureLogged) {
             textureFailureLogged = true;
-            LOGGER.warn("[P271] {} failed: {}", what, SDLError.SDL_GetError());
+            LOGGER.warn("{} failed: {}", what, SDLError.SDL_GetError());
         }
     }
 
     @Override
     public void setMinecraftVersion(String version) {
-        LOGGER.info("[P268] minecraftVersion={}", version);
+        LOGGER.info("minecraftVersion={}", version);
     }
 
     @Override
     public void setNeoForgeVersion(String version) {
-        LOGGER.info("[P268] neoForgeVersion={}", version);
+        LOGGER.info("neoForgeVersion={}", version);
     }
 
     @Override
     public void crash(String message) {
-        LOGGER.error("[P268] crash: {}", message);
+        LOGGER.error("crash: {}", message);
     }
 
     @Override
     public void displayFatalErrorAndExit(List<ModLoadingIssue> issues, @Nullable Path modsFolder,
             @Nullable Path logFile, @Nullable Path crashReportFile) {
-        LOGGER.error("[P268] fatal loading error, {} issue(s)", issues.size());
+        LOGGER.error("fatal loading error, {} issue(s)", issues.size());
         Runtime.getRuntime().halt(1);
     }
 
@@ -310,14 +310,14 @@ public final class DxrmcEarlyWindowProvider implements ImmediateWindowProvider {
         if (!adopted) {
             // P269: the game is not on our Direct3D 12 backend, so vanilla just created its own window. Ours must
             // not stay on screen as a stray second window.
-            LOGGER.info("[P269] graphics backend is not D3D12 - dropping the early window, vanilla creates its own");
+            LOGGER.info("graphics backend is not D3D12 - dropping the early window, vanilla creates its own");
             close();
             if (window != 0L) {
                 SDLVideo.SDL_HideWindow(window);
             }
             return new WindowState(0, 0, INITIAL_WIDTH, INITIAL_HEIGHT, false, false, false, false);
         }
-        LOGGER.info("[P268] handing the early window over to Minecraft (same window, no recreate)");
+        LOGGER.info("handing the early window over to Minecraft (same window, no recreate)");
         // Keep the last frame on screen: destroying the renderer here would leave the window black until
         // the game presents its first frame, which reads as a flash. Released in close().
         return new WindowState(0, 0, INITIAL_WIDTH, INITIAL_HEIGHT, false, false, false, false);

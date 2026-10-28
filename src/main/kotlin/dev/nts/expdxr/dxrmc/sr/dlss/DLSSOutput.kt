@@ -31,7 +31,6 @@ import dev.nts.expdxr.d3d12.render.core.D3D12GpuTexture
  */
 object DLSSOutput {
 
-    private const val PREFIX: String = "P108z:"
 
     /**
      * `format` 参数 = native `dx12CreateTexture` 的枚举序数。历史日志里
@@ -182,14 +181,14 @@ object DLSSOutput {
                 MCDR_ABI.D3D12SetDlssOutput(0L)
             } catch (t: Throwable) {
                 Illusion.LOGGER.warn(
-                    "[dxrmc] $PREFIX clearing the native DLSS output override before release threw: {}", t)
+                    "clearing the native DLSS output override before release threw: {}", t)
             }
         }
         // 2) 再销毁这张纹理。
         try {
             existing.close()
         } catch (t: Throwable) {
-            Illusion.LOGGER.warn("[dxrmc] $PREFIX closing the DLSS output texture threw: {}", t)
+            Illusion.LOGGER.warn("closing the DLSS output texture threw: {}", t)
         }
         note("released the JVM-side DLSS output texture (native override cleared BEFORE close)")
     }
@@ -209,9 +208,9 @@ object DLSSOutput {
         }
         this.lastNote = message
         if (warn) {
-            Illusion.LOGGER.warn("[dxrmc] $PREFIX {}", message)
+            Illusion.LOGGER.warn("{}", message)
         } else {
-            Illusion.LOGGER.info("[dxrmc] $PREFIX {}", message)
+            Illusion.LOGGER.info("{}", message)
         }
     }
 }

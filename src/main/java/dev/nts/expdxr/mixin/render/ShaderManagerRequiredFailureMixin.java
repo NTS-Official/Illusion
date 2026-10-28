@@ -42,9 +42,9 @@ public class ShaderManagerRequiredFailureMixin {
         Operation<RuntimeException> original) {
         RuntimeException thrown = original.call(message);
         if (message != null && message.startsWith(REQUIRED_PREFIX)) {
-            LOGGER.error("[dxrmc] 必需渲染管线加载失败，渲染线程已经没有可用的管线缓存（继续跑只会黑屏），"
-                + "因此升级为崩溃。最常见的成因是构建产物里缺着色器资源："
-                + "删掉 Illusion\\build\\resources\\main 再跑 processResources。\n{}", message);
+            LOGGER.error("A required render pipeline failed to load and no pipeline cache is left for the render thread, which can only end in a black screen, so this is escalated to a crash."
+                + " The usual cause is that the build output is missing its shader resources:"
+                + " delete Illusion\\build\\resources\\main and re-run processResources.\n{}", message);
             Minecraft minecraft = Minecraft.getInstance();
             if (minecraft != null) {
                 minecraft.delayCrash(CrashReport.forThrowable(thrown, "Loading required render pipelines"));

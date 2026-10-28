@@ -182,12 +182,17 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
                     Entry.Setting(DeepLearningSuperSampling.presetOption()),
                     Entry.Setting(DeepLearningSuperSampling.qualityOption()),
                     Entry.Setting(NvidiaReflex.option()),
-                    // P213：帧生成只在 DLSS 启用时才有意义，这里的 listOfNotNull 会把它藏掉。
-                    if (FrameGeneration.isAvailable()) Entry.Setting(FrameGeneration.option()) else null,
-                    if (FrameGeneration.isAvailable()) Entry.Setting(FrameGeneration.framesOption()) else null,
+                    // 用户 m03594：帧生成不是「一个总开关 + 配置文件挑后端」，而是每家的段内各一个
+                    // 开关，点开一家另外两家自动关（互锁在 FrameGeneration.requestBackend），全灭
+                    // 就是不启用。倍率滑条只跟着亮着的那家出现。
+                    FrameGeneration.backendOption(MCDR_ABI.FG_BACKEND_DLSSG)?.let { Entry.Setting(it) },
+                    if (FrameGeneration.isEnabled() && FrameGeneration.activeBackend() == MCDR_ABI.FG_BACKEND_DLSSG) {
+                        Entry.Setting(FrameGeneration.framesOption())
+                    } else {
+                        null
+                    },
                     // P300：状态行只说「为什么不能开 / 已就绪」；运行状态那行摊 native 的
-                    // `[fg] picked=… rebuilds=… tracks=…`，省得用户为了看它去翻日志。
-                    // 只在可用或已经开着时显示 —— 没有 DLSS 的机器上没必要挂一行"不可用"。
+                    // `[fg] picked=… rebuilds=…`，省得用户为了看它去翻日志。
                     if (FrameGeneration.isAvailable() || FrameGeneration.isEnabled()) {
                         Entry.Note(FrameGeneration.statusLine(), !FrameGeneration.isAvailable())
                     } else {
@@ -210,6 +215,15 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
                     Entry.Setting(SuperResolution.fsrOption()),
                     Entry.Setting(SuperResolution.fsrQualityOption()),
         Entry.Note(SuperResolution.runtimeLine(MCDR_ABI.SR_BACKEND_FSR)),
+                    // AMD 段的帧生成开关（FSR-FG）。互锁见 FrameGeneration.requestBackend。
+                    FrameGeneration.backendOption(MCDR_ABI.FG_BACKEND_FSRFG)?.let { Entry.Setting(it) },
+                    // FSR-FG 的 SDK 只插 1 张（2×），倍率行对它没有意义：给一行说明而不是一个
+                    // 选 2×/3×/4× 却永远只出 2× 的选项。
+                    if (FrameGeneration.isEnabled() && FrameGeneration.activeBackend() == MCDR_ABI.FG_BACKEND_FSRFG) {
+                        Entry.Note(translatable("dxr_mc.video.fg.fsr.fixed2x"))
+                    } else {
+                        null
+                    },
                     Entry.Heading(Component.empty()),
                     Entry.Heading(translatable("dxr_mc.video.group.intel")),
                     Entry.Note(
@@ -219,6 +233,13 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
                     Entry.Setting(SuperResolution.xessOption()),
                     Entry.Setting(SuperResolution.xessQualityOption()),
         Entry.Note(SuperResolution.runtimeLine(MCDR_ABI.SR_BACKEND_XESS)),
+                    // Intel 段的帧生成开关（XeSS-FG）。
+                    FrameGeneration.backendOption(MCDR_ABI.FG_BACKEND_XESSFG)?.let { Entry.Setting(it) },
+                    if (FrameGeneration.isEnabled() && FrameGeneration.activeBackend() == MCDR_ABI.FG_BACKEND_XESSFG) {
+                        Entry.Setting(FrameGeneration.framesOption())
+                    } else {
+                        null
+                    },
                     Entry.Heading(Component.empty()),
                     Entry.Heading(translatable("dxr_mc.video.group.sr_shared")),
                     Entry.Setting(SuperResolution.maskOption()),
@@ -382,12 +403,9 @@ class D3D12VideoSettingsScreen(private val parent: Screen) :
         if (option === SuperResolution.maskOption() && !SuperResolution.maskSupported()) {
             return Component.translatable("dxr_mc.video.lock.sr_mask_unsupported")
         }
-        // 帧生成：这台机器/这个组合根本跑不起来时别让人拨过去（P300：能力表说了不行就照说）。
-        // 已经开着的时候**不能**锁 —— 回滚把期望值清成 0 之后，用户得能把开关关掉、免得下次又被
-        // 静默重试；而且 `isEnabled()` 为真时行上的值本来就该能改。
-        if ((option === FrameGeneration.option() || option === FrameGeneration.framesOption()) && !FrameGeneration.isEnabled() && !FrameGeneration.isAvailable()) {
-            return Component.translatable("dxr_mc.video.lock.fg_unavailable")
-        }
+        // 帧生成的厂商开关一律不锁：能力表说 `available = 0` 的后端（FSR-FG / XeSS-FG 的实验期）
+        // 正是用户要能点开试的；真的跑不起来由 native 的 note 与状态行解释，而不是把开关灰掉。
+        // 倍率行只在某家亮着时出现，能出现就说明已经开着。
         if (option === DeepLearningSuperSampling.qualityOption() && dlaa) {
             return Component.translatable("dxr_mc.video.lock.dlss_dlaa")
         }

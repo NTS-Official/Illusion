@@ -10,7 +10,6 @@ import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.adapter.D3D12AdapterInfo
 import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12VariableShadingRate
 import dev.nts.expdxr.misc.IllusionLogger
-import dev.nts.expdxr.misc.block.SkyBlocks
 import net.neoforged.bus.api.IEventBus
 import net.neoforged.fml.ModContainer
 import net.neoforged.fml.common.Mod
@@ -35,8 +34,6 @@ class Illusion(modEventBus: IEventBus, modContainer: ModContainer) {
 
     init {
         modContainer.registerConfig(ModConfig.Type.CLIENT, IllusionConfig.SPEC)
-        // 天空方块：方块 / 物品 / 方块实体都要在注册表冻结之前挂上。
-        SkyBlocks.register(modEventBus)
         // P237：F3 的 VRS 行是一个独立 debug entry，由 F3+F6 的 DebugOptionsScreen 开关。
         D3D12VrsDebugEntry.register(modEventBus)
         // 退出存档时把 VRS 诊断计数清零（属于一局的统计，不跨存档累加）。
@@ -84,7 +81,7 @@ class Illusion(modEventBus: IEventBus, modContainer: ModContainer) {
      * diagnostics, it must never break mod construction.
      */
     private fun startupFeatureLevel(): String {
-        D3D12AdapterInfo.current?.let { return it.featureLevel }
+        D3D12AdapterInfo.current?.let { return@let it.featureLevel }
         if (!MCDR_ABI.isAvailable()) {
             return "unknown"
         }

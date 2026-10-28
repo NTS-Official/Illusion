@@ -211,8 +211,8 @@ object D3D12ObjectMotion {
             if (lastOverflowLoggedFrame != frameNumber) {
                 lastOverflowLoggedFrame = frameNumber
                 LOGGER.warn(
-                    "P76b: 物体行已满（$MAX_OBJECTS 行），本帧其余物体不参与逐物体速度修正" +
-                        "（累计丢弃 $overflowCount 个）"
+                    "object row buffer is full ($MAX_OBJECTS rows); the remaining objects skip per-object velocity correction this frame" +
+                        " ($overflowCount dropped so far)"
                 )
             }
             return

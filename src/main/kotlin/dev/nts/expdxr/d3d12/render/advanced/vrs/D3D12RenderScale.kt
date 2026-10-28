@@ -137,7 +137,7 @@ object D3D12RenderScale {
     @JvmStatic
     fun logSliderResync() {
         Illusion.LOGGER.info(
-            "[${Illusion.MODID}] P76i: render-scale slider re-synced to {}% ({} mode, range {}..{}%, step {}%)",
+            "render-scale slider re-synced to {}% ({} mode, range {}..{}%, step {}%)",
             percent, if (mode == MODE_DLSS) "DLSS" else "plain", minOf(), maxOf(), stepOf(),
         )
     }
@@ -259,9 +259,9 @@ object D3D12RenderScale {
     /** [setDlssMode] 的取证行：两个键与生效值一起打出来。 */
     private fun logModeSwitch() {
         Illusion.LOGGER.info(
-            "[${Illusion.MODID}] P105: renderScale 范围随 DLSS 切换：{}（{}..{}，步进 {}%）；生效 {}%，" +
-                "两个键 {}={} / {}={}",
-            if (mode == MODE_DLSS) "DLSS 开" else "DLSS 关",
+            "renderScale range follows the DLSS mode: {} ({}..{}, step {}%); effective {}%, " +
+                "keys {}={} / {}={}",
+            if (mode == MODE_DLSS) "DLSS on" else "DLSS off",
             minOf(), maxOf(), stepOf(), percent,
             OPTIONS_KEY, values[MODE_PLAIN], DLSS_OPTIONS_KEY, values[MODE_DLSS],
         )
@@ -352,7 +352,7 @@ object D3D12RenderScale {
         }
         dlaaLock = active
         Illusion.LOGGER.info(
-            "[${Illusion.MODID}] P105: DLAA {} render-scale lock; DLAA needs render == target, so "
+            "DLAA {} render-scale lock; DLAA needs render == target, so "
                 + "the scale is {}100%",
             if (active) "engaged the" else "released the", if (active) "pinned to " else "free from ")
         if (active) {
@@ -454,7 +454,7 @@ object D3D12RenderScale {
         } else {
             Illusion.LOGGER.info(
                 "[${Illusion.MODID}] render scale = $percent%; the world's render target is created at that " +
-                    "fraction of the window and the GUI keeps a window-sized target of its own (P106)",
+                    "fraction of the window and the GUI keeps a window-sized target of its own",
             )
         }
     }
@@ -673,8 +673,8 @@ object D3D12RenderScale {
             if (!warnedScaledWithoutBackend) {
                 warnedScaledWithoutBackend = true
                 Illusion.LOGGER.info(
-                    "P105: renderScale={}% 已记录，但这一轮 D3D12 后端没在驱动渲染，主渲染目标按窗口尺寸分配" +
-                        "（原版呈现路径读不了缩小的主目标）；切回 D3D12 后自动生效。",
+                    "renderScale={}% recorded, but the D3D12 backend is not driving rendering this session, so the main render target keeps the window size" +
+                        " (the vanilla present path cannot read a scaled main target); it applies once D3D12 takes over again",
                     p,
                 )
             }
@@ -720,8 +720,8 @@ object D3D12RenderScale {
         if (applied != percent && !loggedPendingPercent) {
             loggedPendingPercent = true
             Illusion.LOGGER.info(
-                "P302: 世界层目标先按已生效的 {}% 分配（用户已经改成 {}%）；主目标的重建排在帧边界，"
-                    + "重建完两者才一起换到新比例",
+                "the world layer allocates at the already-applied {}% first (the user has asked for {}%); the main target is rebuilt at the frame boundary, "
+                    + "and only then do both switch to the new scale",
                 applied, percent,
             )
         }
@@ -729,8 +729,8 @@ object D3D12RenderScale {
         if (result != value && !loggedWorldLayerSize) {
             loggedWorldLayerSize = true
             Illusion.LOGGER.info(
-                "P105b: 世界层辅助目标（translucent/particles/weather/clouds + 后处理内部目标）按渲染尺寸分配" +
-                    "（主目标 {} -> {}，renderScale={}%）；深度拷贝与合成回到同一坐标系",
+                "world-layer auxiliary targets (translucent/particles/weather/clouds plus the post-processing internals) follow the render size" +
+                    " (main target {} -> {}, renderScale={}%); the depth copy and the composite return to one coordinate space",
                 value, result, applied,
             )
         }
@@ -758,12 +758,12 @@ object D3D12RenderScale {
         if (result != value) {
             // 取证用：只有真正缩放时才打；主目标每次（重）建纹理最多四行
             // （allocateColorAttachment / allocateDepthAttachment 两处分配 × 宽、高各一）。
-            Illusion.LOGGER.info("P105: 主渲染目标附件 {} -> {}（renderScale={}%）", value, result, percent)
+            Illusion.LOGGER.info("main render target attachments {} -> {} (renderScale={}%)", value, result, percent)
         } else if (dlaaLock && percent == DEFAULT_PERCENT) {
             // DLAA 的验收条件就是"附件尺寸 == 窗口尺寸"，所以 100% 时也要留一行显式读数
             //（`result == value` 是恒等变换，正常路径刻意不打，以免变成每帧日志）。
             Illusion.LOGGER.info(
-                "P105: 主渲染目标附件 {} -> {}（renderScale=100%，DLAA 锁定：render == target）",
+                "main render target attachments {} -> {} (renderScale=100%, DLAA locked: render == target)",
                 value, result,
             )
         }

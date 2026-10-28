@@ -25,8 +25,6 @@ import java.util.Locale
  */
 object D3D12SrMask {
 
-    private const val PREFIX = "[SR] mask"
-
     private const val MAX_MASK = 900
 
     /** `LevelRenderer.OIT_COEFFICIENT_COUNT = Math.powExact(2, 3)`。 */
@@ -235,8 +233,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
             if (!announced) {
                 announced = true
                 Illusion.LOGGER.info(
-                    "{} wavelet reconstruction: {} coefficient attachment(s), {} coefficients, rank {}",
-                    prefixLine(), attachments, COEFF_COUNT, WAVELET_RANK)
+                    "SR mask wavelet reconstruction: {} coefficient attachment(s), {} coefficients, rank {}",
+                    attachments, COEFF_COUNT, WAVELET_RANK)
             }
         }
         if (texture == null || width != maskWidth || height != maskHeight) {
@@ -249,7 +247,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
             width = maskWidth
             height = maskHeight
             verified = false
-            Illusion.LOGGER.info("{} {}x{} mask texture", prefixLine(), maskWidth, maskHeight)
+            Illusion.LOGGER.info("SR mask {}x{} mask texture", maskWidth, maskHeight)
         }
         return true
     }
@@ -276,17 +274,15 @@ void main(uint3 tid : SV_DispatchThreadID) {
         val mean = sum / pixels.size
         val percent = 100.0 * nonZero / pixels.size
         Illusion.LOGGER.info(
-            "{} first frame: mean={} peak={} non-zero={}% of {} pixels ({} attachments, scale {})",
-            prefixLine(), fmt(mean), peak, fmt(percent), pixels.size, attachments, MAX_MASK)
+            "SR mask first frame: mean={} peak={} non-zero={}% of {} pixels ({} attachments, scale {})",
+            fmt(mean), peak, fmt(percent), pixels.size, attachments, MAX_MASK)
     }
 
     private fun fmt(value: Double): String = String.format(Locale.ROOT, "%.2f", value)
 
-    private fun prefixLine(): String = "[dxrmc] $PREFIX"
-
     private fun fail(reason: String) {
         failure = reason
-        Illusion.LOGGER.warn("{} disabled: {}", prefixLine(), reason)
+        Illusion.LOGGER.warn("SR mask disabled: {}", reason)
     }
 
     fun release() {

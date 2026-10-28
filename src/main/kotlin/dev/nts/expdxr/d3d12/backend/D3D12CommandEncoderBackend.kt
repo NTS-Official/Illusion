@@ -119,7 +119,7 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
         val completed = MCDR_ABI.D3D12AsyncRenderWaitComplete(this.ctx, 10_000L)
         if (prof) gProfWaitSubmitNs += System.nanoTime() - t0
         if (!completed) {
-            IllusionLogger.warnMessage("[backend] [P33] asyncRenderWaitComplete timeout! ctx=0x${this.ctx.toULong().toString(16)}")
+            IllusionLogger.warnMessage("asyncRenderWaitComplete timeout! ctx=0x${this.ctx.toULong().toString(16)}")
             System.err.flush()
         }
     }
@@ -596,7 +596,7 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
                 try {
                     callback.run()
                 } catch (t: Throwable) {
-                    System.err.println("[P199i] post-submit callback failed: " + t)
+                    IllusionLogger.warnMessage("post-submit callback failed: " + t)
                     t.printStackTrace()
                 }
             }
@@ -625,7 +625,7 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
         if (prof) gProfRecordingReadyNs += System.nanoTime() - profT0
         if (!recordingReady) {
             // P41：渲染线程卡死，降级到 SYNC 模式避免整个游戏崩溃
-            IllusionLogger.warnMessage("[backend] [P41] asyncRenderWaitRecordingReady timeout after 5000ms — falling back to SYNC, ctx=0x"
+            IllusionLogger.warnMessage("asyncRenderWaitRecordingReady timeout after 5000ms — falling back to SYNC, ctx=0x"
                 + this.ctx.toULong().toString(16))
             System.err.flush()
             // 清除 gAsyncRenderCtx，防止下一个 asyncBeginFrame 被 "previous frame not complete" 拒绝
@@ -643,7 +643,7 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
                 try {
                     callback.run()
                 } catch (t: Throwable) {
-                    System.err.println("[P199i] post-submit callback failed: " + t)
+                    IllusionLogger.warnMessage("post-submit callback failed: " + t)
                     t.printStackTrace()
                 }
             }
@@ -673,7 +673,7 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
             try {
                 callback.run()
             } catch (t: Throwable) {
-                System.err.println("[P199i] post-submit callback failed: " + t)
+                IllusionLogger.warnMessage("post-submit callback failed: " + t)
                 t.printStackTrace()
             }
         }
@@ -683,24 +683,24 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
             gProfTotalNs += System.nanoTime() - profStart
             if (gProfAsyncFrames % PROF_INTERVAL == 0L) {
                 val inv = 1.0 / PROF_INTERVAL
-                IllusionLogger.debugMessage("[backend-java] P3 prof n=${PROF_INTERVAL}"
+                IllusionLogger.debugMessage("prof n=${PROF_INTERVAL}"
                     + " frameInterval=${profMs(gProfIntervalNs * inv)}"
                     + "ms recordingReady=${profMs(gProfRecordingReadyNs * inv)}"
                     + "ms waitSubmit=${profMs(gProfWaitSubmitNs * inv)}"
                     + "ms submitTotal=${profMs(gProfTotalNs * inv)}ms")
                 // P3 绘制热路径：判断帧时间花在 mod 绘制路径还是 MC 自身逻辑。
-                IllusionLogger.debugMessage("[backend-java] P3 core: batches/frame=${D3D12RenderPassBackend.gProfMultiBatches * inv}"
+                IllusionLogger.debugMessage("core: batches/frame=${D3D12RenderPassBackend.gProfMultiBatches * inv}"
                     + " draws/frame=${D3D12RenderPassBackend.gProfMultiDraws * inv}"
                     + " batchPath=${profMs(D3D12RenderPassBackend.gProfMultiPathNs * inv)}ms"
                     + " drawIndexedCalls/frame=${D3D12RenderPassBackend.gProfDrawIndexedCalls * inv}"
                     + " drawIndexed=${profMs(D3D12RenderPassBackend.gProfDrawIndexedNs * inv)}ms")
                 // P3b：并行批量路径四段拆分（主线程串行 vs worker 并行）。
-                IllusionLogger.debugMessage("[backend-java] P3 batch: build=${profMs(D3D12RenderPassBackend.gProfBuildNs * inv)}"
+                IllusionLogger.debugMessage("batch: build=${profMs(D3D12RenderPassBackend.gProfBuildNs * inv)}"
                     + "ms prepare=${profMs(D3D12RenderPassBackend.gProfPrepareNs * inv)}"
                     + "ms workers=${profMs(D3D12RenderPassBackend.gProfWorkersNs * inv)}"
                     + "ms execute=${profMs(D3D12RenderPassBackend.gProfExecuteNs * inv)}"
                     + "ms fallbacks=${D3D12RenderPassBackend.gProfFallbacks * inv}"
-                    + " | P62 batchDraws=${D3D12RenderPassBackend.gProfSharedBatchDraws}"
+                    + " | batchDraws=${D3D12RenderPassBackend.gProfSharedBatchDraws}"
                     + " vbSame=${D3D12RenderPassBackend.gProfSameVbBuf}"
                     + " vbSameOff=${D3D12RenderPassBackend.gProfSameVbOff}"
                     + " ibSame=${D3D12RenderPassBackend.gProfSameIbBuf}"
@@ -710,7 +710,7 @@ class D3D12CommandEncoderBackend : CommandEncoderBackend {
                     + " singleBundle=${D3D12RenderPassBackend.gProfSingleBundles}"
                     + " srvVaryFallback=${D3D12RenderPassBackend.gProfSrvVaryFallbacks}"
                     + " slots=${D3D12RenderPassBackend.gProfSlotsTotal}"
-                    + " | P62b bc=${D3D12RenderPassBackend.gProfBcTotal}"
+                    + " | bc=${D3D12RenderPassBackend.gProfBcTotal}"
                     + " cbvVary=${D3D12RenderPassBackend.gProfCbvVary}"
                     + " cbvSame=${D3D12RenderPassBackend.gProfCbvSame}"
                     + " srvVary=${D3D12RenderPassBackend.gProfSrvVary}"

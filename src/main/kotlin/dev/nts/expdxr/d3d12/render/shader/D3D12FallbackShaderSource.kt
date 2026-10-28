@@ -41,7 +41,7 @@ object D3D12FallbackShaderSource {
     @JvmStatic
     fun setProvider(value: ResourceProvider?) {
         if (value != null && this.provider == null) {
-            LOGGER.info("[backend-java] captured vanilla shader provider (pre-reload fallback armed)")
+            LOGGER.info("captured vanilla shader provider (pre-reload fallback armed)")
         }
         this.provider = value
     }

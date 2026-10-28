@@ -95,7 +95,7 @@ object D3D12PostSharpen {
         if (!announced) {
             announced = true
             LOGGER.info(
-                "[dxrmc] P121: post-sharpen active (5-tap unsharp, amount={})",
+                "post-sharpen active (5-tap unsharp, amount={})",
                 amount,
             )
         }
@@ -116,12 +116,12 @@ object D3D12PostSharpen {
         supported = MCDR_ABI.supportsSharpenTextureToTexture()
         if (supported) {
             LOGGER.info(
-                "[dxrmc] P121: MCDR.dll exports the post-sharpen pass (amount={})",
+                "MCDR.dll exports the post-sharpen pass (amount={})",
                 amount,
             )
         } else {
             LOGGER.warn(
-                "[dxrmc] P121: this MCDR.dll has no mcdr_dx12SharpenTextureToTexture; " +
+                "this MCDR.dll has no mcdr_dx12SharpenTextureToTexture; " +
                     "sharpening stays off (falling back to the plain blit)",
             )
         }
@@ -135,7 +135,7 @@ object D3D12PostSharpen {
         }
         failureLogged = true
         LOGGER.warn(
-            "[dxrmc] P121: post-sharpen unavailable ({}); falling back to the plain blit",
+            "post-sharpen unavailable ({}); falling back to the plain blit",
             reason,
         )
     }
@@ -171,7 +171,7 @@ object D3D12PostSharpen {
             created
         } catch (t: Throwable) {
             LOGGER.warn(
-                "[dxrmc] P121: could not create the {}x{} sharpen scratch ({}) ; DLAA/DLSS " +
+                "could not create the {}x{} sharpen scratch ({}) ; DLAA/DLSS " +
                     "will not be sharpened",
                 width, height, t,
             )

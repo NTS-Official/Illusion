@@ -11,7 +11,10 @@ import dev.nts.expdxr.d3d12.render.advanced.vrs.D3D12VariableShadingRate
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuTexture
 import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.core.D3D12GpuTextureView
+import dev.nts.expdxr.dxrmc.framegen.FrameGeneration
+import dev.nts.expdxr.dxrmc.sr.SuperResolution
 import net.minecraft.client.Minecraft
+import org.joml.Vector4f
 
 /**
  * P106：GUI 的独立全尺寸渲染目标（世界层与界面解耦的最后一块）。
@@ -42,6 +45,18 @@ import net.minecraft.client.Minecraft
  * width=1920, height=1000]`）：GUI 的 scissor 按**窗口像素**算，一旦落进缩放后的世界目标
  * （1920x1000 < 窗口 2560x1334），vanilla 的越界校验必然抛异常。所以「宁可退回旧行为」这条
  * 兜底对 renderScale < 100% 是不安全的，界面必须始终待在自己的窗口尺寸目标里。
+ *
+ * <p>**P306ac（hudless 呈现）**：帧生成的 FSR-FG 要求「present 的世界层不含 UI，UI 由 SDK
+ * 用注册的 UI 资源合成一次」。于是这里多了一种模式：
+ *  - 世界层（[worldLayerThisFrame]，SR 的输出；没有 SR 时是主渲染目标）直接当**呈现源**，
+ *    最终 blit 不再经过 GUI 目标；
+ *  - GUI 仍然画进这张窗口尺寸目标，但它现在从**全透明**开始，于是 RGB 天然是「按自身 alpha
+ *    预乘」、alpha 通道是正确覆盖度（原版 `BlendFunction.TRANSLUCENT` 的 alpha 通道是
+ *    ONE/INV_SRC_ALPHA），正好对应 FFX 的 `USE_PREMUL_ALPHA` 合成；
+ *  - 这张目标同时就是 [pushUiTextureToFrameGen] 交给后端的 UI 纹理。
+ *
+ * 模式只在帧边界（[armUiComposition]，present 之后）裁决一次：世界层是搬进 GUI 目标还是直接
+ * 呈现，必须与 SR 本帧的行为一致，而 SR 的挂点排在 [prepareForGui] 之前。
  */
 class D3D12GUIRenderTarget(useStencil: Boolean) :
     // 26.3：RenderTarget 的构造器变成 (label, colorFormat, depthFormat)，不再有 clear/stencil 布尔。
@@ -69,23 +84,6 @@ object D3D12GUISplit {
     @Volatile
     private var lastFailure: String? = null
 
-    /**
-     * P108x（用户 m11686）取证：`worldLayerAlreadyInTarget` 这个读数的限流打点状态
-     * （只渲染线程读写，不需要 `@Volatile`）。
-     *
-     * 打点分两段：前 [DLSS_FLAG_LOG_LIMIT] 次不限速（DLSS 刚打开那几帧），之后每
-     * [DLSS_FLAG_LOG_INTERVAL_MILLIS] 毫秒最多一行 —— 既能看到"标记确实被读成 true"，
-     * 也不会每帧刷屏。
-     */
-    private var dlssFlagLogs = 0
-    private var dlssFlagLastLogMillis = 0L
-
-    /** P108x 取证：不限速的前几行。 */
-    private const val DLSS_FLAG_LOG_LIMIT: Int = 5
-
-    /** P108x 取证：限流之后每行之间的最小间隔（1 秒）。 */
-    private const val DLSS_FLAG_LOG_INTERVAL_MILLIS: Long = 1000L
-
     /** 创建失败只报一次，之后永久回退（不要每帧重试、每帧刷日志）。 */
     @Volatile
     private var givenUp = false
@@ -97,6 +95,27 @@ object D3D12GUISplit {
      */
     @Volatile
     private var worldLayerDoneThisFrame = false
+
+    /**
+     * P306ac：本帧 SR 升采样出的世界层（窗口尺寸、不含 UI）。hudless 模式下它就是呈现源；
+     * 只在 SR 真的成功那一帧有值，帧边界由 [armUiComposition] 清空 —— 否则菜单/加载屏
+     * 那一帧会把一张早已释放的纹理交给最终 blit。
+     */
+    @Volatile
+    private var worldLayerThisFrame: D3D12GpuTexture? = null
+
+    /**
+     * P306ac：hudless 呈现**对这一帧是否生效**（呈现源与 UI 分工都按它来）。
+     *
+     * 它只在 present 之后（[armUiComposition]）更新，所以同一帧里 SR、[prepareForGui] 与最终
+     * blit 看到的是同一个值：世界层该搬进 GUI 目标还是直接呈现，绝不能在一帧里选两次。
+     */
+    @Volatile
+    private var hudlessArmed = false
+
+    /** 已经推给 native 的 hudless 状态；只在**真的变化**时推一次（native 侧会打一行日志）。 */
+    @Volatile
+    private var hudlessPushed = false
 
     /** P305c：上一次交给 native 的 UI 纹理句柄（同一张只推一次）+「老 DLL 没有这条导出」只警告一次。 */
     private var pushedUiHandle: Long = 0L
@@ -120,7 +139,90 @@ object D3D12GUISplit {
 
     /** 只有 renderScale 偏离 100% 才需要拆分；100% 时整体关闭、零行为变化。 */
     @JvmStatic
-    fun isActive(): Boolean = D3D12RenderScale.isEnabled()
+    fun isActive(): Boolean = D3D12RenderScale.isEnabled() || hudlessArmed
+
+    /**
+     * P306ac：把本帧升采样出的世界层记下来（= 呈现源）。
+     *
+     * <p>hudless 模式下它同时是「世界层已经就位」的标记，[prepareForGui] 据此跳过搬移；
+     * 合成模式下 SR 仍然要自己把它 blit 进 GUI 目标，这里只是顺手记着（不参与选择）。
+     * **必须在 SR 成功写完之后、[prepareForGui] 之前调用**（`GameRendererSmaaWorldMixin` 的顺序）。
+     */
+    @JvmStatic
+    fun markWorldLayer(texture: D3D12GpuTexture) {
+        worldLayerThisFrame = texture
+        worldLayerDoneThisFrame = true
+    }
+
+    /** P306ac：这一帧是否走 hudless 呈现。SR 与 [prepareForGui] 都读同一个 latch。 */
+    @JvmStatic
+    fun isHudlessArmed(): Boolean = hudlessArmed
+
+    /**
+     * P306ac：帧边界（present 之后）裁决一次 hudless 呈现，并把结果推给 native。
+     *
+     * <p>为什么放在 present 之后，而不是帧首或 [prepareForGui]：世界层的去向（搬进 GUI 目标 vs
+     * 直接呈现）必须与**本帧** SR 的行为一致，而 SR 的挂点排在 [prepareForGui] 之前
+     * （`GameRendererSmaaWorldMixin`）。只有在上一次 present 之后定下来，下一帧的 SR、界面与最终
+     * blit 才可能看到同一个值。
+     *
+     * <p>要不要打开由 [FrameGeneration.hudlessWanted]（后端 + 有没有 3D 世界层）与 native 的
+     * `D3D12FgUiCompositionReady` 共同决定。后者回答的是"**SDK 现在真的在合成 UI**吗"，判据是
+     * 「链已包 + UI 纹理已交过去 + 已经发生过插帧 dispatch」——P306ad 之前只看前两条，于是在
+     * "开了 FSR-FG 但没开超分/倍率还是 100%"的场合也照样武装：present 只送世界层，UI 注册却落在
+     * 一条没人 Present 的代理链上，界面整层消失。它**不回答**「hudless 开没开」，否则第一次打开
+     * 时会因为还没打开而永远打不开。
+     */
+    @JvmStatic
+    fun armUiComposition() {
+        // 本帧的世界层已经呈现过了；SR 下一帧不跑（菜单、世界切换）时这个引用会失效。
+        worldLayerThisFrame = null
+        // DLSS 超分（含 DLAA）把升采样结果**直接写进** GUI 目标（pInOutput 就是它），那条路径
+        // 没有"独立的世界层纹理"可交出去；它同时也是 DLSS-G 的 hudless 来源，不能混用。
+        val want = target != null &&
+            FrameGeneration.hudlessWanted() &&
+            SuperResolution.backendId() != MCDR_ABI.SR_BACKEND_DLSS
+        val ready = if (want) MCDR_ABI.D3D12FgUiCompositionReady() else 0
+        val able = want && ready == 1
+        if (want && !able) {
+            noteCompositionNotReady()
+        }
+        if (able != hudlessPushed && MCDR_ABI.D3D12FgSetUiComposition(able) == 1) {
+            hudlessPushed = able
+        }
+        val next = able && hudlessPushed
+        if (next == hudlessArmed) {
+            return
+        }
+        hudlessArmed = next
+        Illusion.LOGGER.info(
+            "hudless presentation {} - presenting {}, the GUI is {}",
+            if (next) "on" else "off",
+            if (next) "the world layer only" else "the world + GUI composite",
+            if (next) "composed by the frame generation backend" else "drawn by us into the presented image")
+    }
+
+    /**
+     * P306ad：想开 hudless 但 native 说后端还没在合成 UI。
+     *
+     * <p>这条日志存在的理由：用户报"界面整层消失"时，唯一能区分"没武装"与"武装了但没人合成"的
+     * 就是日志。它每 10 秒最多一行，正常进游戏（先开超分再开 FG）只会出现一两行。
+     */
+    private fun noteCompositionNotReady() {
+        val now = System.nanoTime()
+        if (now - lastNotReadyLogNanos < NOT_READY_LOG_INTERVAL_NANOS) return
+        lastNotReadyLogNanos = now
+        Illusion.LOGGER.info(
+            "hudless presentation wanted, but the frame generation backend is not composing yet " +
+                "(fg state={}, backend={}) - keeping the world + GUI composite",
+            MCDR_ABI.D3D12FgState(),
+            FrameGeneration.activeBackend())
+    }
+
+    private var lastNotReadyLogNanos = 0L
+
+    /** P306ad：`noteCompositionNotReady` 的节流间隔（10 秒）。 */
+    private const val NOT_READY_LOG_INTERVAL_NANOS = 10_000_000_000L
 
     /**
      * GUI（含标题界面全景图）这一帧该画到哪个目标。返回 null 表示调用方必须回退 vanilla 的
@@ -139,8 +241,10 @@ object D3D12GUISplit {
         // frameTarget 为空有两种情况：拆分没启用（主目标 = 窗口，vanilla 路径），或者 prepareForGui
         // 这一帧没跑到（挂点缺失/异常）。后一种情况下如果主目标其实是被缩放的，界面绝不能落进去，
         // 所以这里再判一次真实尺寸，必要时现场补一个 GUI 目标。
+        // P306ac：hudless 模式下 GUI 目标就是 UI 层，哪怕主目标已经是窗口尺寸也不能回到主目标 ——
+        // 回去就等于把 GUI 又画进世界层，后端插出来的帧会拖着 HUD。
         val current = frameTarget
-            ?: if (mainTargetMatchesWindow(minecraft)) return null else ensureTarget()
+            ?: if (!hudlessArmed && mainTargetMatchesWindow(minecraft)) return null else ensureTarget()
         val gui = current as? D3D12GUIRenderTarget ?: return null
         // 窗口可能在 prepareForGui 之后、GuiRenderer.draw 之前又变了尺寸；界面 scissor 是按窗口
         // 像素算的，目标只要小一点，vanilla 的 enableScissor 就会越界抛异常，所以这里再校一次。
@@ -213,6 +317,10 @@ object D3D12GUISplit {
                 if (existing.width != width || existing.height != height) {
                     existing.resize(width, height)
                     logGeometry(minecraft, existing, "resized")
+                    // P306ac：尺寸变了必须让 native 侧重新注册 —— FFX 在注册那一刻就把资源的
+                    // 描述与状态记下来了，尺寸不对会直接踩坏合成（也可能换成了另一张纹理，但
+                    // 句柄相同的情况同样要走一遍重推）。
+                    pushedUiHandle = 0L
                     pushUiTextureToFrameGen(existing)
                 }
                 existing
@@ -220,7 +328,7 @@ object D3D12GUISplit {
         } catch (t: Throwable) {
             givenUp = true
             Illusion.LOGGER.error(
-                "[dxrmc] P106: could not create the GUI's own render target; forcing render scale back to 100% so the GUI cannot outgrow the render area",
+                "could not create the GUI's own render target; forcing render scale back to 100% so the GUI cannot outgrow the render area",
                 t)
             // 没有窗口尺寸的界面目标时，界面只能回到主渲染目标；主目标若比窗口小（renderScale < 100%），
             // 界面的窗口像素 scissor 就会越界抛异常。退回 100% 是这种情况下唯一安全的兜底。
@@ -249,19 +357,19 @@ object D3D12GUISplit {
         val status = try {
             MCDR_ABI.D3D12FgSetUiTexture(handle)
         } catch (t: Throwable) {
-            Illusion.LOGGER.warn("[dxrmc] P305c: could not hand the GUI target to frame generation: {}", t.toString())
+            Illusion.LOGGER.warn("could not hand the GUI target to frame generation: {}", t.toString())
             return
         }
         when (status) {
             1 -> {
                 pushedUiHandle = handle
-                Illusion.LOGGER.info("[dxrmc] P305c: handed the GUI target ({}) to frame generation as the UI texture", handle)
+                Illusion.LOGGER.info("handed the GUI target ({}) to frame generation as the UI texture", handle)
             }
             Int.MIN_VALUE -> if (!warnedNoUiTexture) {
                 warnedNoUiTexture = true
-                Illusion.LOGGER.info("[dxrmc] P305c: this native library has no frame-generation UI texture entry point; UI tagging stays off")
+                Illusion.LOGGER.info("this native library has no frame-generation UI texture entry point; UI tagging stays off")
             }
-            else -> Illusion.LOGGER.warn("[dxrmc] P305c: frame generation rejected the GUI target as UI texture (status={})", status)
+            else -> Illusion.LOGGER.warn("frame generation rejected the GUI target as UI texture (status={})", status)
         }
     }
 
@@ -273,7 +381,7 @@ object D3D12GUISplit {
         val world = (minecraft.gameRenderer.mainRenderTarget().colorTextureView as? D3D12GpuTextureView)
             ?.texture() as? D3D12GpuTexture
         Illusion.LOGGER.info(
-            "[dxrmc] P106: GUI split {} - world {}x{} ({}%), GUI target {}x{}",
+            "GUI split {} - world {}x{} ({}%), GUI target {}x{}",
             state,
             world?.getWidth(0) ?: -1, world?.getHeight(0) ?: -1, D3D12RenderScale.percent(),
             gui.width, gui.height)
@@ -285,21 +393,21 @@ object D3D12GUISplit {
      */
     @JvmStatic
     fun prepareForGui() {
-        // 每帧重新起算：只有本帧真的把世界层搬进 GUI 目标，最终呈现才换源。
+        // 每帧重新起算：只有本帧真的把世界层搬进 GUI 目标，合成模式下的最终呈现才换源。
         preparedThisFrame = false
         frameTarget = null
         // P108：DLSS 在更早的挂点（主目标深度被清空之前）就把升采样后的世界层写进这张目标了。
         // 标志在这里读走并清零，后面的分支据此跳过世界层 blit。
         val worldLayerAlreadyInTarget = worldLayerDoneThisFrame
         worldLayerDoneThisFrame = false
-        // P108x（用户 m11686）取证：把在这里**读到**的标记值打出来（限流）。它与 DLSS 侧
-        // `onEvaluated` 里那行一起构成闭环：一侧说"我置位了"，另一侧说"我读到的是 true/false"。
-        logDlssFlag(worldLayerAlreadyInTarget)
         if (givenUp) {
             return
         }
         val minecraft = Minecraft.getInstance()
-        if (mainTargetMatchesWindow(minecraft)) {
+        // P306ac：hudless 模式下 GUI 目标就是 UI 层，必须无条件启用拆分 —— 100% 缩放时也不能
+        // 让界面落回世界层，否则后端插出来的帧会拖着 HUD。
+        val hudless = hudlessArmed
+        if (!hudless && mainTargetMatchesWindow(minecraft)) {
             // 主目标就是窗口尺寸：不需要拆分，界面照 vanilla 走主目标。
             return
         }
@@ -310,6 +418,20 @@ object D3D12GUISplit {
         // 界面现在画在另一张目标上，所以这里补同样的清：不清的话上一帧的界面深度会挡住这一帧。
         gui.depthTexture?.let {
             RenderSystem.getDevice().createCommandEncoder().clearDepthTexture(it, 0.0)
+        }
+        if (hudless) {
+            // UI 层必须从**全透明**开始：原版 `BlendFunction.TRANSLUCENT` 的 alpha 通道是
+            // ONE / INV_SRC_ALPHA，所以"透明底 + 普通混合"得到的正好是「按自身 alpha 预乘的 RGB
+            // + 正确的覆盖 alpha」，与 FFX `USE_PREMUL_ALPHA` 的合成约定一致
+            // （见 FrameInterpolationSwapchainUiComposition.hlsl 的 premul 分支）。
+            val ui = (gui.colorTextureView as? D3D12GpuTextureView)?.texture() as? D3D12GpuTexture
+                ?: return degrade("GUI target is not a D3D12 texture")
+            val encoder = D3D12Device.sharedCommandEncoder() ?: return degrade("no shared command encoder")
+            D3D12VariableShadingRate.hardReset(encoder.nativeCtx())
+            encoder.clearColorTexture(ui, Vector4f(0.0f, 0.0f, 0.0f, 0.0f))
+            // preparedThisFrame 保持 false：这一帧的呈现源是世界层（或主目标），不是这张 UI 层。
+            degrade(null)
+            return
         }
         // P108：世界层已经在这张目标里（DLSS 升采样，pInOutput 就是它），本帧只需把界面画上去。
         // 这里绝不能再去 blit 世界层，否则会盖掉 DLSS 的结果。
@@ -336,27 +458,6 @@ object D3D12GUISplit {
         degrade(null)
     }
 
-    /**
-     * P108x（用户 m11686）取证：把 [prepareForGui] 里读到的 `worldLayerAlreadyInTarget` 打出来。
-     *
-     * 限流：前 [DLSS_FLAG_LOG_LIMIT] 行每帧一行（DLSS 刚打开那几帧），之后每
-     * [DLSS_FLAG_LOG_INTERVAL_MILLIS] 毫秒最多一行。
-     */
-    private fun logDlssFlag(worldLayerAlreadyInTarget: Boolean) {
-        val now = System.currentTimeMillis()
-        val first = dlssFlagLogs < DLSS_FLAG_LOG_LIMIT
-        if (!first && now - dlssFlagLastLogMillis < DLSS_FLAG_LOG_INTERVAL_MILLIS) {
-            return
-        }
-        dlssFlagLastLogMillis = now
-        dlssFlagLogs += 1
-        Illusion.LOGGER.info(
-            "[dxrmc] P106: prepareForGui read worldLayerAlreadyInTarget={} (worldLayerDoneThisFrame was "
-                + "set by the super-resolution evaluate path this frame; false means the world layer is "
-                + "blitted the old way)",
-            worldLayerAlreadyInTarget)
-    }
-
     /** 记录 / 清除降级状态；只在状态变化时打一行，避免每帧刷屏。 */
     private fun degrade(reason: String?) {
         if (lastFailure == reason) {
@@ -364,33 +465,50 @@ object D3D12GUISplit {
         }
         lastFailure = reason
         if (reason == null) {
-            Illusion.LOGGER.info("[dxrmc] P106: GUI split healthy again - the world layer is blitted into the GUI target")
+            Illusion.LOGGER.info(
+                "GUI split healthy again - {}",
+                if (hudlessArmed) {
+                    "the GUI target carries the UI layer only (the world is presented separately)"
+                } else {
+                    "the world layer is blitted into the GUI target"
+                })
         } else {
-            Illusion.LOGGER.warn("[dxrmc] P106: GUI split degraded ({}); the GUI keeps drawing into its own window-sized target, this frame just presents the world target", reason)
+            Illusion.LOGGER.warn("GUI split degraded ({}); the GUI keeps drawing into its own window-sized target, this frame just presents the world target", reason)
         }
     }
 
     /**
-     * 最终 blit（呈现）该用哪张纹理：本帧已经把世界层搬进 GUI 目标时用 GUI 目标，
-     * 否则用 vanilla 传进来的主渲染目标纹理。
-     */
-    /**
      * P217：本帧最终会被 present 的那张目标；拆分没生效（或已放弃）时返回 null，调用方退回主目标。
      * 供 DLSS 的准星补画使用 —— 拆分启用时界面画在 GUI 目标上，画进主目标等于画进没人读的纹理。
+     * P306ac：hudless 模式下呈现源是世界层，这里的 GUI 目标只是 UI 层，准星也不该补画进去。
      */
     @JvmStatic
     fun replayTarget(): RenderTarget? {
-        if (!preparedThisFrame || givenUp) {
+        if (!preparedThisFrame || givenUp || hudlessArmed) {
             return null
         }
         return target
     }
 
+    /**
+     * P306ac：最终 blit（呈现）该用哪张纹理。
+     *
+     *  1. hudless 呈现：世界层（SR 输出；SR 没跑就用 vanilla 传进来的主目标 —— 此刻界面已经
+     *     画在 UI 层上，主目标里只剩世界层），UI 由帧生成后端合成；
+     *  2. 合成模式且本帧真的把世界层搬进了 GUI 目标：GUI 目标（世界 + 界面）；
+     *  3. 其余：vanilla 传进来的主目标（与原路径完全一致）。
+     */
     @JvmStatic
-    fun presentSourceView(fallback: GpuTextureView): GpuTextureView {
+    fun presentSourceTexture(fallback: D3D12GpuTexture): D3D12GpuTexture {
+        if (!givenUp && hudlessArmed) {
+            // 世界切换时旧的世界层纹理可能已经释放：宁可回退，也不能把野指针交给 blit。
+            val layer = worldLayerThisFrame
+            return if (layer != null && !layer.isClosed()) layer else fallback
+        }
         if (!preparedThisFrame || givenUp) {
             return fallback
         }
-        return target?.colorTextureView ?: fallback
+        return (target?.colorTextureView as? D3D12GpuTextureView)?.texture() as? D3D12GpuTexture
+            ?: fallback
     }
 }

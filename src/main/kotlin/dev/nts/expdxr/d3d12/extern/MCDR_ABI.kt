@@ -85,6 +85,9 @@ import java.util.concurrent.atomic.AtomicInteger
     private var MH_fgstatus: MethodHandle? = null
     private var MH_fgstate: MethodHandle? = null
     private var MH_fgsetuitexture: MethodHandle? = null
+    // P306ac：hudless 呈现（present 的世界层不含 UI、UI 由 SDK 合成）。
+    private var MH_fgsetuicomposition: MethodHandle? = null
+    private var MH_fguicompositionready: MethodHandle? = null
     /** P231：scope 型着色率下发（见 [D3D12SetShadingRateNow]）。 */
     private var MH_setshadingratenow: MethodHandle? = null
     /** P231：着色率组合器（见 [D3D12SetShadingRateCombiners]）。 */
@@ -296,15 +299,15 @@ import java.util.concurrent.atomic.AtomicInteger
             }
             LOAD_FAILURE = bindFailure
             if (bindFailure == null) {
-                println(
-                    "[backend] MCDR native library loaded (FFM): ${LIB_NAME}"
+                IllusionLogger.infoMessage(
+                    "MCDR native library loaded (FFM): ${LIB_NAME}"
                             + ", ABI v${safeABIVersion()}"
                 )
-                println("[backend] struct layouts: ${MCDRLayout.describeSizes()}")
-                println(
-                    "[backend] 启动日志级别 ${IllusionLogger.level()}"
-                            + "（配置加载前；生效级别由 config/dxr_mc-client.toml 的 [logging] logLevel 决定，"
-                            + "加载后会另行打印一行；开发时可用环境变量 DX12_LOG_VERBOSE=1 强制 DEBUG）"
+                IllusionLogger.infoMessage("struct layouts: ${MCDRLayout.describeSizes()}")
+                IllusionLogger.infoMessage(
+                    "startup log level ${IllusionLogger.level()}"
+                            + " (before the config loads; the effective level comes from [logging] logLevel in config/dxr_mc-client.toml"
+                            + " and is printed again once it does; for development DX12_LOG_VERBOSE=1 forces DEBUG)"
                 )
             }
         }
@@ -397,8 +400,8 @@ import java.util.concurrent.atomic.AtomicInteger
                 }
             }
             if (written > 0 || problems.isNotEmpty()) {
-                println("[backend] SDK 运行库：解出 $written 个、已最新 $current 个"
-                    + (if (problems.isEmpty()) "" else "，失败 ${problems.size} 个：${problems.joinToString("; ")}"))
+                IllusionLogger.infoMessage("SDK runtime DLLs: $written extracted, $current already current"
+                    + (if (problems.isEmpty()) "" else "; ${problems.size} failed: ${problems.joinToString("; ")}"))
             }
         } catch (ignored: Throwable) {
             // No manifest (the JVM repo does not build the native SDKs), or an unreadable
@@ -654,7 +657,7 @@ import java.util.concurrent.atomic.AtomicInteger
                 status != 0
             }
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SetLogFile failed: $t")
+            IllusionLogger.warnMessage("dx12SetLogFile failed: $t")
             false
         }
     }
@@ -669,7 +672,7 @@ import java.util.concurrent.atomic.AtomicInteger
             val status = handle.invokeExact(if (enabled) 1 else 0) as Int
             status
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SetPixCapture failed: $t")
+            IllusionLogger.warnMessage("dx12SetPixCapture failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -685,7 +688,7 @@ import java.util.concurrent.atomic.AtomicInteger
                 status
             }
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SetPixDirectory failed: $t")
+            IllusionLogger.warnMessage("dx12SetPixDirectory failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -701,7 +704,7 @@ import java.util.concurrent.atomic.AtomicInteger
                 status
             }
         } catch (t: Throwable) {
-            System.err.println("[backend-java] mcdrStartPixTimingCapture failed: $t")
+            IllusionLogger.warnMessage("mcdrStartPixTimingCapture failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -715,7 +718,7 @@ import java.util.concurrent.atomic.AtomicInteger
             val status = handle.invokeExact() as Int
             status
         } catch (t: Throwable) {
-            System.err.println("[backend-java] mcdrStopPixTimingCapture failed: $t")
+            IllusionLogger.warnMessage("mcdrStopPixTimingCapture failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -728,7 +731,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact(rate) as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SetShadingRate failed: $t")
+            IllusionLogger.warnMessage("dx12SetShadingRate failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -757,7 +760,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact(ptr(ctx), rate) as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SetShadingRateNow failed: $t")
+            IllusionLogger.warnMessage("dx12SetShadingRateNow failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -784,7 +787,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact(first, second) as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SetShadingRateCombiners failed: $t")
+            IllusionLogger.warnMessage("dx12SetShadingRateCombiners failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -797,7 +800,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact(mode) as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SetAntiAliasing failed: $t")
+            IllusionLogger.warnMessage("dx12SetAntiAliasing failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -810,7 +813,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact(enabled) as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SetDlssEnabled failed: $t")
+            IllusionLogger.warnMessage("dx12SetDlssEnabled failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -823,7 +826,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact(quality) as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SetDlssQuality failed: $t")
+            IllusionLogger.warnMessage("dx12SetDlssQuality failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -836,19 +839,19 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact(preset) as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SetDlssRenderPreset failed: $t")
+            IllusionLogger.warnMessage("dx12SetDlssRenderPreset failed: $t")
             Int.MIN_VALUE
         }
     }
     /**     * P108：按 [input]（`MCDRLayout.DLSS_INPUT`）在 `ctx` 上建/重建 DLSS 特征。尺寸或模式变化时调它，     * 也可以完全不调 —— [D3D12EvaluateDlss] 内部会按需创建。     *     * @return 1 = 真的建了/复用了特征，0 = 跳过（DLSS 开关是关的、尺寸没变或 DLSS 不可用），     *     -1 = 参数非法，[Int.MIN_VALUE] = 本地 DLL 没有这个导出。Never throws.     */
     fun D3D12CreateDlssFeature(ctx: Long, input: MemorySegment): Int =
-        dlssCall(MH_createdlssfeature, "[backend-java] dx12CreateDlssFeature failed: ", ctx, input)
+        dlssCall(MH_createdlssfeature, "dx12CreateDlssFeature failed: ", ctx, input)
     /**     * P108：每帧调一次，让 NGX 用 [input] 里的 render/target 尺寸、jitter、运动矢量、深度与曝光     * 做一次 DLSS 评价，结果写进 `pInOutput`。native 侧只在 DLSS 开关打开时真正执行（P108b 是     * [D3D12SetDlssEnabled]，旧 DLL 是 `aaMode == 4`）；抗锯齿模式是独立的另一件事。     *     * @return 1 = 这一帧真的评价了，0 = 跳过（开关是关的/不可用/尺寸非法），-1 = 参数非法，     *     [Int.MIN_VALUE] = 本地 DLL 没有这个导出。     */
     fun D3D12EvaluateDlss(ctx: Long, input: MemorySegment): Int =
-        dlssCall(MH_evaluatedlss, "[backend-java] dx12EvaluateDlss failed: ", ctx, input)
+        dlssCall(MH_evaluatedlss, "dx12EvaluateDlss failed: ", ctx, input)
     /**     * P108e：在**深度还没被清空**的时刻，把主渲染目标的深度拷进 native 的私有 D32 快照纹理     * （`mcdr_dx12SnapshotDlssDepth`）；之后 [D3D12EvaluateDlss] 优先用那张快照，而不是调用方传的     * `pInDepth`。native 自己负责 `depth → COPY_SOURCE`、`CopyResource`、以及**把 `depth` 恢复成     * 调用前的状态**，所以调用方的资源状态机不受影响。     *     * 每帧调一次（幂等，开销就是一次 D32 拷贝）。返回值语义与 [D3D12EvaluateDlss] 一致：     *     * @return 1 = 快照已就位（本帧或复用），0 = 参数不可用（跳过，评价退回用调用方给的深度），     *     -1 = 创建/拷贝失败（native 只 WARN 一次，同样退回调用方的深度），     *     [Int.MIN_VALUE] = 本地 DLL 没有这个导出（旧 DLL，退回调用方的深度）。Never throws.     */
     fun D3D12SnapshotDlssDepth(ctx: Long, depth: Long): Int =
-        dlssCall(MH_snapshotdlssdepth, "[backend-java] dx12SnapshotDlssDepth failed: ", ctx, ptr(depth))
+        dlssCall(MH_snapshotdlssdepth, "dx12SnapshotDlssDepth failed: ", ctx, ptr(depth))
     /**     * P108z（用户 m11203）：把一张**由 JVM 创建**的纹理指定为 DLSS 的输出     * （`mcdr_dx12SetDlssOutput`）。控制组结论是"native 自建的 `CreateCommittedResource` 纹理存不住     * 写入，模块 `createTexture` 建的可以"，所以 DLSS 的输出必须由 JVM 建、再由这条交给 native；     * native 会把 `pInOutput` 直接指到它（`MCDR\src\advanced\d3d12_dlss.cpp` 的 `s.externalOutput`     * 分支），而不是用它私有的 `s.dlssOutput`。     *     * <p>传的必须是 **`Dx12Object*` 句柄**（就是 `D3D12GpuTexture.handle()` 那个值）—— 不要让 native     * 的 DLSS 实现单元去 `reinterpret_cast` 资源，那是 D.3(1) 空指针崩溃的根源；native 在模块侧     * 自己解包。传 0 = "撤销指定，回到你自己的私有 UAV"。     *     * <p>走 [skipOptional] 绑定：本地 DLL 还没有这条导出时返回 [Int.MIN_VALUE]，调用方静默容忍并     * 只打一次 INFO，`MCDR_ABI_VERSION` 保持 2。     *     * @return 1 = 已记录（下一帧评价用它），0 = 接受但本机 DLSS 不可用/纹理不可用，-1 = 参数非法，     *     [Int.MIN_VALUE] = 本地 DLL 没有这个导出。Never throws.     */
     /**     * P112：把每帧相机常量（`MCDRLayout.DLSS_CONSTANTS` 段）交给 native     * （`mcdr_dx12SetDlssConstants`）。旧 DLL 没有该导出时返回 [Int.MIN_VALUE]，调用方静默跳过。     */
     /** P117：PCL stats 的帧开始 —— native 建本帧 SL frame token 并发 eSimulationStart。 */
@@ -858,7 +861,7 @@ import java.util.concurrent.atomic.AtomicInteger
         try {
             handle.invokeExact()
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12ReflexFrameBegin failed: ${t}")
+            IllusionLogger.warnMessage("dx12ReflexFrameBegin failed: ${t}")
         }
     }
     /** P122：Reflex 模式（0=off 1=on 2=on+boost）。 */
@@ -867,13 +870,13 @@ import java.util.concurrent.atomic.AtomicInteger
         if (LOAD_FAILURE != null) return
         val handle = MH_setdlssgmode
         if (handle == null) {
-            dev.nts.expdxr.misc.IllusionLogger.warnMessage("[dxrmc] DLSS-G: mcdr_dx12SetDlssgMode is not bound (native build too old?)")
+            dev.nts.expdxr.misc.IllusionLogger.warnMessage("DLSS-G: mcdr_dx12SetDlssgMode is not bound (native build too old?)")
             return
         }
         try {
             handle.invokeExact(mode, frames)
         } catch (t: Throwable) {
-            dev.nts.expdxr.misc.IllusionLogger.warnMessage("[dxrmc] DLSS-G: mcdr_dx12SetDlssgMode threw ${t.javaClass.simpleName}: ${t.message}")
+            dev.nts.expdxr.misc.IllusionLogger.warnMessage("DLSS-G: mcdr_dx12SetDlssgMode threw ${t.javaClass.simpleName}: ${t.message}")
         }
     }
 
@@ -893,7 +896,7 @@ import java.util.concurrent.atomic.AtomicInteger
         try {
             handle.invokeExact(mode)
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SetReflexMode(${mode}) failed: ${t}")
+            IllusionLogger.warnMessage("dx12SetReflexMode(${mode}) failed: ${t}")
         }
     }
     /** P122：Reflex 是否可用（1=可用；旧 DLL 没有导出时返回 0）。 */
@@ -904,7 +907,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact() as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12DlssAvailable failed: ${t}")
+            IllusionLogger.warnMessage("dx12DlssAvailable failed: ${t}")
             1
         }
     }
@@ -914,7 +917,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact() as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12ReflexAvailable failed: ${t}")
+            IllusionLogger.warnMessage("dx12ReflexAvailable failed: ${t}")
             0
         }
     }
@@ -925,7 +928,7 @@ import java.util.concurrent.atomic.AtomicInteger
         try {
             handle.invokeExact(micros)
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SetReflexFrameLimit(${micros}) failed: ${t}")
+            IllusionLogger.warnMessage("dx12SetReflexFrameLimit(${micros}) failed: ${t}")
         }
     }
     /**     * P197：HDR 模式（0 = auto / 1 = 强制开 / 2 = 强制关）。只改进程级状态，真正生效在下次     * 创建或重建交换链时 —— 换格式必须重建链，不能原地改。旧 DLL 没有这个入口时静默跳过。     */
@@ -937,7 +940,7 @@ import java.util.concurrent.atomic.AtomicInteger
             val handle = MH_setraytracingmode ?: return
             handle.invokeExact(mode)
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SetRaytracingMode($mode) failed: ${t}")
+            IllusionLogger.warnMessage("dx12SetRaytracingMode($mode) failed: ${t}")
         }
     }
     fun D3D12SetHdrMode(mode: Int) {
@@ -946,7 +949,7 @@ import java.util.concurrent.atomic.AtomicInteger
         try {
             handle.invokeExact(mode)
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SetHdrMode($mode) failed: ${t}")
+            IllusionLogger.warnMessage("dx12SetHdrMode($mode) failed: ${t}")
         }
     }
 
@@ -957,8 +960,8 @@ import java.util.concurrent.atomic.AtomicInteger
         try {
             handle.invokeExact(if (allowTearing) 1 else 0, if (presentChild) 1 else 0)
         } catch (t: Throwable) {
-            System.err.println(
-                "[backend-java] dx12SetSwapchainOptions($allowTearing, $presentChild) failed: ${t}",
+            IllusionLogger.warnMessage(
+                "dx12SetSwapchainOptions($allowTearing, $presentChild) failed: ${t}",
             )
         }
     }
@@ -979,7 +982,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             (handle.invokeExact(reasonOut, capacity) as Int)
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12QueryMeshSupport failed: ${t}")
+            IllusionLogger.warnMessage("dx12QueryMeshSupport failed: ${t}")
             -1
         }
     }
@@ -990,7 +993,7 @@ import java.util.concurrent.atomic.AtomicInteger
         try {
             handle.invokeExact(marker)
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12ReflexMarker(${marker}) failed: ${t}")
+            IllusionLogger.warnMessage("dx12ReflexMarker(${marker}) failed: ${t}")
         }
     }
     fun D3D12SetDlssConstants(constants: MemorySegment): Int {
@@ -1001,7 +1004,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact(constants) as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SetDlssConstants failed: $t")
+            IllusionLogger.warnMessage("dx12SetDlssConstants failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -1013,7 +1016,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact(ptr(textureHandle)) as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SetDlssOutput failed: $t")
+            IllusionLogger.warnMessage("dx12SetDlssOutput failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -1025,7 +1028,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             h.invokeExact(ptr(ctx), input) as Int
         } catch (t: Throwable) {
-            System.err.println("$what$t")
+            IllusionLogger.warnMessage("$what$t")
             Int.MIN_VALUE
         }
     }
@@ -1038,7 +1041,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact(note, cap) as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12QueryDlss failed: $t")
+            IllusionLogger.warnMessage("dx12QueryDlss failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -1094,7 +1097,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact(backend) as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SrPick failed: $t")
+            IllusionLogger.warnMessage("dx12SrPick failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -1132,7 +1135,7 @@ import java.util.concurrent.atomic.AtomicInteger
                 )
             }
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SrQueryCaps failed: $t")
+            IllusionLogger.warnMessage("dx12SrQueryCaps failed: $t")
             null
         }
     }
@@ -1150,7 +1153,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact(note, cap) as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SrQuery failed: $t")
+            IllusionLogger.warnMessage("dx12SrQuery failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -1177,7 +1180,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact(ptr(ctx), backend, maxRenderWidth, maxRenderHeight, displayWidth, displayHeight) as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SrCreate failed: $t")
+            IllusionLogger.warnMessage("dx12SrCreate failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -1195,7 +1198,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact(ptr(ctx), renderWidth, renderHeight, displayWidth, displayHeight) as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SrResize failed: $t")
+            IllusionLogger.warnMessage("dx12SrResize failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -1214,7 +1217,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact(ptr(ctx), desc) as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SrEvaluate failed: $t")
+            IllusionLogger.warnMessage("dx12SrEvaluate failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -1236,7 +1239,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact(frameIndex, outX, outY) as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SrJitter failed: $t")
+            IllusionLogger.warnMessage("dx12SrJitter failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -1258,7 +1261,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact(backend, renderWidth, displayWidth) as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SrJitterPhaseCount failed: $t")
+            IllusionLogger.warnMessage("dx12SrJitterPhaseCount failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -1275,7 +1278,7 @@ import java.util.concurrent.atomic.AtomicInteger
         try {
             handle.invokeExact()
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12SrDestroy failed: $t")
+            IllusionLogger.warnMessage("dx12SrDestroy failed: $t")
         }
     }
 
@@ -1297,7 +1300,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact(backend) as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12FgPick failed: $t")
+            IllusionLogger.warnMessage("dx12FgPick failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -1320,7 +1323,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact(backend, out) as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12FgQueryCaps failed: $t")
+            IllusionLogger.warnMessage("dx12FgQueryCaps failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -1344,7 +1347,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact(desc) as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12FgSetMode failed: $t")
+            IllusionLogger.warnMessage("dx12FgSetMode failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -1378,7 +1381,7 @@ import java.util.concurrent.atomic.AtomicInteger
             handle.invokeExact(constants)
             1
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12FgSetConstants failed: $t")
+            IllusionLogger.warnMessage("dx12FgSetConstants failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -1391,7 +1394,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact() as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12FgPresented failed: $t")
+            IllusionLogger.warnMessage("dx12FgPresented failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -1412,7 +1415,7 @@ import java.util.concurrent.atomic.AtomicInteger
         return try {
             handle.invokeExact(note, cap) as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12FgStatus failed: $t")
+            IllusionLogger.warnMessage("dx12FgStatus failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -1451,19 +1454,63 @@ import java.util.concurrent.atomic.AtomicInteger
             handle.invokeExact(MemorySegment.NULL.takeIf { objectHandle == 0L } ?: MemorySegment.ofAddress(objectHandle))
             1
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12FgSetUiTexture failed: $t")
+            IllusionLogger.warnMessage("dx12FgSetUiTexture failed: $t")
             Int.MIN_VALUE
         }
     }
-    fun D3D12FgState(): Int {
+    /**
+     * P306ac：hudless 呈现开关（`mcdr_dx12FgSetUiComposition`）。
+     *
+     * 打开 = 应用接下来 Present 的 backbuffer **只含世界层**，GUI 单独画进一张「透明底 + 预乘
+     * alpha」的 UI 目标、再由帧生成后端合成到每个 presented 帧上；关闭 = 老路径，应用自己把 GUI
+     * 画进 backbuffer（后端不得再注册 UI）。
+     *
+     * <p>打开的前提是 [D3D12FgUiCompositionReady] 为真 —— 否则没有后端替我们合成，UI 会整帧消失。
+     * 只在**每帧一次的 latch** 上切换，不要在同一帧中途改。
+     *
+     * @return 1 = 已记录，[Int.MIN_VALUE] = 本地 DLL 没有这个导出（老 DLL）。
+     */
+    fun D3D12FgSetUiComposition(enabled: Boolean): Int {
         if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_fgsetuicomposition ?: return Int.MIN_VALUE
+        return try {
+            handle.invokeExact(if (enabled) 1 else 0)
+            1
+        } catch (t: Throwable) {
+            IllusionLogger.warnMessage("dx12FgSetUiComposition failed: $t")
+            Int.MIN_VALUE
+        }
+    }
+
+    /**
+     * P306ac：帧生成后端这次 Present 会不会替我们合成 UI（`mcdr_dx12FgUiCompositionReady`）。
+     *
+     * @return 1 = 会（可以 Present 只含世界层的图），0 = 不会（必须 Present 世界+GUI 合成层），
+     * [Int.MIN_VALUE] = 本地 DLL 没有这个导出。
+     */
+    fun D3D12FgUiCompositionReady(): Int {
+        if (LOAD_FAILURE != null) {
+            return Int.MIN_VALUE
+        }
+        val handle = MH_fguicompositionready ?: return Int.MIN_VALUE
+        return try {
+            handle.invokeExact() as Int
+        } catch (t: Throwable) {
+            IllusionLogger.warnMessage("dx12FgUiCompositionReady failed: $t")
+            Int.MIN_VALUE
+        }
+    }
+
+    fun D3D12FgState(): Int {        if (LOAD_FAILURE != null) {
             return Int.MIN_VALUE
         }
         val handle = MH_fgstate ?: return Int.MIN_VALUE
         return try {
             handle.invokeExact() as Int
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12FgState failed: $t")
+            IllusionLogger.warnMessage("dx12FgState failed: $t")
             Int.MIN_VALUE
         }
     }
@@ -1529,7 +1576,7 @@ import java.util.concurrent.atomic.AtomicInteger
                 )
             }
         } catch (t: Throwable) {
-            System.err.println("[backend-java] dx12FgQueryCaps failed: $t")
+            IllusionLogger.warnMessage("dx12FgQueryCaps failed: $t")
             null
         }
     }
@@ -3263,7 +3310,7 @@ import java.util.concurrent.atomic.AtomicInteger
             }
             entry.callback.onFenceComplete(value, completed != 0)
         } catch (t: Throwable) {
-            System.err.println("[backend] fence callback failed: ${t}")
+            IllusionLogger.warnMessage("fence callback failed: ${t}")
         }
     }
     // ==================================================================
@@ -3373,6 +3420,10 @@ import java.util.concurrent.atomic.AtomicInteger
         MH_fgstatus = skipOptional("mcdr_dx12FgStatus", fd(MCDRLayout.I32, MCDRLayout.PTR, MCDRLayout.I32))
         MH_fgstate = skipOptional("mcdr_dx12FgState", fd(MCDRLayout.I32))
         MH_fgsetuitexture = skipOptional("mcdr_dx12FgSetUiTexture", fdv(MCDRLayout.PTR))
+        // P306ac：hudless 呈现开关与"UI 由谁合成"的查询。纯追加导出，旧 DLL 返回 MIN_VALUE ——
+        // 那时 [dev.nts.expdxr.dxrmc.framegen.FrameGeneration] 永远拿不到 ready，继续走合成层。
+        MH_fgsetuicomposition = skipOptional("mcdr_dx12FgSetUiComposition", fdv(MCDRLayout.I32))
+        MH_fguicompositionready = skipOptional("mcdr_dx12FgUiCompositionReady", fd(MCDRLayout.I32))
         // P108b：DLSS 自己的开关（可选导出）。它把 DLSS 与抗锯齿模式解耦，于是 native 侧可以同时
         // "先对低分辨率世界层做 SMAA、再让 DLSS 升采样"。旧 DLL 没有这个导出 ⇒ 调用返回 MIN_VALUE，
         // 由 JVM 侧的临时桥退回 `aaMode == 4`（见 dev.nts.expdxr.dxrmc.sr.dlss.DeepLearningSuperSampling）。

@@ -100,10 +100,10 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
 
     init {
         val probe = MCDR_ABI.ID3D12CreateDevice()
-        LOGGER.info("[backend] Device probe + resource self-test: {}", probe)
+        LOGGER.info("Device probe + resource self-test: {}", probe)
         val frequency = MCDR_ABI.D3D12GetTimestampFrequency()
         if (frequency == 0L) {
-            LOGGER.warn("[backend] GetTimestampFrequency returned 0; timestampPeriod=1.0")
+            LOGGER.warn("GetTimestampFrequency returned 0; timestampPeriod=1.0")
         }
         // P34: real adapter facts from DXGI/DXCore replace the previously hardcoded
         // "D3D12" / "D3D12 driver" / DeviceType.DISCRETE. D3D12AdapterInfo.current is what
@@ -112,9 +112,9 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         val nativeInfo = D3D12AdapterInfo.parse(MCDR_ABI.ID3D12GetAdapterInfo())
         if (nativeInfo !== D3D12AdapterInfo.UNKNOWN) {
             D3D12AdapterInfo.current = nativeInfo
-            LOGGER.info("[backend] Adapter: {}", nativeInfo.summary())
+            LOGGER.info("Adapter: {}", nativeInfo.summary())
         } else {
-            LOGGER.warn("[backend] Adapter info unavailable; keeping the probe-derived fallback")
+            LOGGER.warn("Adapter info unavailable; keeping the probe-derived fallback")
         }
         this.deviceInfo = buildDeviceInfo(parseAdapterName(probe), nativeInfo, frequency)
         // P33：启动独立渲染线程（异步流水线：渲染线程负责 acquire/present/fence-wait，
@@ -123,7 +123,7 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         if (D3D12Settings.asyncRenderThread) {
             MCDR_ABI.D3D12InitAsyncRenderer(1)
         } else {
-            LOGGER.warn("[backend] async renderer disabled ([debug] asyncRenderThread = false) — diagnostic mode only")
+            LOGGER.warn("async renderer disabled ([debug] asyncRenderThread = false) — diagnostic mode only")
         }
         // P33：初始化 CPU/GPU 并行录制上下文（分区描述符堆 + bundle 池 + worker 池）。
         // 失败会自动退回单线程录制，不影响功能。
@@ -178,7 +178,7 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
                 val stack = Thread.currentThread().stackTrace
                     .drop(1).take(9).joinToString(" <- ") { "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}" }
                 IllusionLogger.warnMessage(
-                    "[P199g] MAP_READ buffer label='${name}' usage=0x${usage.toUInt().toString(16)} size=${size} @ $stack")
+                    "MAP_READ buffer label='${name}' usage=0x${usage.toUInt().toString(16)} size=${size} @ $stack")
             }
         }
         return D3D12GpuBuffer(usage, size, name)
@@ -296,7 +296,7 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
     ): BackendRenderPipeline.Pending {
         val pipeline = D3D12PipelineBridge.lookup(info.name())
         if (pipeline == null) {
-            LOGGER.error("[backend-java] compilePipeline({}) has no registered RenderPipeline "
+            LOGGER.error("compilePipeline({}) has no registered RenderPipeline "
                 + "({} shaders); returning NULL pending", info.name(), info.shaders().size)
             return BackendRenderPipeline.Pending.NULL
         }
@@ -308,7 +308,7 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         // `[logging] logLevel` 调到 DEBUG 再看。
         if (info.name().contains("terrain")) {
             val detail = info.uniforms().joinToString(", ") { "${it.name()}:${it.type()}" }
-            IllusionLogger.debugMessage("[backend-java] P191 uniforms ${info.name()}: [$detail]")
+            IllusionLogger.debugMessage("uniforms ${info.name()}: [$detail]")
         }
         return object : BackendRenderPipeline.Pending {
             override fun finishCompile(): BackendRenderPipeline {
@@ -356,7 +356,7 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         // 注意：encoder.close() 对共享 encoder 不调用 dx12DestroyCommandEncoder
         // （避免 CubeMap.render() 内部 close 时意外销毁 ctx），此处显式销毁。
         val closeStarted = System.nanoTime()
-        IllusionLogger.debugMessage("[backend-java] P184 device.close: enter")
+        IllusionLogger.debugMessage("device.close: enter")
         // P220：地形 mip-bias 采样器由本模组持有，必须在设备销毁前释放。
         D3D12TerrainSampler.release()
         val encoder = this.sharedCommandEncoder
@@ -365,7 +365,7 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
             MCDR_ABI.D3D12DestroyCommandEncoder(encoder.nativeHandle())
             this.sharedCommandEncoder = null
         }
-        IllusionLogger.debugMessage("[backend-java] P184 device.close: encoder done")
+        IllusionLogger.debugMessage("device.close: encoder done")
         sharedEncoderForFrame = null  // P104b：别再让帧中后处理摸到已销毁的 ctx
         this.clearPipelineCache()
         val compiler = this.glslCompiler
@@ -374,12 +374,12 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
             this.glslCompiler = null
         }
         // P33：先停 worker 池并销毁 bundle/描述符 native 资源，再销毁渲染线程。
-        IllusionLogger.debugMessage("[backend-java] P184 device.close: cache+compiler done")
+        IllusionLogger.debugMessage("device.close: cache+compiler done")
         val asyncStarted = System.nanoTime()
         D3D12AsyncContext.shutdown()
         // P33：销毁独立渲染线程。
         MCDR_ABI.D3D12DestroyAsyncRenderer()
-        IllusionLogger.debugMessage("[backend-java] P184 device.close: async renderer done")
+        IllusionLogger.debugMessage("device.close: async renderer done")
         val asyncMs = (System.nanoTime() - asyncStarted) / 1_000_000
         // P31：趁 DXGI/D3D12 仍然存活，显式释放设备上下文。若留给
         // DLL_PROCESS_DETACH 去析构，ComPtr::Release() 会在 dxgi.dll 已 detach
@@ -390,7 +390,7 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         // clear it once the backend is gone so a GL/Vulkan fallback shows no DX12 rows.
         D3D12AdapterInfo.current = null
         IllusionLogger.debugMessage(
-            "[backend-java] D3D12Device.close took ${(System.nanoTime() - closeStarted) / 1_000_000} ms" +
+            "D3D12Device.close took ${(System.nanoTime() - closeStarted) / 1_000_000} ms" +
                 " (async ${asyncMs} ms)"
         )
     }
@@ -416,12 +416,12 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         val fragmentShader = this.getOrCompileShader(
             fragmentId, ShaderType.FRAGMENT, pipeline.shaderDefines, shaderSource)
         if (vertexShader === D3D12IntermediaryShaderModule.INVALID) {
-            LOGGER.error("[backend-java] {} COMPILE FAILED (vertex): shader {} invalid",
+            LOGGER.error("{} COMPILE FAILED (vertex): shader {} invalid",
                 pipeName, vertexId)
             return D3D12CompiledRenderPipeline(pipeline, 0L, vertexShader, fragmentShader, "", "")
         }
         if (fragmentShader === D3D12IntermediaryShaderModule.INVALID) {
-            LOGGER.error("[backend-java] {} COMPILE FAILED (fragment): shader {} invalid",
+            LOGGER.error("{} COMPILE FAILED (fragment): shader {} invalid",
                 pipeName, fragmentId)
             return D3D12CompiledRenderPipeline(pipeline, 0L, vertexShader, fragmentShader, "", "")
         }
@@ -431,11 +431,11 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
             val desc = buildNativeDesc(compiled, pipeline, flipY)
             val handle = MCDR_ABI.D3D12CreateGraphicsPipeline(desc)
             if (handle == 0L) {
-                LOGGER.error("[backend-java] {} COMPILE FAILED (native): dx12CreateGraphicsPipeline returned 0",
+                LOGGER.error("{} COMPILE FAILED (native): dx12CreateGraphicsPipeline returned 0",
                     pipeName)
                 return D3D12CompiledRenderPipeline(pipeline, 0L, vertexShader, fragmentShader, "", "")
             }
-            LOGGER.info("[backend-java] {} COMPILE OK (handle={})", pipeName, handle)
+            LOGGER.info("{} COMPILE OK (handle={})", pipeName, handle)
             val result = D3D12CompiledRenderPipeline(
                 pipeline, handle,
                 vertexShader, fragmentShader, compiled.vertexHlsl, compiled.fragmentHlsl
@@ -457,9 +457,9 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
                 val quadPso = MCDR_ABI.D3D12CreateGraphicsPipeline(quadDesc)
                 if (quadPso != 0L) {
                     result.attachLineQuadVariant(quadPso)
-                    LOGGER.info("[dxrmc] P230 line quad variant for {}: pso={}", pipeName, quadPso)
+                    LOGGER.info("line quad variant for {}: pso={}", pipeName, quadPso)
                 } else {
-                    LOGGER.warn("[dxrmc] P230 line quad variant for {} failed; 线会保持 1px", pipeName)
+                    LOGGER.warn("line quad variant for {} failed; lines stay 1px", pipeName)
                 }
             }
             // P217：26.3 的地形管线全部建 meshlet 变体 —— 不透明（solid/cutout）、
@@ -470,15 +470,15 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
                 val variant = createMeshVariant(pipeline, compiled, flipY)
                 if (variant.meshletPso != 0L) {
                     result.attachMeshletVariant(variant.meshletPso, variant.meshletAs)
-                    LOGGER.info("[dxrmc] P217 meshlet variant for {}: pso={} as={}",
+                    LOGGER.info("meshlet variant for {}: pso={} as={}",
                         pipeName, variant.meshletPso, variant.meshletAs)
                 } else {
-                    LOGGER.warn("[dxrmc] P217 meshlet variant for {} failed", pipeName)
+                    LOGGER.warn("meshlet variant for {} failed", pipeName)
                 }
             }
             return result
         } catch (e: ShaderCompileException) {
-            LOGGER.error("[backend-java] {} COMPILE FAILED (compile): {}", pipeName, e.message)
+            LOGGER.error("{} COMPILE FAILED (compile): {}", pipeName, e.message)
             return D3D12CompiledRenderPipeline(pipeline, 0L, vertexShader, fragmentShader, "", "")
         }
     }
@@ -506,7 +506,7 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         // PS：26.3 的地形 PS 自己按段读 chunkVisibility（VS 输出插值量），直接编译原版即可。
         val psDxil = MCDR_ABI.D3D12CompileShaderDxc(compiled.fragmentHlsl, "main", "ps_6_0")
             ?: run {
-                LOGGER.warn("[dxrmc] P217 地形 PS 编译失败（{}）：{}", pipeline.location, MCDR_ABI.D3D12LastError())
+                LOGGER.warn("terrain PS failed to compile ({}): {}", pipeline.location, MCDR_ABI.D3D12LastError())
                 return MeshVariantResult(0L, false)
             }
 
@@ -535,7 +535,7 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         }
         val signature = MCDR_ABI.D3D12CreateMeshRootSignature(bindings, 1)
         if (signature == 0L) {
-            LOGGER.error("[dxrmc] P217 mesh variant for {}: createMeshRootSignature returned 0", pipeline.location)
+            LOGGER.error("mesh variant for {}: createMeshRootSignature returned 0", pipeline.location)
             return MeshVariantResult(0L, false)
         }
         var meshletHandle = 0L
@@ -546,7 +546,7 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
             var asActive = wantAs
             if (hlsl == null && wantAs) {
                 // uniform 解析不到：退回不剔除的 meshlet（剔除判据不全会成片剔掉地形）。
-                LOGGER.warn("[dxrmc] P217 AS 生成失败（{}），退回不剔除的 meshlet", pipeline.location)
+                LOGGER.warn("AS build failed ({}), falling back to meshlets without culling", pipeline.location)
                 hlsl = D3D12MeshletShader.build(compiled.vertexHlsl, format, cull = false)
                 asActive = false
             }
@@ -557,7 +557,7 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
                 null
             }
             if (meshletMs == null || (asActive && meshletAsBytes == null)) {
-                LOGGER.warn("[dxrmc] P217 meshlet MS/AS 编译失败（{}）：{}，退回不剔除版本",
+                LOGGER.warn("meshlet MS/AS failed to compile ({}): {}, falling back to the non-culling variant",
                     pipeline.location, MCDR_ABI.D3D12LastError())
                 hlsl = D3D12MeshletShader.build(compiled.vertexHlsl, format, cull = false)
                 meshletMs = hlsl?.let { MCDR_ABI.D3D12CompileShaderDxc(it, "ms_main", "ms_6_9") }
@@ -565,20 +565,20 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
                 asActive = false
             }
             if (meshletMs == null) {
-                LOGGER.warn("[dxrmc] P217 meshlet MS 生成/编译失败（{}）：{}",
+                LOGGER.warn("meshlet MS failed to build ({}): {}",
                     pipeline.location, MCDR_ABI.D3D12LastError())
             } else {
                 val withAs = meshletAsBytes != null
                 meshletHandle = MCDR_ABI.D3D12CreateMeshPipelineWithRootSignature(
                     buildMeshDesc(meshletMs, if (withAs) meshletAsBytes else null), signature)
                 if (meshletHandle == 0L) {
-                    LOGGER.warn("[dxrmc] P217 meshlet PSO 创建失败（{}）：{}",
+                    LOGGER.warn("meshlet PSO creation failed ({}): {}",
                         pipeline.location, MCDR_ABI.D3D12LastError())
                     if (withAs) {
                         meshletHandle = MCDR_ABI.D3D12CreateMeshPipelineWithRootSignature(
                             buildMeshDesc(meshletMs, null), signature)
                         if (meshletHandle != 0L) {
-                            LOGGER.warn("[dxrmc] P217 meshlet AS PSO 失败，退回不剔除（{}）", pipeline.location)
+                            LOGGER.warn("meshlet AS PSO failed, falling back to no culling ({})", pipeline.location)
                         }
                     }
                 } else {
@@ -644,19 +644,19 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         val cached = try {
             shaderSource.getInclude(id)
         } catch (e: Exception) {
-            LOGGER.debug("[backend-java] include {} lookup failed: {}", id, e.message)
+            LOGGER.debug("include {} lookup failed: {}", id, e.message)
             null
         } ?: return null
         return try {
             val text = ShadercIncludeResult.create(cached.includeResultPtr()).contentString()
             if ('\uFFFD' in text) {
-                LOGGER.warn("[backend-java] include {} from cache looks corrupted (freed buffer?)", id)
+                LOGGER.warn("include {} from cache looks corrupted (freed buffer?)", id)
                 null
             } else {
                 text
             }
         } catch (e: Throwable) {
-            LOGGER.debug("[backend-java] include {} content unreadable: {}", id, e.message)
+            LOGGER.debug("include {} content unreadable: {}", id, e.message)
             null
         }
     }
@@ -667,7 +667,7 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
             val location = Identifier.fromNamespaceAndPath(id.namespace, "shaders/include/" + id.path)
             Minecraft.getInstance().resourceManager.openAsReader(location).use { it.readText() }
         } catch (e: Exception) {
-            LOGGER.debug("[backend-java] include {} resource read failed: {}", id, e.message)
+            LOGGER.debug("include {} resource read failed: {}", id, e.message)
             null
         }
     }
@@ -691,7 +691,7 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
         var attribLocation = 0
         val bindings = pipeline.vertexFormatBindings
         if (bindings.isEmpty()) {
-            LOGGER.warn("[backend-java] {}: formatBindings 为空 inputs={}", pipeline.location, vertexShaderInputs)
+            LOGGER.warn("{}: formatBindings is empty, inputs={}", pipeline.location, vertexShaderInputs)
         }
         for (i in bindings.indices) {
             val format = bindings[i] ?: continue
@@ -716,7 +716,7 @@ class D3D12Device(private val defaultShaderSource: ShaderSource?) : GpuDeviceBac
                 if (fmt == null) "s$i=null" else "s$i(stride=${fmt.vertexSize},step=${fmt.stepRate}," +
                     "elems=${fmt.elements.joinToString("|") { e -> e.name() }})"
             }
-            IllusionLogger.debugMessage("[backend-java] P191 ${pipeline.location}: inputs=$vertexShaderInputs slots=[$slots]")
+            IllusionLogger.debugMessage("${pipeline.location}: inputs=$vertexShaderInputs slots=[$slots]")
         }
         return elements
     }

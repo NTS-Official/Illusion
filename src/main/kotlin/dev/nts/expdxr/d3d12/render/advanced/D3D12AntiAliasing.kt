@@ -122,7 +122,7 @@ object D3D12AntiAliasing {
             if (!dlaaOwnsDlssReported) {
                 dlaaOwnsDlssReported = true
                 Illusion.LOGGER.info(
-                    "[dxrmc] DLSS is on, but anti-aliasing is DLAA — DLAA owns the DLSS feature, "
+                    "DLSS is on, but anti-aliasing is DLAA — DLAA owns the DLSS feature, "
                         + "so the anti-aliasing option is left untouched")
             }
             return
@@ -136,7 +136,7 @@ object D3D12AntiAliasing {
                     setModeQuietly(OFF)
                 }
                 dlssLockApplied = true
-                Illusion.LOGGER.info("[dxrmc] DLSS 已开启：抗锯齿锁为 OFF，本项在视频设置里不可调整")
+                Illusion.LOGGER.info("DLSS is on: the anti-aliasing lock is OFF and this option cannot be changed in the video settings")
             }
             return
         }
@@ -147,7 +147,7 @@ object D3D12AntiAliasing {
             if (restored != OFF && OPTION.get() != restored) {
                 setModeQuietly(restored)
             }
-            Illusion.LOGGER.info("[dxrmc] DLSS 已关闭：抗锯齿重新可调（还原为 {}）", modeName(restored))
+            Illusion.LOGGER.info("DLSS is off: anti-aliasing is adjustable again (restored to {})", modeName(restored))
         }
     }
 
@@ -259,15 +259,15 @@ object D3D12AntiAliasing {
         // 对 OFF 而言 0 就是成功（旧代码会误报 "OFF is not implemented yet"）。
         val status = MCDR_ABI.D3D12SetAntiAliasing(pushed)
         when {
-            status == pushed -> Illusion.LOGGER.info("[dxrmc] anti-aliasing = {}", modeName(mode))
+            status == pushed -> Illusion.LOGGER.info("anti-aliasing = {}", modeName(mode))
             status == 0 && pushed != OFF -> Illusion.LOGGER.warn(
-                "[dxrmc] anti-aliasing {} is not implemented yet; the renderer falls back to OFF",
+                "anti-aliasing {} is not implemented yet; the renderer falls back to OFF",
                 modeName(mode),
             )
             status == Int.MIN_VALUE -> Illusion.LOGGER.info(
-                "[dxrmc] the loaded MCDR.dll has no mcdrSetAntiAliasing; anti-aliasing stays off",
+                "the loaded MCDR.dll has no mcdrSetAntiAliasing; anti-aliasing stays off",
             )
-            else -> Illusion.LOGGER.warn("[dxrmc] mcdrSetAntiAliasing({}) returned {}", pushed, status)
+            else -> Illusion.LOGGER.warn("mcdrSetAntiAliasing({}) returned {}", pushed, status)
         }
     }
 
@@ -298,7 +298,7 @@ object D3D12AntiAliasing {
                     // 上，先后顺序不由我们决定，照单全收就会把"DLSS 开着 => 抗锯齿 OFF"的约定破坏掉。
                     if (dlssLock) {
                         Illusion.LOGGER.info(
-                            "[dxrmc] DLSS is on; ignoring the anti-aliasing mode {} restored from {}",
+                            "DLSS is on; ignoring the anti-aliasing mode {} restored from {}",
                             modeName(mode), OPTIONS_KEY,
                         )
                     } else {
@@ -313,7 +313,7 @@ object D3D12AntiAliasing {
                 break
             }
         } catch (t: Throwable) {
-            Illusion.LOGGER.warn("[dx12] could not read {} from {}", OPTIONS_KEY, file, t)
+            Illusion.LOGGER.warn("could not read {} from {}", OPTIONS_KEY, file, t)
             return
         }
         // 文件里没有这一行时（首次运行 / 用户删过）也要推一次，让 native 与界面取值一致。
@@ -339,7 +339,7 @@ object D3D12AntiAliasing {
             val text = (kept + ("${OPTIONS_KEY}:${OPTION.get()}")).joinToString(eol) + eol
             file.writeText(text, StandardCharsets.UTF_8)
         } catch (t: Throwable) {
-            Illusion.LOGGER.warn("[dx12] could not write {} to {}", OPTIONS_KEY, file, t)
+            Illusion.LOGGER.warn("could not write {} to {}", OPTIONS_KEY, file, t)
         }
     }
 }

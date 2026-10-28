@@ -122,11 +122,11 @@ object D3D12StackSampler {
         }
         COUNTS.clear()
         if (entries.isEmpty()) {
-            return "[backend-java] P53 sample: no samples yet"
+            return "stack sample: no samples yet"
         }
         entries.sortWith(Comparator.comparingLong<Map.Entry<String, LongAdder>> { it.value.sum() }.reversed())
         return buildString {
-            append("[backend-java] P53 sample n=").append(total)
+            append("stack sample n=").append(total)
               .append(" ours=").append("%.0f%%".format(Locale.ROOT, if (total == 0L) 0.0 else 100.0 * ours / total))
               .append(" mc=").append("%.0f%%".format(Locale.ROOT, if (total == 0L) 0.0 else 100.0 * (total - ours) / total))
               .append(" |")
@@ -141,7 +141,7 @@ object D3D12StackSampler {
                 val key = entries[i].key
                 val ex = STACKS[key]
                 if (ex != null) {
-                    append("\n[backend-java] P53 trace ").append(key).append(" <= ").append(ex)
+                    append("\nstack sample trace ").append(key).append(" <= ").append(ex)
                 }
             }
             STACKS.clear()

@@ -104,11 +104,9 @@ class D3D12GpuBuffer(private val usageFlags: Int, private val bufferSize: Long, 
             }
             deviceLostReported = true
             System.err.println(
-                "[backend-java] the D3D12 device has been REMOVED (DXGI_ERROR_DEVICE_REMOVED / "
-                    + "0x887A0005). Every GPU call fails from here on, so the buffer that happened "
-                    + "to call Map() first is NOT the problem. Look at the last GPU work submitted "
-                    + "before this line (for the 2026-10-17 crash: the DLSS evaluate that started "
-                    + "using a real depth snapshot, see the P108 lines around it). detail: $detail")
+                "the D3D12 device was removed (DXGI_ERROR_DEVICE_REMOVED / 0x887A0005); "
+                    + "every GPU call fails from here on, so the buffer that called Map() first is "
+                    + "not the cause. Check the last GPU work submitted before this line. detail: $detail")
             System.err.flush()
             return true
         }
@@ -155,7 +153,7 @@ class D3D12GpuBuffer(private val usageFlags: Int, private val bufferSize: Long, 
         this.closed = true
         // P199h（临时取证）：谁在关缓冲、关了几次。
         if (label.contains("Screenshot") || (usageFlags and 8 != 0 && G_CLOSE_LOG.getAndIncrement() < 4)) {
-            System.err.println("[P199h] GpuBuffer.close label='$label' size=$bufferSize")
+            System.err.println("GpuBuffer.close label='$label' size=$bufferSize")
         }
         MCDR_ABI.ID3D12DestroyResource(this.handle)
     }

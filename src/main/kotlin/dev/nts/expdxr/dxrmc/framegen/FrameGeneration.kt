@@ -6,11 +6,13 @@ import dev.nts.expdxr.d3d12.extern.MCDR_ABI
 import dev.nts.expdxr.d3d12.render.adapter.D3D12AdapterInfo
 import dev.nts.expdxr.dxrmc.nvidia.reflex.NvidiaReflex
 import dev.nts.expdxr.dxrmc.sr.dlss.DeepLearningSuperSampling
+import dev.nts.expdxr.misc.D3D12Settings
 import dev.nts.expdxr.misc.IllusionLogger
 import java.io.File
 import java.lang.foreign.Arena
 import java.lang.foreign.ValueLayout.JAVA_INT
 import java.util.Optional
+import net.minecraft.client.Minecraft
 import net.minecraft.client.OptionInstance
 import net.minecraft.client.gui.components.CycleButton
 import net.minecraft.client.gui.components.Tooltip
@@ -42,6 +44,9 @@ object FrameGeneration {
 
     /** 生成帧数的键。 */
     const val FRAMES_KEY: String = "dxrMcFrameGenerationFrames"
+
+    /** 选中的后端键（`""` = 一家都没选）。 */
+    const val BACKEND_KEY: String = "dxrMcFrameGenBackend"
 
     /** 取值名，下标即玩家可见的模式编号。 */
     private val MODE_NAMES: List<String> = listOf("off", "on")
@@ -126,6 +131,35 @@ object FrameGeneration {
     /** 最后一次真正推给 native 的模式。 */
     private var currentMode: Int = DEFAULT_MODE
 
+    /** 用户在视频设置里选中的后端；`0` = 一家都没选 ⇒ 帧生成关。 */
+    private var selectedBackend: Int = 0
+
+    /** 同步开关状态时抑制回调（与 `SuperResolution.syncOptions` 同体例）。 */
+    private var syncingOptions: Boolean = false
+
+    /** 后端号 ↔ `options.txt` 里的短名。 */
+    private val BACKEND_NAMES: Map<Int, String> = linkedMapOf(
+        MCDR_ABI.FG_BACKEND_DLSSG to "dlssg",
+        MCDR_ABI.FG_BACKEND_FSRFG to "fsrfg",
+        MCDR_ABI.FG_BACKEND_XESSFG to "xessfg",
+    )
+    private val BACKEND_BY_NAME: Map<String, Int> =
+        BACKEND_NAMES.entries.associate { (backend, name) -> name to backend }
+
+    /**
+     * 每家的帧生成开关（视频设置里各厂商段内一行）。点开一家自动关掉其它 ——
+     * 三家改的是同一条呈现链路，同时开没有意义。
+     */
+    private val BACKEND_OPTIONS: Map<Int, OptionInstance<Boolean>> =
+        BACKEND_NAMES.keys.associateWith { backend ->
+            val name = BACKEND_NAMES.getValue(backend)
+            OptionInstance.createBoolean(
+                "options.frameGeneration.$name",
+                { Tooltip.create(Component.translatable("options.frameGeneration.$name.tooltip")) },
+                false,
+            ) { on -> requestBackend(backend, on) }
+        }
+
     /** 最后一次真正推给 native 的生成帧数。 */
     private var currentFrames: Int = DEFAULT_FRAMES
 
@@ -139,8 +173,51 @@ object FrameGeneration {
     private var capsCache: Map<Int, MCDR_ABI.FgCaps?> = emptyMap()
     private var capsEpochNs: Long = Long.MIN_VALUE
 
+    /** 某一家在视频设置里的开关；后端号不认识时返回 null。 */
     @JvmStatic
-    fun option(): OptionInstance<Int> = OPTION
+    fun backendOption(backend: Int): OptionInstance<Boolean>? = BACKEND_OPTIONS[backend]
+
+    /**
+     * 开关被点：开 = 选中这家（其它两家自动关），关 = 取消选中。
+     *
+     * <p>选中即代表「帧生成开」，所以这里同时把模式切到 1 —— 界面上没有第二个总开关，
+     * 三个厂商开关里最多亮一个，全灭就是不启用（用户 m03594 的要求）。
+     */
+    @JvmStatic
+    fun requestBackend(backend: Int, on: Boolean) {
+        if (syncingOptions) {
+            return
+        }
+        if (on) {
+            selectedBackend = backend
+            currentMode = 1
+        } else if (selectedBackend == backend) {
+            selectedBackend = 0
+            currentMode = 0
+        } else {
+            // 点的是本来就没选中那一家：把它的显示按回去，状态没变。
+            syncOptions()
+            return
+        }
+        syncOptions()
+        push()
+    }
+
+    /** 三个开关的显示同步成真实状态（`OptionInstance.set` 会回调，用 [syncingOptions] 挡掉）。 */
+    private fun syncOptions() {
+        // `OptionInstance.set` 内部会问 `Minecraft.getInstance()`，构造期还是 null（P291m 踩过）。
+        if (Minecraft.getInstance() == null) {
+            return
+        }
+        syncingOptions = true
+        try {
+            BACKEND_OPTIONS.forEach { (backend, option) ->
+                option.set(selectedBackend == backend && currentMode != 0)
+            }
+        } finally {
+            syncingOptions = false
+        }
+    }
 
     @JvmStatic
     fun framesOption(): OptionInstance<Int> = FRAMES_OPTION
@@ -167,7 +244,7 @@ object FrameGeneration {
     private fun queryCapsUncached(backend: Int): MCDR_ABI.FgCaps? = try {
         MCDR_ABI.queryFgCaps(backend)
     } catch (t: Throwable) {
-        IllusionLogger.debugMessage("[dxr_mc] queryFgCaps($backend) failed: $t")
+        IllusionLogger.debugMessage("queryFgCaps($backend) failed: $t")
         null
     }
 
@@ -176,22 +253,21 @@ object FrameGeneration {
         capsEpochNs = Long.MIN_VALUE
     }
 
-    /** 当前会用的后端：第一个 available 的；都不可用时退回 DLSS-G（它的 note 最能说明原因）。 */
+    /**
+     * 当前会用的后端：**用户在视频设置里点开的那一家**（`0` = 一家都没选 ⇒ 帧生成关）。
+     *
+     * <p>为什么没有「自动挑」：帧生成不是能用就用的东西 —— 它改的是呈现链路，三家的观感、
+     * 延迟和兼容性都不一样，选哪家是用户的决定。视频设置里每家的段内各有一个开关，点开
+     * 一家另一家自动关（见 [requestBackend]），全部关掉就是不启用。
+     */
     @JvmStatic
-    fun activeBackend(): Int {
-        for (backend in CANDIDATES) {
-            if (capsFor(backend)?.available == true) {
-                return backend
-            }
-        }
-        return MCDR_ABI.FG_BACKEND_DLSSG
-    }
+    fun activeBackend(): Int = selectedBackend
 
     /**
-     * 是否在视频设置里显示帧生成这两行。
+     * 是否在视频设置里显示帧生成的行。
      *
-     * <p>判据 = 任一后端 `available`；老 DLL 退回「有 D3D12 适配器」的老判据
-     * （宁可多显示一行，也不要让老 DLL 的用户看不到开关）。
+     * <p>判据 = 任一后端 `available` 或**运行库在**（实验性后端 available 还是 0，但用户
+     * 需要能看见并打开它）；老 DLL 退回「有 D3D12 适配器」的老判据。
      */
     @JvmStatic
     fun isAvailable(): Boolean {
@@ -214,6 +290,11 @@ object FrameGeneration {
     @JvmStatic
     fun statusLine(): Component {
         val backend = activeBackend()
+        // 一家都没选是**默认状态**，不是“ABI 太旧”。以前这里直接 `capsFor(0)` 拿到 null，
+        // 于是显示 "native 库没有帧生成入口"，对着一个正常的安装报了个吓人的假故障。
+        if (backend == 0) {
+            return Component.translatable("dxr_mc.video.fg.off")
+        }
         val caps = capsFor(backend) ?: return Component.translatable("dxr_mc.video.fg.noabi")
         return if (caps.available) {
             Component.translatable("dxr_mc.video.fg.available", caps.note)
@@ -284,24 +365,50 @@ object FrameGeneration {
 
     /** 帧生成是否开启（固定倍率与自动都算）。 */
     @JvmStatic
-    fun isEnabled(): Boolean = currentMode != 0
+    fun isEnabled(): Boolean = currentMode != 0 && selectedBackend != 0
+
+    /**
+     * P306ac：这一帧能不能走「呈现世界层 + 后端合成 UI」的 hudless 路径。
+     *
+     * 三个条件缺一不可：用户选了 FSR-FG 且开着；**这一帧确实有 3D 世界层**（`level != null`，
+     * 菜单 / 加载屏没有可插帧的世界层，那两处直通合成层）；后端自己说它现在就合成得了 UI
+     * （`D3D12FgUiCompositionReady`：链已包 + UI 纹理已交过去）。
+     *
+     * <p>这里只回答「想不想」。真正的 latch 在
+     * [dev.nts.expdxr.d3d12.render.advanced.smaa.D3D12GUISplit.armUiComposition]，
+     * 那里在 present 之后裁决一次，保证同一帧里 SR、界面与呈现三者的选择一致。
+     */
+    @JvmStatic
+    fun hudlessWanted(): Boolean = isEnabled()
+        && selectedBackend == MCDR_ABI.FG_BACKEND_FSRFG
+        && Minecraft.getInstance().level != null
 
     /** 下发给 native 的模式：0 关 / 1 固定倍率 / 2 动态（自动）。 */
     private fun nativeMode(): Int = when {
-        currentMode == 0 -> 0
+        !isEnabled() -> 0
         currentFrames <= MIN_FRAMES -> 2
         else -> 1
     }
 
     /** 下发给 native 的额外帧数；自动档固定 1（具体张数由后端与驱动决定）。 */
-    private fun nativeFrames(): Int = if (currentFrames <= MIN_FRAMES) 1 else currentFrames
+    private fun nativeFrames(): Int {
+        if (currentFrames <= MIN_FRAMES) {
+            return 1
+        }
+        // FSR-FG 的 SDK 只插 1 张，`numFrames` 给多少都是 2×。这里夹住，避免 native 侧按 3/4
+        // 去报 `presented` 把状态行说成 3×/4×（设置界面已经不再给 FSR 显示倍率行）。
+        if (activeBackend() == MCDR_ABI.FG_BACKEND_FSRFG) {
+            return 1
+        }
+        return currentFrames
+    }
 
     /**
      * 这次该往哪个后端下发：开启时选第一个可用的；关闭时选**上次真正下发的那个**。
      *
      * <p>关闭这一支必须是后者：如果上次生效的是别的后端，把 0 发给 DLSS-G 是关不掉的。
      */
-    private fun backendForPush(): Int = if (isEnabled()) activeBackend() else pushedBackend
+    private fun backendForPush(): Int = if (isEnabled()) selectedBackend else pushedBackend
 
     private fun push() {
         // 用户刚改过设置（或刚 load 完），能力表可能因此变化 —— 先作废缓存再判。
@@ -318,7 +425,7 @@ object FrameGeneration {
         if (isEnabled() && !warnedUnavailable && caps == null) {
             warnedUnavailable = true
             IllusionLogger.warnMessage(
-                "[dxr_mc] frame generation is on but this native library has no frame-generation ABI"
+                "frame generation is on but this native library has no frame-generation ABI"
             )
         }
 
@@ -329,13 +436,20 @@ object FrameGeneration {
         // 下一次 Present），跨 0 边界的链重建也由它挂（D13）。
         val mode = nativeMode()
         val frames = nativeFrames()
-        if (pushThroughFgFacade(backend, mode, frames)) {
+        val viaFacade = pushThroughFgFacade(backend, mode, frames)
+        if (viaFacade) {
             pushedBackend = backend
         } else {
             // 老 DLL 没有 ABI v4 的导出：退回 P213 的专用入口，行为与升级前一致。
             MCDR_ABI.D3D12SetDlssgMode(mode, frames)
             pushedBackend = MCDR_ABI.FG_BACKEND_DLSSG
         }
+        // P306r：这一行与 native 的 `P306 setMode` 成对 —— 两边都出现才说明链路通；
+        // 只有这一行没有 native 那行，就是门面失败（下面 `warnMessage` 会说明原因）。
+        IllusionLogger.infoMessage(
+            "frame generation -> native: backend=${BACKEND_NAMES[backend] ?: backend} "
+                + "mode=$mode frames=$frames viaFacade=$viaFacade"
+        )
     }
 
     /**
@@ -382,8 +496,15 @@ object FrameGeneration {
                 MCDR_ABI.D3D12FgSetMode(desc)
             }
         } catch (t: Throwable) {
-            System.err.println("[backend-java] push frame generation through ABI v4 failed: $t")
+            // P306r：这条以前只写 System.err —— 玩家从日志里看不到，等于静默降级。
+            IllusionLogger.warnMessage("frame generation: ABI v4 push failed: $t")
             Int.MIN_VALUE
+        }
+        if (result == Int.MIN_VALUE) {
+            IllusionLogger.warnMessage(
+                "frame generation: native frame-generation entry point is missing; "
+                    + "falling back to the DLSS-G-only path"
+            )
         }
         return result != Int.MIN_VALUE
     }
@@ -405,9 +526,21 @@ object FrameGeneration {
             currentMode = 1
             currentFrames = MIN_FRAMES
         }
+        // 选中的后端；名字不认识就是"一家都没选"，帧生成随之关掉。
+        val rawBackend = entries[BACKEND_KEY]?.trim()?.removeSurrounding("\"")?.lowercase().orEmpty()
+        selectedBackend = BACKEND_BY_NAME[rawBackend] ?: 0
+        if (selectedBackend == 0) {
+            currentMode = 0
+        }
         // 绕开 OptionInstance 的回调（`Options.load` 期间不触发），直接把值塞回选项对象。
         OPTION.set(currentMode)
         FRAMES_OPTION.set(currentFrames)
+        syncOptions()
+        // P306r：用户报"设置开了但没生效"时，这一行就是"应用侧读到了什么"的唯一证据。
+        IllusionLogger.infoMessage(
+            "frame generation loaded: mode=${currentMode} frames=${currentFrames} "
+                + "backend=${BACKEND_NAMES[selectedBackend] ?: "none"}"
+        )
         push()
     }
 
@@ -416,6 +549,7 @@ object FrameGeneration {
     fun save(file: File) {
         writeOption(file, OPTIONS_KEY, currentMode.toString())
         writeOption(file, FRAMES_KEY, currentFrames.toString())
+        writeOption(file, BACKEND_KEY, BACKEND_NAMES[selectedBackend].orEmpty())
     }
 
     private fun readOptions(file: File): Map<String, String> {

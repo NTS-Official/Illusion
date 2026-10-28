@@ -45,7 +45,7 @@ object D3D12Fatal {
      * `ReportedException.java:20-22`）。中英各写一遍，方便用户读、也方便事后 grep 日志。
      */
     private const val TITLE =
-        "DXRMC: Direct3D 12 backend failed (Direct3D 12 后端初始化失败；首选图形 API 已还原为 default)"
+        "DXRMC: the Direct3D 12 backend failed to initialise; the preferred graphics API is back to default"
 
     /** Win32 `MessageBoxW` 的 uType 位：`MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST`。 */
     private const val MB_OK = 0x00000000
@@ -100,7 +100,7 @@ object D3D12Fatal {
                     "and saved options.txt ($reason)",
                 true)
         } catch (t: Throwable) {
-            LOGGER.error("[backend] preferredGraphicsBackend reset in memory but options.txt could not be saved", t)
+            LOGGER.error("preferredGraphicsBackend reset in memory but options.txt could not be saved", t)
             "reset in memory to \"${PreferredGraphicsApi.DEFAULT.serializedName}\", but saving options.txt failed: ${t}"
         }
     }
@@ -151,7 +151,7 @@ object D3D12Fatal {
                     "startedCleanly in $file directly (Minecraft instance was unavailable: $reason)",
                 true)
         } catch (t: Throwable) {
-            LOGGER.error("[backend] failed to reset $file without a Minecraft instance", t)
+            LOGGER.error("failed to reset $file without a Minecraft instance", t)
             "reset failed: Minecraft instance is unavailable and $file could not be rewritten: $t"
         }
     }
@@ -167,11 +167,11 @@ object D3D12Fatal {
         val resetDetail = try {
             resetPreferredGraphicsApi(what)
         } catch (t: Throwable) {
-            LOGGER.error("[backend] failed to reset preferredGraphicsBackend", t)
+            LOGGER.error("failed to reset preferredGraphicsBackend", t)
             "reset threw ${t}"
         }
 
-        LOGGER.error("[backend] fatal: {} (no GL/Vulkan fallback by design, P73)", what)
+        LOGGER.error("fatal: {} (no GL/Vulkan fallback by design)", what)
         showPopup(what, resetDetail)
         val report = CrashReport.forThrowable(cause ?: RuntimeException(what), TITLE)
         val category = report.addCategory("DXRMC / Direct3D 12")
@@ -188,7 +188,7 @@ object D3D12Fatal {
                 "Direct3D 12, pick it again under Options > Video Settings")
         category.setDetail(
             "Where to look",
-            "logs/latest.log lines tagged [backend] / [mcdr], and known_bugs.md")
+            "logs/latest.log lines that mention the Direct3D 12 backend, and known_bugs.md")
         throw ReportedException(report)
     }
 
@@ -208,7 +208,7 @@ object D3D12Fatal {
      */
     private fun showPopup(what: String, resetDetail: String) {
         if (D3D12Settings.noCrashPopup) {
-            LOGGER.warn("[backend] fatal dialog suppressed ([debug] noCrashPopup = true); see the crash report instead")
+            LOGGER.warn("fatal dialog suppressed ([debug] noCrashPopup = true); see the crash report instead")
             return
         }
 
@@ -230,7 +230,7 @@ object D3D12Fatal {
             append(resetDetail).append("\n\n")
             append("关闭本窗口后会写出崩溃报告（crash-reports/）。\n")
             append("A crash report is written to crash-reports/ after you close this dialog.\n")
-            append("日志行带 [backend] 前缀，见 logs/latest.log。\n\n")
+            append("日志行见 logs/latest.log。\n\n")
             append("首选图形 API 已复位为 default，下一次启动不会再被改成 opengl。\n")
             append("The fallback target stays at \"default\"; the next launch will not be forced to OpenGL.\n")
         }
@@ -239,15 +239,15 @@ object D3D12Fatal {
         // 对话框是**模态阻塞**的（MessageBoxW 在自己线程上跑消息循环）。放到守护线程里等，
         // 这样即使没人在电脑前点它，崩溃报告也一定会写出来（自动化运行还会用配置 `[debug] noCrashPopup = true`
         // 直接跳过）。守护线程不会阻止 JVM 退出。
-        LOGGER.info("[backend] showing fatal error dialog (set [debug] noCrashPopup = true to suppress)")
+        LOGGER.info("showing fatal error dialog (set [debug] noCrashPopup = true to suppress)")
         val dialog = Thread({
             try {
                 if (!showNativeMessageBox(message, "Minecraft")) {
-                    LOGGER.info("[backend] falling back to MessageBox.error (tinyfd) for the fatal dialog")
+                    LOGGER.info("falling back to MessageBox.error (tinyfd) for the fatal dialog")
                     MessageBox.error(fallbackMessage)
                 }
             } catch (t: Throwable) {
-                LOGGER.error("[backend] failed to show the fatal error dialog", t)
+                LOGGER.error("failed to show the fatal error dialog", t)
             }
         }, "dxrmc-fatal-dialog")
         dialog.isDaemon = true
@@ -255,7 +255,7 @@ object D3D12Fatal {
         try {
             dialog.join(DIALOG_WAIT_MILLIS)
             if (dialog.isAlive) {
-                LOGGER.warn("[backend] fatal dialog still open after {} ms; writing the crash report anyway",
+                LOGGER.warn("fatal dialog still open after {} ms; writing the crash report anyway",
                     DIALOG_WAIT_MILLIS)
             }
         } catch (t: InterruptedException) {
@@ -300,7 +300,7 @@ object D3D12Fatal {
                 result > 0
             }
         } catch (t: Throwable) {
-            LOGGER.warn("[backend] direct user32!MessageBoxW failed ({}); will use MessageBox.error",
+            LOGGER.warn("direct user32!MessageBoxW failed ({}); will use MessageBox.error",
                 t.toString())
             false
         }
@@ -323,16 +323,16 @@ object D3D12Fatal {
     private fun sanitizeForTinyfd(message: String): String {
         val sanitized = message.replace('"', '`').replace('\'', '`')
         if (sanitized != message) {
-            LOGGER.info("[backend] fatal dialog fallback text had quotes; replaced with backticks for tinyfd")
+            LOGGER.info("fatal dialog fallback text had quotes; replaced with backticks for tinyfd")
         }
         return sanitized
     }
 
     private fun detail(message: String, reset: Boolean): String {
         if (reset) {
-            LOGGER.warn("[backend] preferredGraphicsBackend {}", message)
+            LOGGER.warn("preferredGraphicsBackend {}", message)
         } else {
-            LOGGER.error("[backend] preferredGraphicsBackend {}", message)
+            LOGGER.error("preferredGraphicsBackend {}", message)
         }
         return message
     }

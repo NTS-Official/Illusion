@@ -121,6 +121,7 @@ object D3D12Settings {
 
     /** `[sr] sharpness` - sharpening strength handed to the backend itself (0 = off). */
     val srSharpness: Float get() = snapshot().srSharpness
+
     val srMask: Boolean get() = snapshot().srMask
     /** `[dlss] reflexFrameLimitUs` — Reflex 自己的限帧器（微秒/帧，0 = 关）。 */
     val reflexFrameLimitUs: Int get() = snapshot().reflexFrameLimitUs
@@ -394,7 +395,7 @@ object D3D12Settings {
         if (!check()) return false
         if (warned.add(key)) {
             IllusionLogger.warnMessage(
-                "[dxrmc] `$key` is enabled by its old environment variable / system property / " +
+                "`$key` is enabled by its old environment variable / system property / " +
                     "marker file. Move it to config/dxr_mc-client.toml - the old source is still " +
                     "honoured only so existing scripts keep working.",
             )

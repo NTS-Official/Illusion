@@ -57,11 +57,11 @@ object ImprovedTransparencyLock {
         }
         try {
             if (enforce()) {
-                logger.info("[P274] improvedTransparency forced on (D3D12 has no IMR transparency fallback)")
+                logger.info("improvedTransparency forced on (D3D12 has no IMR transparency fallback)")
             }
         } catch (t: Throwable) {
             // 首帧还没有 level，选项回调里的 allChanged 可能抛异常；下一帧会再试。
-            logger.debug("[P274] improvedTransparency not forced yet: {}", t.toString())
+            logger.debug("improvedTransparency not forced yet: {}", t.toString())
         }
     }
 }

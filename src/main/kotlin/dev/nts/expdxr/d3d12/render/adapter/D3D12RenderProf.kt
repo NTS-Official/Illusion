@@ -145,7 +145,7 @@ object D3D12RenderProf {
         }
         val inv = 1.0 / INTERVAL
         IllusionLogger.debugMessage(
-            "[backend-java] P50 render n=$INTERVAL" +
+            "render n=$INTERVAL" +
                 " frameInterval=${ms(accIntervalNs * inv)}ms" +
                 " frame=${ms(acc[FRAME] * inv)}ms" +
                 " extract=${ms(acc[EXTRACT] * inv)}ms" +
@@ -155,7 +155,7 @@ object D3D12RenderProf {
                 " present=${ms(acc[PRESENT] * inv)}ms"
         )
         IllusionLogger.debugMessage(
-            "[backend-java] P51 world n=$INTERVAL" +
+            "world n=$INTERVAL" +
                 " submitFeatures=${ms(acc[SUBMIT_FEATURES] * inv)}ms" +
                 " prepareChunks=${ms(acc[PREPARE_CHUNKS] * inv)}ms" +
                 " renderGroup=${ms(acc[RENDER_GROUP] * inv)}ms" +
@@ -164,7 +164,7 @@ object D3D12RenderProf {
                 " occlusion=${ms(acc[OCCLUSION] * inv)}ms"
         )
         IllusionLogger.debugMessage(
-            "[backend-java] P52 world2 n=$INTERVAL" +
+            "world2 n=$INTERVAL" +
                 " prepareFeatures=${ms(acc[PREPARE_FEATURES] * inv)}ms" +
                 " execFrameGraph=${ms(acc[EXECUTE_FRAMEGRAPH] * inv)}ms" +
                 " [execFeaturesSolid=${ms(acc[EXEC_FEATURES] * inv)}ms]" +

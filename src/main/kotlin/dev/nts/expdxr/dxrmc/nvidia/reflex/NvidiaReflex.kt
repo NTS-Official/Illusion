@@ -132,7 +132,7 @@ object NvidiaReflex {
                 break
             }
         } catch (t: Throwable) {
-            Illusion.LOGGER.warn("[dxrmc] could not read $OPTIONS_KEY from $file", t)
+            Illusion.LOGGER.warn("could not read $OPTIONS_KEY from $file", t)
         }
         // `Options.load` 跑在 Minecraft 构造函数里，`OptionInstance.set` 那时不触发回调，
         // 所以这里补一次 push（与 DLSS 选项同一处理）。
@@ -159,7 +159,7 @@ object NvidiaReflex {
             val text = (kept + "${OPTIONS_KEY}:${MODE_NAMES[currentMode]}").joinToString(eol) + eol
             file.writeText(text, StandardCharsets.UTF_8)
         } catch (t: Throwable) {
-            Illusion.LOGGER.warn("[dxrmc] could not write $OPTIONS_KEY to $file", t)
+            Illusion.LOGGER.warn("could not write $OPTIONS_KEY to $file", t)
         }
     }
 }

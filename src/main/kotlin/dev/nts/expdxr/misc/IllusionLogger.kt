@@ -126,6 +126,18 @@ object IllusionLogger {
     }
 
     /**
+     * 一次性状态报告（"把哪个设置应用成了什么"）：不刷屏，但默认可见。
+     *
+     * <p>用户报“设置打开了但功能没生效”时，日志里必须能直接看到应用侧到底把哪一组值
+     * 交给了 native。这类信息之前只在 [debugMessage]（默认关闭）或 `System.err`（游戏
+     * 控制台之外看不到）里，等于没有。
+     */
+    @JvmStatic
+    fun infoMessage(message: String) {
+        LOGGER.info(message)
+    }
+
+    /**
      * Something went wrong but the engine keeps running (a fallback, a dropped frame, a
      * rejected shader edit). Unlike [debugMessage] this is *not* gated on the mod's own level -
      * log4j's configured level decides, so `logLevel = WARN` shows it and the default
@@ -182,7 +194,7 @@ object IllusionLogger {
         // Reported at INFO: a default run stays silent, while a verbose run can confirm that
         // the *config* (and not a leftover environment variable) set the level.
         val source = if (ENV_VERBOSE) "D3D12_LOG_VERBOSE" else "config/dxr_mc-client.toml"
-        val banner = "[dxrmc] log level = $effective (native $nativeLevel, source: $source)"
+        val banner = "log level = $effective (native $nativeLevel, source: $source)"
         if (banner != lastBanner) {
             lastBanner = banner
             LOGGER.info(banner)
@@ -202,12 +214,12 @@ object IllusionLogger {
                 MCDR_ABI.D3D12SetShutdownTraceAlways(shutdownTrace)
                 // P250：native 日志镜像文件。旧 DLL 没有这个导出时返回 false，只走 stderr。
                 if (nativeLogFile.isNotBlank() && MCDR_ABI.D3D12SetLogFile(nativeLogFile)) {
-                    LOGGER.info("[dxrmc] native log mirrored to {}", nativeLogFile)
+                    LOGGER.info("native log mirrored to {}", nativeLogFile)
                 }
             }
         } catch (t: Throwable) {
             LOGGER.warn(
-                "[dxrmc] could not push the native log settings (level {}, shutdownTrace {}, file {})",
+                "could not push the native log settings (level {}, shutdownTrace {}, file {})",
                 level, shutdownTrace, nativeLogFile, t,
             )
         }

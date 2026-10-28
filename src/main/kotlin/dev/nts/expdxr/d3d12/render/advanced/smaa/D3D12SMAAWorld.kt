@@ -57,7 +57,7 @@ object D3D12SMAAWorld {
         if (!loggedHook) {
             loggedHook = true
             Illusion.LOGGER.info(
-                "[dxrmc] P104: 世界层 SMAA 挂钩生效（世界 {}x{}），GUI 在其之后绘制所以不受影响",
+                "world-layer SMAA hook is live (world {}x{}); the GUI draws after it and stays unaffected",
                 texture.getWidth(0), texture.getHeight(0))
         }
         // native 的返回值是这一帧到底有没有真的跑那三趟 —— 之前只能靠 stderr 里的 P104 行，
@@ -65,7 +65,7 @@ object D3D12SMAAWorld {
         if (encoder.recordSmaaWorldPass(texture) && !loggedApplied) {
             loggedApplied = true
             Illusion.LOGGER.info(
-                "[dxrmc] P104: native 确认世界层 SMAA 已应用（世界 {}x{}）",
+                "native confirms the world-layer SMAA pass ran (world {}x{})",
                 texture.getWidth(0), texture.getHeight(0))
         }
     }

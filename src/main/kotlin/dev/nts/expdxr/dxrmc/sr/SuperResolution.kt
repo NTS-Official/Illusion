@@ -46,7 +46,6 @@ import net.minecraft.network.chat.Component
  * 四步：记速度通道、打包、`mcdr_dx12SrEvaluate`、成功就 `markWorldLayerDone()`。
  */
 object SuperResolution {
-    private const val PREFIX = "[SR]"
 
     /** 与 `Projection.setupPerspective(0.05F, ...)` 同源（`Camera.java:110`）。 */
     private const val NEAR_PLANE = 0.05f
@@ -356,7 +355,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
         { _, value -> Component.literal("$value%") },
         OptionInstance.IntRange(0, 100),
         (D3D12Settings.srSharpness * 100.0f).roundToInt().coerceIn(0, 100),
-        { value -> IllusionLogger.debugMessage("$PREFIX sharpness: ${value}%") },
+        { value -> IllusionLogger.debugMessage("sharpness: ${value}%") },
     )
 
     /** `options.txt` 键：FSR 的质量档（[QUALITY_NAMES] 下标）。 */
@@ -447,8 +446,8 @@ private const val DEFAULT_RENDER_PERCENT = 75
         val percent = percentForQuality(tier)
         D3D12RenderScale.setPercentAtFrameBoundary(percent)
         Illusion.LOGGER.info(
-            "[dxrmc] {} quality = {} (render scale {}%)",
-            PREFIX, QUALITY_NAMES.getOrElse(tier) { "quality" }, percent,
+            "quality = {} (render scale {}%)",
+            QUALITY_NAMES.getOrElse(tier) { "quality" }, percent,
         )
     }
 
@@ -505,8 +504,8 @@ private const val DEFAULT_RENDER_PERCENT = 75
         val current = D3D12RenderScale.percent()
         if (current < needed) {
             Illusion.LOGGER.error(
-                "[dxrmc] {} DLSS tier {} needs a render scale of at least {}% but the saved value is {}% (entering a world will raise it automatically, see P291f)",
-                PREFIX, QUALITY_NAMES[tier.coerceIn(0, QUALITY_NAMES.lastIndex)], needed, current)
+                "DLSS tier {} needs a render scale of at least {}% but the saved value is {}% (entering a world will raise it automatically)",
+                QUALITY_NAMES[tier.coerceIn(0, QUALITY_NAMES.lastIndex)], needed, current)
         }
     }
 
@@ -588,7 +587,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
         try {
             MCDR_ABI.D3D12SrPick(selected.id)
         } catch (t: Throwable) {
-            Illusion.LOGGER.debug("[dxrmc] {} could not push the SR backend {} to native: {}", PREFIX, selected, t.toString())
+            Illusion.LOGGER.debug("could not push the SR backend {} to native: {}", selected, t.toString())
         }
     }
 
@@ -605,8 +604,8 @@ private const val DEFAULT_RENDER_PERCENT = 75
             // 可以升采样。与其"勾了没反应"，不如明确拒绝并把原因写清楚。
             if (D3D12RenderScale.isLockedByDlaa()) {
                 Illusion.LOGGER.warn(
-                    "[dxrmc] {} cannot switch to {} while DLAA is active; turn DLAA off first",
-                    PREFIX, requested,
+                    "cannot switch to {} while DLAA is active; turn DLAA off first",
+                    requested,
                 )
                 syncOptions(previous)
                 return
@@ -620,8 +619,8 @@ private const val DEFAULT_RENDER_PERCENT = 75
             val nominal = percentForQuality(tier)
             if (tier != NATIVE_AA_TIER && D3D12RenderScale.percent() != nominal) {
                 Illusion.LOGGER.info(
-                    "[dxrmc] {} render scale {}% -> {}% to match the {} quality tier",
-                    PREFIX, D3D12RenderScale.percent(), nominal, QUALITY_NAMES[tier],
+                    "render scale {}% -> {}% to match the {} quality tier",
+                    D3D12RenderScale.percent(), nominal, QUALITY_NAMES[tier],
                 )
                 D3D12RenderScale.setPercentAtFrameBoundary(nominal)
             }
@@ -632,7 +631,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
         createdFor = ""
         lastKey = ""
         lastState = ""
-        Illusion.LOGGER.info("[dxrmc] {} backend: {} -> {}", PREFIX, previous, requested)
+        Illusion.LOGGER.info("backend: {} -> {}", previous, requested)
     }
 
     /** `options.txt` 里的后端名 → [SrBackend]；认不出的按 NONE，不要静默退回 DLSS。 */
@@ -666,7 +665,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
                 }
             }
         } catch (t: Throwable) {
-            Illusion.LOGGER.warn("[dxrmc] could not read SR options from {}", file, t)
+            Illusion.LOGGER.warn("could not read SR options from {}", file, t)
             return
         }
         createdFor = ""
@@ -715,7 +714,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
                 ).joinToString(eol) + eol
             file.writeText(text, StandardCharsets.UTF_8)
         } catch (t: Throwable) {
-            Illusion.LOGGER.warn("[dxrmc] could not write SR options to {}", file, t)
+            Illusion.LOGGER.warn("could not write SR options to {}", file, t)
         }
     }
 
@@ -765,7 +764,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
                 if (now - lastEnterDiagNanos > VELOCITY_DIAG_NANOS) {
                     lastEnterDiagNanos = now
                     IllusionLogger.debugMessage(
-                        "$PREFIX enter: backend=${backendName(backendId())} " +
+                        "enter: backend=${backendName(backendId())} " +
                             "created=${createdFor.ifEmpty { "no" }} " +
                             "velocity=${D3D12Velocity.isActive()} " +
                             "temporal=${D3D12Temporal.isActive()}",
@@ -790,7 +789,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
             createdFor = ""
             lastKey = ""
             MCDR_ABI.D3D12SrDestroy()
-            IllusionLogger.debugMessage("$PREFIX released (backend is none)")
+            IllusionLogger.debugMessage("released (backend is none)")
         }
         releaseDataPlane()
     }
@@ -825,14 +824,14 @@ private const val DEFAULT_RENDER_PERCENT = 75
             D3D12Temporal.enabled = true
             forcedTemporal = true
             Illusion.LOGGER.info(
-                "[dxrmc] $PREFIX {} needs the temporal data plane: sub-pixel projection jitter "
+                "{} needs the temporal data plane: sub-pixel projection jitter "
                     + "(dxrmc.temporal) is switched on while it is selected", backendName(backendId()))
         }
         if (!D3D12Velocity.enabled) {
             D3D12Velocity.enabled = true
             forcedVelocity = true
             Illusion.LOGGER.info(
-                "[dxrmc] $PREFIX {} needs motion vectors: the velocity pass "
+                "{} needs motion vectors: the velocity pass "
                     + "(dxrmc.temporal.velocity) is switched on while it is selected",
                 backendName(backendId()))
         }
@@ -861,7 +860,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
             try {
                 validateAtStartup()
             } catch (t: Throwable) {
-                Illusion.LOGGER.warn("[dxrmc] {} the start-up configuration check failed: {}", PREFIX, t.toString())
+                Illusion.LOGGER.warn("the start-up configuration check failed: {}", t.toString())
             }
         }
         val backend = backendId()
@@ -872,7 +871,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
         }
         val caps = MCDR_ABI.querySrCaps(backend)
         if (caps == null) {
-            return note("the loaded MCDR.dll has no mcdr_dx12SrQueryCaps (it predates P271)")
+            return note("the loaded MCDR.dll has no mcdr_dx12SrQueryCaps (the DLL predates this abstraction)")
         }
         if (!caps.available) {
             return note("backend ${backendName(backend)} is not available: ${caps.note}")
@@ -886,11 +885,22 @@ private const val DEFAULT_RENDER_PERCENT = 75
         if (depth == null) {
             return note("the main render target has no D3D12 depth texture")
         }
+        // 世界切换/维度加载时主目标会整批重建：旧纹理的 Java 对象可能还在（我们延迟销毁），
+        // 但 native 资源已经释放。这一帧若还把它们塞进 SR/FG 的 dispatch，native 侧
+        // `ffxApiGetResourceDX12` 会在 `pRes->GetDesc()` 上撞野指针直接崩（2026-10-28 12:58
+        // 的 hs_err：ffxApiGetResourceDX12+0x4f ← applyFrameLocked ← tagFrameInputs）。
+        // 宁可让这一帧不升采样/不插帧，也不能崩。
+        if (color.isClosed() || depth.isClosed()) {
+            return note("the world layer's color/depth was released this frame (world transition)")
+        }
         // 显示尺寸从 GUI 目标来：拆分启用时它就是窗口尺寸，最终界面也画进它。
         val guiTarget = D3D12GUISplit.targetForFrame() ?: D3D12GUISplit.ensureTargetForDlss()
         val guiColor = (guiTarget?.colorTextureView as? D3D12GpuTextureView)?.texture() as? D3D12GpuTexture
         if (guiColor == null) {
             return note("no display-sized target: FSR/XeSS need a separate input and output texture")
+        }
+        if (guiColor.isClosed()) {
+            return note("the display target was released this frame (world transition)")
         }
         val encoder = D3D12Device.sharedCommandEncoder()
         if (encoder == null) {
@@ -999,7 +1009,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
         // 所以在这里做（列表已打开、还没提交）；关掉配置时传 0 = "没有这张纹理"。
         val mask = if (mask()) D3D12SrMask.produce(encoder, renderWidth, renderHeight) else 0L
         if (mask() && mask == 0L) {
-            note("the P276 mask producer did not run: " + D3D12SrMask.note())
+            note("the super-resolution mask producer did not run: " + D3D12SrMask.note())
         }
 
         val gpuTracked = writeGpuFront(encoder)
@@ -1038,6 +1048,10 @@ private const val DEFAULT_RENDER_PERCENT = 75
                 desc.set(I32, OFF_DEPTH_FORMAT, depth.format.ordinal)
                 desc.set(F32, OFF_ASPECT, displayWidth.toFloat() / displayHeight.toFloat())
                 desc.set(F32, OFF_METERS, 1.0f)
+                // P306z：插帧用的相机常量不依赖 SR 后端 —— 每次真出帧都推一份给 FG。
+                // jitter 用与 dispatch 同一个「已加到投影上」的值（含 Y 符号约定）。
+                FrameGenerationConstants.push(jitter[0].toFloat(), jitter[1].toFloat() * JITTER_SIGN_Y,
+                    reset)
                 MCDR_ABI.D3D12SrEvaluate(encoder.nativeHandle(), desc)
             }
         } catch (t: Throwable) {
@@ -1049,16 +1063,25 @@ private const val DEFAULT_RENDER_PERCENT = 75
         val evalNanos = System.nanoTime() - evalStarted
         when (result) {
             1 -> {
-                // 后端把升采样结果写进了那张 UAV 纹理；搬进 GUI 目标后，本帧的 prepareForGui
-                // 必须跳过它自己的（线性采样）世界层 blit，否则会盖掉升采样结果。
+                // 后端把升采样结果写进了那张 UAV 纹理。
+                //
+                // P306ac：hudless 呈现下它**就是**呈现源 —— 不能搬进 GUI 目标（那张现在是 UI 层：
+                // 透明底 + 界面），直接把世界层交给最终 blit，UI 由帧生成后端合成一次。
+                // 合成模式保持原路径：搬进 GUI 目标，本帧的 prepareForGui 据此跳过自己的世界层 blit。
                 val blitStarted = System.nanoTime()
-                val blitted = encoder.recordTextureBlit(output, guiColor)
-                recordCost(evalNanos, System.nanoTime() - blitStarted)
-                if (blitted) {
-                    D3D12GUISplit.markWorldLayerDone()
+                if (D3D12GUISplit.isHudlessArmed()) {
+                    D3D12GUISplit.markWorldLayer(output)
+                    recordCost(evalNanos, System.nanoTime() - blitStarted)
                     lastState = ""
                 } else {
-                    note("the upscaled image could not be blitted into the GUI target")
+                    val blitted = encoder.recordTextureBlit(output, guiColor)
+                    recordCost(evalNanos, System.nanoTime() - blitStarted)
+                    if (blitted) {
+                        D3D12GUISplit.markWorldLayerDone()
+                        lastState = ""
+                    } else {
+                        note("the upscaled image could not be blitted into the GUI target")
+                    }
                 }
             }
             0 -> note("native skipped this frame (backend not ready)")
@@ -1080,12 +1103,12 @@ private const val DEFAULT_RENDER_PERCENT = 75
             MCDR_ABI.D3D12CreateQueryPool(GPU_SAMPLES * 2)
         } catch (t: Throwable) {
             gpuPoolWarned = true
-            Illusion.LOGGER.warn("[dxrmc] [SR] GPU timing disabled: creating the query pool threw {}", t.toString())
+            Illusion.LOGGER.warn("GPU timing disabled: creating the query pool threw {}", t.toString())
             return false
         }
         if (pool == 0L) {
             gpuPoolWarned = true
-            Illusion.LOGGER.warn("[dxrmc] [SR] GPU timing disabled: no mcdr_dx12CreateQueryPool")
+            Illusion.LOGGER.warn("GPU timing disabled: no mcdr_dx12CreateQueryPool")
             return false
         }
         gpuPool = pool
@@ -1102,7 +1125,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
             true
         } catch (t: Throwable) {
             gpuPoolWarned = true
-            Illusion.LOGGER.warn("[dxrmc] [SR] GPU timing disabled: writing a timestamp threw {}", t.toString())
+            Illusion.LOGGER.warn("GPU timing disabled: writing a timestamp threw {}", t.toString())
             false
         }
     }
@@ -1116,7 +1139,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
             MCDR_ABI.D3D12WriteTimestamp(encoder.nativeHandle(), gpuPool, gpuFrame * 2 + 1)
         } catch (t: Throwable) {
             gpuPoolWarned = true
-            Illusion.LOGGER.warn("[dxrmc] [SR] GPU timing disabled: writing a timestamp threw {}", t.toString())
+            Illusion.LOGGER.warn("GPU timing disabled: writing a timestamp threw {}", t.toString())
             return
         }
         gpuFrame++
@@ -1149,7 +1172,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
             MCDR_ABI.D3D12ReadQueryValues(gpuPool, 0, GPU_SAMPLES * 2, values)
         } catch (t: Throwable) {
             gpuPoolWarned = true
-            Illusion.LOGGER.warn("[dxrmc] [SR] GPU timing disabled: reading the query pool threw {}", t.toString())
+            Illusion.LOGGER.warn("GPU timing disabled: reading the query pool threw {}", t.toString())
             return
         }
         var accepted = 0
@@ -1171,7 +1194,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
         }
         val sorted = gpuSamples.copyOf(accepted).also { it.sort() }
         Illusion.LOGGER.debug(
-            "[dxrmc] [SR] gpu cost over {} frames: backend={} p50={}us p95={}us (max {}us, {} samples rejected)",
+            "gpu cost over {} frames: backend={} p50={}us p95={}us (max {}us, {} samples rejected)",
             accepted,
             backendLabel(backendId()),
             sorted[accepted / 2] * 1_000_000L / frequency,
@@ -1199,7 +1222,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
         val eval = evalSamples.copyOf(frames).also { it.sort() }
         val blit = blitSamples.copyOf(frames).also { it.sort() }
         Illusion.LOGGER.debug(
-            "[dxrmc] [SR] record cost over {} frames: evaluate p50={}us p95={}us, blit p50={}us p95={}us (CPU only)",
+            "record cost over {} frames: evaluate p50={}us p95={}us, blit p50={}us p95={}us (CPU only)",
             frames,
             eval[frames / 2] / 1_000,
             eval[(frames * 95) / 100] / 1_000,
@@ -1245,7 +1268,7 @@ private const val DEFAULT_RENDER_PERCENT = 75
             return
         }
         lastState = message
-        Illusion.LOGGER.info("[dxrmc] $PREFIX {} did not run this frame: {}",
+        Illusion.LOGGER.info("{} did not run this frame: {}",
             backendName(backendId()), String.format(Locale.ROOT, "%s", message))
     }
 }

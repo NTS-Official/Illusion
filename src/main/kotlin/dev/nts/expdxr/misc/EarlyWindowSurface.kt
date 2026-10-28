@@ -41,7 +41,7 @@ object EarlyWindowSurface {
         }
         val renderer = SDLRender.SDL_CreateRenderer(handle, "software")
         if (renderer == 0L) {
-            logger.warn("[P273] cannot clear the adopted window before shutdown: {}", SDLError.SDL_GetError())
+            logger.warn("cannot clear the adopted window before shutdown: {}", SDLError.SDL_GetError())
             return
         }
         try {

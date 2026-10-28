@@ -120,7 +120,7 @@ object D3D12SectionGeometry {
                 }
                 if (!D3D12Settings.meshTerrain &&
                     (n == MESHLET_SHADOW_UPLOADS.toLong() || n % 16L == 0L)) {
-                    LOGGER.warn("[dxrmc] meshlet shadow: {}", meshletSummary())
+                    LOGGER.warn("meshlet shadow: {}", meshletSummary())
                 }
             }
         }
@@ -151,7 +151,7 @@ object D3D12SectionGeometry {
         captureNanosTotal.addAndGet(System.nanoTime() - started)
         if (total <= 3L || total % 1024L == 0L) {
             val pos = SectionPos.of(sectionNode)
-            LOGGER.warn("[dxrmc] section upload #{} at ({},{},{}) layer={} index={} vBytes={} iBytes={} | {}",
+            LOGGER.warn("section upload #{} at ({},{},{}) layer={} index={} vBytes={} iBytes={} | {}",
                 total, pos.x(), pos.y(), pos.z(), layer, indexCount, vertexBytes, indexBytes, summary())
         }
     }

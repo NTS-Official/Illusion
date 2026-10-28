@@ -67,7 +67,7 @@ object D3D12ExitWatchdog {
 
     private fun dumpAndExit() {
         val msg = buildString {
-            append("[backend-java] WATCHDOG: Render thread gone but JVM alive >20s, forcing exit\n")
+            append("WATCHDOG: render thread gone but the JVM is still alive after 20s, forcing exit\n")
             for ((t, stack) in Thread.getAllStackTraces()) {
                 append("Thread ").append(t.name)
                     .append(" [").append(t.state).append("] daemon=")
@@ -85,7 +85,7 @@ object D3D12ExitWatchdog {
         } catch (ignored: Exception) {
             // best effort only
         }
-        System.err.println("[backend-java] WATCHDOG: System.exit(1)")
+        System.err.println("WATCHDOG: System.exit(1)")
         System.exit(1)
     }
 }

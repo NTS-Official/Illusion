@@ -54,11 +54,11 @@ object FrameGenerationSelfTest {
         }
         plan = parse(spec)
         if (plan.isEmpty()) {
-            Illusion.LOGGER.warn("[dxrmc] {} self test: could not parse \"{}\" (want act@tick,act@tick)", PREFIX, spec)
+            Illusion.LOGGER.warn("{} self test: could not parse \"{}\" (want act@tick,act@tick)", PREFIX, spec)
             return
         }
         Illusion.LOGGER.info(
-            "[dxrmc] {} self test armed: {} (ticks are counted from the moment the world is loaded)",
+            "{} self test armed: {} (ticks are counted from the moment the world is loaded)",
             PREFIX, plan.joinToString(", ") { "${it.action}@${it.atTick}" },
         )
         NeoForge.EVENT_BUS.addListener<ClientTickEvent.Post> { tick() }
@@ -95,7 +95,7 @@ object FrameGenerationSelfTest {
                 return
             }
             ticks = 0
-            Illusion.LOGGER.info("[dxrmc] {} self test: world loaded, clock started", PREFIX)
+            Illusion.LOGGER.info("{} self test: world loaded, clock started", PREFIX)
         }
         ticks++
         for (step in plan) {
@@ -107,21 +107,33 @@ object FrameGenerationSelfTest {
         }
         if (plan.all { it.fired }) {
             plan = emptyList()
-            Illusion.LOGGER.info("[dxrmc] {} self test: all steps fired, hook idle", PREFIX)
+            Illusion.LOGGER.info("{} self test: all steps fired, hook idle", PREFIX)
         }
     }
 
     private fun fire(step: Step) {
-        Illusion.LOGGER.info("[dxrmc] {} self test: {} at tick {}", PREFIX, step.action, ticks)
+        Illusion.LOGGER.info("{} self test: {} at tick {}", PREFIX, step.action, ticks)
         try {
             when (step.action) {
                 "fg-on" -> {
-                FrameGeneration.option().set(1)
-                // P305ab：门面在包装型后端 available=0 时会把 mode 传成 0，`fgSetMode` 走"关闭"早退，
-                // 于是强制 picked 也永远到不了包装。钩子这里直接把「开」发下去，绕开可用性推断。
-                pushFrameGenModeDirectly(1)
-            }
-                "fg-off" -> FrameGeneration.option().set(0)
+                    val backend = forcedFrameGenBackend.takeIf { it != MCDR_ABI.FG_BACKEND_NONE }
+                        ?: FrameGeneration.activeBackend().takeIf { it != 0 }
+                        ?: MCDR_ABI.FG_BACKEND_DLSSG
+                    FrameGeneration.requestBackend(backend, true)
+                    // P305ab：门面在包装型后端 available=0 时会把 mode 传成 0，`fgSetMode` 走"关闭"早退，
+                    // 于是强制 picked 也永远到不了包装。钩子这里直接把「开」发下去，绕开可用性推断。
+                    forcedFrameGenBackend = backend
+                    pushFrameGenModeDirectly(1)
+                }
+                "fg-off" -> {
+                    val backend = forcedFrameGenBackend.takeIf { it != MCDR_ABI.FG_BACKEND_NONE }
+                        ?: FrameGeneration.activeBackend().takeIf { it != 0 }
+                    if (backend != null && backend != MCDR_ABI.FG_BACKEND_NONE) {
+                        FrameGeneration.requestBackend(backend, false)
+                        forcedFrameGenBackend = backend
+                        pushFrameGenModeDirectly(0)
+                    }
+                }
                 "sr-dlss" -> SuperResolution.onDlssToggle(true)
                 "sr-none" -> SuperResolution.onDlssToggle(false)
                 "sr-fsr" -> SuperResolution.fsrOption().set(true)
@@ -137,14 +149,14 @@ object FrameGenerationSelfTest {
                 "fg-backend-dlssg" -> pickFrameGenBackend(MCDR_ABI.FG_BACKEND_DLSSG)
             }
         } catch (t: Throwable) {
-            Illusion.LOGGER.warn("[dxrmc] {} self test: {} failed: {}", PREFIX, step.action, t.toString())
+            Illusion.LOGGER.warn("{} self test: {} failed: {}", PREFIX, step.action, t.toString())
         }
     }
 
     private fun pickFrameGenBackend(backend: Int) {
         forcedFrameGenBackend = backend
         val status = MCDR_ABI.D3D12FgPick(backend)
-        Illusion.LOGGER.info("[dxrmc] {} self test: pick frame-generation backend {} -> status {}", PREFIX, backend, status)
+        Illusion.LOGGER.info("{} self test: pick frame-generation backend {} -> status {}", PREFIX, backend, status)
     }
 
     private fun probeFrameGeneration() {
@@ -155,11 +167,11 @@ object FrameGenerationSelfTest {
         )) {
             val caps = MCDR_ABI.queryFgCaps(backend)
             if (caps == null) {
-                Illusion.LOGGER.info("[dxrmc] {} probe {}: no ABI v4 entry points", PREFIX, name)
+                Illusion.LOGGER.info("{} probe {}: no ABI v4 entry points", PREFIX, name)
                 continue
             }
             Illusion.LOGGER.info(
-                "[dxrmc] {} probe {}: available={} runtime={} device={} chainCompat={} needsReflex={} " +
+                "{} probe {}: available={} runtime={} device={} chainCompat={} needsReflex={} " +
                     "needsUi={} needsHudless={} transitions={} maxGen={} chain={} latency={} note={}",
                 PREFIX, name, caps.available, caps.runtimeLoaded, caps.deviceSupported, caps.chainCompatible,
                 caps.needsReflex, caps.needsUiResource, caps.needsHudless, caps.transitionsInputs,
@@ -196,7 +208,7 @@ object FrameGenerationSelfTest {
                 MCDR_ABI.D3D12FgSetMode(desc)
             }
         } catch (t: Throwable) {
-            Illusion.LOGGER.warn("[dxr_mc] self-test could not push frame generation mode directly: {}", t.message)
+            Illusion.LOGGER.warn("self-test could not push frame generation mode directly: {}", t.message)
         }
     }
 }

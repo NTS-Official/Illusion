@@ -72,7 +72,7 @@ class D3D12Backend : GpuBackend {
      */
     override fun createWindow(title: String?, width: Int, height: Int, flags: Long): Long {
         if (D3D12Settings.glContext) {
-            LOGGER.warn("[renderer] glContext = true has no effect since 26.3: the GL context belongs to "
+            LOGGER.warn("glContext = true has no effect since 26.3: the GL context belongs to "
                 + "the OpenGL backend, the D3D12 backend never requests one")
         }
         val handle = SDLVideo.SDL_CreateWindow(title ?: "", width, height, flags)
@@ -122,7 +122,7 @@ class D3D12Backend : GpuBackend {
             // P124/P217：mesh 能力与原因的唯一下发点。地形已无 IMR 回退，所以能力不足
             // 必须留下一条玩家可见的 ERROR，而不是让地形静默消失。
             if (!D3D12MeshShader.isSupported() && D3D12Settings.meshTerrain) {
-                LOGGER.error("[dxrmc] mesh shaders are unavailable but terrain has no IMR fallback: "
+                LOGGER.error("mesh shaders are unavailable but terrain has no IMR fallback: "
                     + "terrain batches will be skipped (see the mesh support reason above)")
             }
             try {
@@ -158,7 +158,7 @@ class D3D12Backend : GpuBackend {
                 if (D3D12Settings.selfTestSurface) {
                     selfTestSurface(device, lastWindowHandle)
                 } else {
-                    LOGGER.info("[backend] Surface self-test skipped: swapped-chain self-test would steal "
+                    LOGGER.info("Surface self-test skipped: swapped-chain self-test would steal "
                         + "the RTSS OSD binding (enable with [debug] selfTestSurface = true)")
                 }
             } catch (t: Throwable) {
@@ -171,8 +171,8 @@ class D3D12Backend : GpuBackend {
             device.clearPipelineCache()
             return FrontendGpuDevice(device)
         } catch (t: Throwable) {
-            LOGGER.error("[backend] D3D12 self-test failed", t)
-            LOGGER.error("[backend] D3D12 failure is fatal by design (P73): no GL/Vulkan fallback, "
+            LOGGER.error("D3D12 self-test failed", t)
+            LOGGER.error("D3D12 failure is fatal by design: no GL/Vulkan fallback, "
                 + "preferredGraphicsBackend is reset to default and the game crashes with a report")
             // D3D12Fatal 抛的是 ReportedException（不是 BackendCreationException），
             // 所以 vanilla 的候选后端循环不会吞掉它 —— 见 D3D12Fatal 的类注释。
@@ -212,7 +212,7 @@ class D3D12Backend : GpuBackend {
             buffer.close()
             sampler.close()
             texture.close()
-            LOGGER.info("[backend] Java resource self-test OK (texture/buffer/sampler/view via FFM)")
+            LOGGER.info("Java resource self-test OK (texture/buffer/sampler/view via FFM)")
         }
 
         /**
@@ -258,7 +258,7 @@ class D3D12Backend : GpuBackend {
                 dst.map(0L, size.toLong(), true, false).use { view ->
                     val read: ByteBuffer = view.data()
                     IllusionLogger.debugMessage(
-                        "[backend-java] self-test: reading dst readback, size=${size}"
+                        "self-test: reading dst readback, size=${size}"
                             + " dst.usage=${dst.usage().toUInt().toString(2)}")
                     for (i in 0 until size) {
                         val actual = read.get(i).toInt() and 0xFF
@@ -274,7 +274,7 @@ class D3D12Backend : GpuBackend {
                                 }
                             }
                             IllusionLogger.warnMessage(
-                                "[backend-java] mismatch at %d: expected=0x%02X actual=0x%02X neighbors=[%s]"
+                                "mismatch at %d: expected=0x%02X actual=0x%02X neighbors=[%s]"
                                     .format(i, expected, actual, neighbors))
                             throw IllegalStateException("buffer copy readback mismatch at $i")
                         }
@@ -304,7 +304,7 @@ class D3D12Backend : GpuBackend {
                 dst.close()
                 src.close()
             }
-            LOGGER.info("[backend] Command layer self-test OK.")
+            LOGGER.info("Command layer self-test OK")
         }
         // -----------------------------------------------------------------------
         // P4: pipeline self-test — 内嵌官方启动期 critical shader 的 GLSL 原文
@@ -462,7 +462,7 @@ class D3D12Backend : GpuBackend {
                     throw IllegalStateException("native pipeline compile failed for $name")
                 }
             }
-            LOGGER.info("[backend] Pipeline self-test OK (GLSL->SPIR-V->HLSL->DXBC->PSO for core/gui + core/position_tex_color)")
+            LOGGER.info("Pipeline self-test OK (GLSL->SPIR-V->HLSL->DXBC->PSO for core/gui + core/position_tex_color)")
             // 26.3 起真实 ShaderSource 是按次传进来的（见 D3D12Device.resolveShaderSource），
             // 而这里的自检用的是内嵌 GLSL 兜底源。同一条 pipeline/gui 若把自检结果留在缓存里，
             // 后面 vanilla 用真实源编译时会命中缓存、真实源永远不生效，所以自检完立刻清掉。
@@ -512,14 +512,14 @@ class D3D12Backend : GpuBackend {
                 when (mode) {
                     "clear" -> {
                         MCDR_ABI.D3D12ClearColorTexture(ctx, texture, 1.0f, 0.0f, 0.0f, 1.0f)
-                        LOGGER.info("[backend] mesh diag(clear): clearColorTexture lastError=[{}]",
+                        LOGGER.info("mesh diag(clear): clearColorTexture lastError=[{}]",
                             MCDR_ABI.D3D12LastError())
                     }
                     "pass" -> {
                         MCDR_ABI.D3D12BeginRenderPass(ctx, longArrayOf(texture), intArrayOf(0),
                             byteArrayOf(1), floatArrayOf(0.0f, 0.0f, 0.0f, 1.0f),
                             0L, 0, 0.toByte(), 0.0, 0, 0, size, size)
-                        LOGGER.info("[backend] mesh diag(pass): beginRenderPass lastError=[{}]",
+                        LOGGER.info("mesh diag(pass): beginRenderPass lastError=[{}]",
                             MCDR_ABI.D3D12LastError())
                         MCDR_ABI.D3D12EndRenderPass(ctx)
                     }
@@ -531,7 +531,7 @@ class D3D12Backend : GpuBackend {
                         MCDR_ABI.D3D12BeginRenderPass(ctx, longArrayOf(texture), intArrayOf(0),
                             byteArrayOf(1), floatArrayOf(0.0f, 0.0f, 0.0f, 1.0f),
                             0L, 0, 0.toByte(), 0.0, 0, 0, size, size)
-                        LOGGER.info("[backend] mesh diag(pass2): beginRenderPass lastError=[{}]",
+                        LOGGER.info("mesh diag(pass2): beginRenderPass lastError=[{}]",
                             MCDR_ABI.D3D12LastError())
                         MCDR_ABI.D3D12EndRenderPass(ctx)
                     }
@@ -542,7 +542,7 @@ class D3D12Backend : GpuBackend {
                     throw IllegalStateException("mesh diag: fence wait timed out (5s)")
                 }
                 val pixels = MCDR_ABI.D3D12ReadbackTexturePixels(texture)
-                LOGGER.info("[backend] mesh diag({}): fence={} readback={}", mode, fence,
+                LOGGER.info("mesh diag({}): fence={} readback={}", mode, fence,
                     if (pixels == null) "null" else (0 until 9).joinToString(" ") { i ->
                         "(${pixels[i * 4]},${pixels[i * 4 + 1]},${pixels[i * 4 + 2]},${pixels[i * 4 + 3]})"
                     })
@@ -612,7 +612,7 @@ class D3D12Backend : GpuBackend {
                         val seen = (0 until 9).map { i ->
                             intArrayOf(pixels[i * 4], pixels[i * 4 + 1], pixels[i * 4 + 2], pixels[i * 4 + 3])
                         }
-                        LOGGER.info("[backend] Compute self-test: dispatch ok, read-back={}", seen.joinToString(" ") { px ->
+                        LOGGER.info("Compute self-test: dispatch ok, read-back={}", seen.joinToString(" ") { px ->
                             "(${px[0]},${px[1]},${px[2]},${px[3]})"
                         })
                         val bad = seen.firstOrNull { it[0] != tag || it[1] != 0 || it[2] != 0 || it[3] != 255 }
@@ -621,7 +621,7 @@ class D3D12Backend : GpuBackend {
                                 "compute self-test: unexpected pixel (${bad[0]},${bad[1]},${bad[2]},${bad[3]}), " +
                                     "expected ($tag,0,0,255)")
                         }
-                        LOGGER.info("[backend] Compute self-test PASSED (cs_6_8 + descriptor-table UAV u0 + root constants b0)")
+                        LOGGER.info("Compute self-test PASSED (cs_6_8 + descriptor-table UAV u0 + root constants b0)")
                     } finally {
                         MCDR_ABI.D3D12DestroyCommandEncoder(ctx)
                     }
@@ -715,14 +715,14 @@ class D3D12Backend : GpuBackend {
                                 ?: throw IllegalStateException(
                                     "SRI self-test: read-back returned nothing: ${MCDR_ABI.D3D12LastError()}")
                             LOGGER.info(
-                                "[backend] SRI self-test: {}x{} tiles, first pixel={} raw={}",
+                                "SRI self-test: {}x{} tiles, first pixel={} raw={}",
                                 tiles, tiles, px[0], px.joinToString(","))
                             if (px[0] != 5) {
                                 throw IllegalStateException(
                                     "SRI self-test: tile(0,0) expected 5 (2X2), got ${px[0]}")
                             }
                             LOGGER.info(
-                                "[backend] SRI self-test PASSED (R8_UINT image + 2 SRV + UAV + RSSetShadingRateImage)")
+                                "SRI self-test PASSED (R8_UINT image + 2 SRV + UAV + RSSetShadingRateImage)")
                         } finally {
                             MCDR_ABI.D3D12DestroyCommandEncoder(ctx)
                         }
@@ -742,7 +742,7 @@ class D3D12Backend : GpuBackend {
 
         private fun selfTestMesh(device: D3D12Device) {
             val size = 64
-            LOGGER.info("[backend] Mesh self-test starting (device={})", device)
+            LOGGER.info("Mesh self-test starting (device={})", device)
 
             // mesh shader：1 个线程组输出 3 顶点 1 图元；三角形故意超出 NDC（(-1,-1)/(3,-1)/(-1,3)）
             // 以覆盖整个 viewport，颜色写死纯红，由 PS 原样输出。
@@ -833,14 +833,14 @@ class D3D12Backend : GpuBackend {
                 // 再用 **LOAD**（clearFlag=0，不清屏）的 render pass 只让 mesh shader 写红——
                 // 读到蓝=mesh 什么都没画，读到红=DispatchMesh 真的光栅化进了这张纹理。
                 MCDR_ABI.D3D12ClearColorTexture(ctx, texture, 0.0f, 0.0f, 1.0f, 1.0f)
-                LOGGER.info("[backend] mesh self-test: baseline clear(blue) lastError=[{}]", MCDR_ABI.D3D12LastError())
+                LOGGER.info("mesh self-test: baseline clear(blue) lastError=[{}]", MCDR_ABI.D3D12LastError())
                 // 不清屏（LOAD）：底色保持上面那层蓝，任何红色都只能来自 mesh shader。
                 MCDR_ABI.D3D12BeginRenderPass(ctx, longArrayOf(texture), intArrayOf(0),
                     byteArrayOf(0), floatArrayOf(0.0f, 0.0f, 0.0f, 1.0f),
                     0L, 0, 0.toByte(), 0.0, 0, 0, size, size)
                 // 诊断：mcdr_dx12BeginRenderPass 返回 void，失败只能落在 lastError 里，而后续
                 // 成功的原生调用（如回读）会把它清掉——所以必须**紧跟**调用后立刻取一次。
-                LOGGER.info("[backend] mesh self-test: beginRenderPass lastError=[{}]",
+                LOGGER.info("mesh self-test: beginRenderPass lastError=[{}]",
                     MCDR_ABI.D3D12LastError())
                 if (!MCDR_ABI.D3D12SetViewport(ctx, 0, 0, size, size)
                     || !MCDR_ABI.D3D12SetScissor(ctx, 0, 0, size, size)) {
@@ -868,7 +868,7 @@ class D3D12Backend : GpuBackend {
                 // 返回的 fence 又立即可满足 → 回读全 0 且没有任何报错。
                 // 游戏侧 D3D12CommandEncoderBackend 同样是 Begin → 录制 → Submit（不显式 End）。
                 val fence = MCDR_ABI.D3D12Submit(ctx)
-                LOGGER.info("[backend] mesh self-test: submitted, fence={}", fence)
+                LOGGER.info("mesh self-test: submitted, fence={}", fence)
                 if (!MCDR_ABI.D3D12WaitForFence(ctx, fence, 5_000_000_000L)) {
                     throw IllegalStateException("mesh self-test: fence wait timed out (5s)")
                 }
@@ -886,7 +886,7 @@ class D3D12Backend : GpuBackend {
                             + MCDR_ABI.D3D12LastError())
                 // 诊断：把 3x3 采样点全部打出来。mesh 的输出只有纯红，clear 是黑，
                 // 所以"读到红"就证明 dispatch 真的光栅化进了这张纹理。
-                LOGGER.info("[backend] mesh self-test: readback = [{}]", dump(pixels))
+                LOGGER.info("mesh self-test: readback = [{}]", dump(pixels))
                 if (!hasRed(pixels)) {
                     // 同一个二进制、同一份代码，实测会出现"整条命令列表的内容对回读不可见"
                     // （连 API clear 的蓝底都读不到，alpha=0），而重启一次又正常。
@@ -894,7 +894,7 @@ class D3D12Backend : GpuBackend {
                     // 的可见性/同步竞态（native 侧），而不是 mesh 没画。
                     Thread.sleep(150)
                     val retry = MCDR_ABI.D3D12ReadbackTexturePixels(texture)
-                    LOGGER.warn("[backend] mesh self-test: first readback = [{}]; retry after 150ms = [{}]",
+                    LOGGER.warn("mesh self-test: first readback = [{}]; retry after 150ms = [{}]",
                         dump(pixels), if (retry == null) "null" else dump(retry))
                     if (retry != null) pixels = retry
                 }
@@ -908,7 +908,7 @@ class D3D12Backend : GpuBackend {
                     throw IllegalStateException("mesh self-test: no red pixel in 3x3 readback — pixels=["
                         + "${dump}] lastError=${MCDR_ABI.D3D12LastError()}")
                 }
-                LOGGER.info("[backend] Mesh self-test OK (DXC ms_6_6 + PSO + DispatchMesh -> red pixel readback)")
+                LOGGER.info("Mesh self-test OK (DXC ms_6_6 + PSO + DispatchMesh -> red pixel readback)")
             } finally {
                 // 逆序释放；句柄为 0 表示没建起来，跳过。
                 if (ctx != 0L) MCDR_ABI.D3D12DestroyCommandEncoder(ctx)
@@ -952,13 +952,13 @@ class D3D12Backend : GpuBackend {
                 }
                 fence.close()
                 D3DSurface.present()
-                System.err.println("[backend-java] selfTestSurface: presented GREEN to real window — "
-                    + "if you see green, the render pipeline is working!")
+                System.err.println(
+                    "selfTestSurface: presented GREEN to the real window; seeing green means the render pipeline works")
             } finally {
                 D3DSurface?.close()
                 encoderBackend.close()
             }
-            LOGGER.info("[backend] Surface self-test OK (pure green clear + present via FFM on real window)")
+            LOGGER.info("Surface self-test OK (pure green clear + present via FFM on real window)")
         }
     }
 }
