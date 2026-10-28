@@ -14,7 +14,7 @@ plugins {
     id("maven-publish")
     id("net.neoforged.moddev") version "2.0.148"
     id("idea")
-    id("org.jetbrains.kotlin.jvm") version "2.4.0"
+    id("org.jetbrains.kotlin.jvm") version "2.5.0-Beta2"
 }
 
 // 为 Gradle 10 做的修改
@@ -385,6 +385,23 @@ val copyNative = tasks.register("copyNative") {
             val dst = File(outDir, "MCDR.dll")
             src.copyTo(dst, overwrite = true)
             logger.lifecycle("[copyNative] staged $src -> $dst (${dst.length()} bytes)")
+            // 崩溃栈符号化要求 MCDR.pdb 与 MCDR.dll 同目录（见 d3d12_device.cpp 的 P306c）：
+            // 开发运行时把它放进 run/dxrmc/，native 崩溃日志就能直接给到 文件:行。
+            // 只进 run/，不进 JAR —— PDB 十几 MB，对发行版没有意义。
+            val pdbSrc = File(src.parentFile, "MCDR.pdb")
+            if (pdbSrc.isFile) {
+                val runDir = File(nativeDir.parentFile, "Illusion/run/dxrmc")
+                runDir.mkdirs()
+                // DLL 也一起放进 run/：运行时会按字节比较重新解包，但把两者成套落盘可以
+                // 保证"崩溃时用到的 DLL"与"手边的 PDB"永远是同一次构建（否则解析出来的
+                // 源码行会是错的）。
+                src.copyTo(File(runDir, "MCDR.dll"), overwrite = true)
+                val pdbDst = File(runDir, "MCDR.pdb")
+                // 无条件覆盖：PDB 与 DLL 版本必须严格一致，留一份旧 PDB 会让崩溃栈
+                // 解析到错误的源码行 —— 那种错误比没有符号更浪费时间。
+                pdbSrc.copyTo(pdbDst, overwrite = true)
+                logger.lifecycle("[copyNative] staged MCDR.dll + MCDR.pdb -> $runDir")
+            }
         } catch (t: Throwable) {
             // Independently managed repos: a missing, locked or half-written native
             // output must never break the JVM build.
