@@ -1,6 +1,6 @@
 # MCDR 的 FFM ABI 层
 
-本文只讲一件事：**JVM 侧怎么安全地调用 MCDR 这个 C++ DLL**，以及这套约定为什么长成这样。
+本文只讲一件事：**JVM 侧怎么安全地调用 MCDR 这个 C++ DLL**，以及调用时必须遵守的用法与边界约束。
 
 三个参与者：
 
@@ -23,59 +23,7 @@
 | 签名不匹配 | 0 |
 | 双方镜像的结构体 | 16，尺寸与字段偏移全部一致 |
 
-## 1 为什么是 FFM 而不是 JNI
-
-### 1.1 先看被替掉的东西有多大
-
-JNI 桥是 **6 个文件、2158 行、115 个 `Java_com_..._Dx12Native_*` 导出**（数字来自头文件开头的历史记录）。现在是 200 个平铺的 `extern "C"` 导出，JVM 侧的调用方只认 `MCDR_ABI` 一个类。
-
-替掉的不只是行数，而是四条会静默失败的链路。
-
-### 1.2 头文件生成这条链被整个删掉
-
-JNI 的 native 符号名由 `javac -h` 从**包名 + 类名 + 方法名**合成。这意味着：任何一次重命名（包、类、方法）都会让 native 侧的符号名漂移；而失败形式极差 —— `UnsatisfiedLinkError`，或者更糟，`RegisterNatives` 表里少一项、运行到那条路径才炸。
-
-FFM 下 native 侧的符号就是一个纯 C 名字（`mcdr_dx12CreateSurface`），Kotlin 侧绑定时写的也是同一个字符串字面量：
-
-```kotlin
-MH_asyncexecutorcreate = skip("mcdr_dx12AsyncExecutorCreate", fd(MCDRLayout.PTR))
-```
-
-名字写错立刻在**绑定期**抛 `IllegalStateException("MCDR export not found: ...")`，而不是等玩家走某条分支时才发现。
-
-### 1.3 Arena 取代了 JNI 的手工生命周期
-
-JNI 里每传一次数组/字符串都要配一对：`Get*ArrayElements` ↔ `Release*ArrayElements`、`NewDirectByteBuffer` ↔ 自己管释放、`GetStringUTFChars` ↔ `ReleaseStringUTFChars`，跨线程还要 `NewGlobalRef` / `DeleteGlobalRef`。漏一处就是泄漏，写早一处就是 use-after-free。
-
-FFM 把生命周期变成**词法作用域**：谁开 `Arena` 谁负责关，关掉之后所有从它分配出去的 `MemorySegment` 一起失效。逐帧路径上则用线程局部的复用槽（`SCRATCH`，4 个 slot，内部 `Arena.ofConfined()`），首次几帧分配够之后就完全不分配 —— 这条在 JNI 里要自己写一个 per-thread 缓存池才能做到。
-
-### 1.4 不再需要 `JavaVM*` 和线程附着
-
-JNI 里 native 想回调 JVM，必须先缓存 `JavaVM*`，在工作线程上 `GetEnv` / `AttachCurrentThread`，再 `GetMethodID(cls, "onFenceComplete", "(JZ)V")` 做一次字符串查找。
-
-现在整个库里**只有一个 upcall**（围栏回调），签名固定为三个整数：
-
-```c
-typedef void(MCDR_CALL* mcdr_fence_callback_fn)(int64_t userHandle, uint64_t value, int32_t completed);
-```
-
-`userHandle` 是 JVM 侧注册表的一个整数句柄，native 侧**从不持有任何 JVM 对象引用**。这个 upcall stub 建一次、存在共享 Arena 里、活到进程结束。
-
-### 1.5 结构体从"手写字节"变成"声明的布局 + 运行时自检"
-
-旧做法是把管线描述符塞进一个 `LITTLE_ENDIAN` 的 `ByteBuffer`，Java 侧 `putInt`/`putU8` 一个个写，native 侧按相同顺序读回来。这条路上任何一次字节序滑落、任何一次少写一个 pad 字节，结果都是**整屏全黑**而不是异常。
-
-现在是「一份 `structLayout` + 一份 `EXPECTED_C_SIZES` + 一次和运行中 DLL 的逐字段比对」，三层都失败得很快（详见 §2.2）。
-
-### 1.6 类型错误在句柄层就失败
-
-`FunctionDescriptor` 把返回值与每个参数的类型钉死；`invokeExact` 要求调用点的静态类型**逐字匹配**描述符。把 `int32_t` 声明成 `I64`、或者用 `as Long` 去接 `I32` 的返回值，抛的是 `WrongMethodTypeException`，而不是把一个 64 位值当 32 位用、写坏栈。
-
-### 1.7 错误不跨边界抛异常
-
-native 从不抛 Java 异常（C++ 异常也不可能安全穿过 FFM 边界）。布尔入口返回 `int32_t` 1/0，失败详情挂在 `mcdrLastError()` 上；需要硬失败的封装再把它包成 `IllegalStateException`。这条规则让 native 侧完全不必知道 JVM 的存在。
-
-## 2 三层结构
+## 1 三层结构
 
 ```
 MCDR\include\mcdr_abi.h            契约：extern "C" 平铺导出 / 结构体 / 错误码
@@ -94,7 +42,7 @@ MCDR_PipelineDesc.kt               打包器：把 Kotlin 对象铺进 arena
 MCDR_MeshPipelineDesc.kt
 ```
 
-### 2.1 契约层：`mcdr_abi.h`
+### 1.1 契约层：`mcdr_abi.h`
 
 头文件开头把设计规则写成了七条，逐条对应到实现：
 
@@ -102,20 +50,20 @@ MCDR_MeshPipelineDesc.kt
 | --- | --- | --- |
 | 只有 C 链接 | `extern "C"`，无名字修饰，无生成的头文件 | 全部 200 个导出 |
 | 每个聚合体只有一份定义 | Java 侧 1:1 `MemoryLayout`，不手写偏移、不 packed blob | `MCDR_Layout.kt` |
-| 句柄是不透明指针 | `mcdr_object*` 等，不是"让 Java 猜含义的整数" | §3.1 |
-| 字符串由调用方分配 | UTF-8 缓冲，被调方返回所需字节数（含 NUL） | §3.3 |
-| 异常不跨界 | 布尔入口返回 `int32_t` 1/0；错误在 `mcdrLastError()` | §3.5 |
-| 数组是 (pointer, count) | 从不用 JNI 数组 | §3.4 |
-| 单一 upcall 类型 | 只带整数句柄，native 不持 JVM 对象 | §1.4 |
+| 句柄是不透明指针 | `mcdr_object*` 等，不是"让 Java 猜含义的整数" | §2.1 |
+| 字符串由调用方分配 | UTF-8 缓冲，被调方返回所需字节数（含 NUL） | §2.3 |
+| 异常不跨界 | 布尔入口返回 `int32_t` 1/0；错误在 `mcdrLastError()` | §2.5 |
+| 数组是 (pointer, count) | 从不用 JNI 数组 | §2.4 |
+| 单一 upcall 类型 | 只带整数句柄，native 不持 JVM 对象 | §3.4 |
 
 两个容易忽略的细节：
 
 - **调用约定是 `__cdecl`**。`MCDR_CALL` 在 Windows 上展开成 `__cdecl`；`MCDR_API` 在 native 编译时是 `__declspec(dllexport)`，在消费方是 `dllimport`。x64 上只有一种调用约定，但这个宏让头文件在 32 位下也不会错。
-- **MSVC 的 `long` 是 32 位**。头文件为此专门写了一条注释：凡是写成 `int32_t` 的参数，Java 侧必须是 `JAVA_INT`；只有 `int64_t` / `size_t` / 指针才是 `JAVA_LONG` / `JAVA_ADDRESS`。这一条是 §6 里"类型不逐字匹配"坑的根源。
+- **MSVC 的 `long` 是 32 位**。头文件为此专门写了一条注释：凡是写成 `int32_t` 的参数，Java 侧必须是 `JAVA_INT`；只有 `int64_t` / `size_t` / 指针才是 `JAVA_LONG` / `JAVA_ADDRESS`。这一条是 §5 里"类型不逐字匹配"坑的根源。
 
 版本号是双份的：宏 `MCDR_ABI_VERSION 4u`，以及运行时函数 `mcdrABIVersion()`。两者相等才算握手成功，防止"Java 常量被编译器内联、DLL 却是旧的"。
 
-### 2.2 布局层：`MCDR_Layout.kt`
+### 1.2 布局层：`MCDR_Layout.kt`
 
 这一层的三条硬规则：
 
@@ -159,7 +107,7 @@ arrayOf<Any>("mcdr_binding_slot", BINDING_SLOT, 40L),
 
 **当前的缺口**：`mcdr_dlss_constants` 只出现在 `EXPECTED_C_SIZES` 里（尺寸 312 被断言），但没有登记进 `STRUCTS`，因此它的字段偏移不参与 `verify()` 比对 —— 总大小对、内部字段错位仍然检测不到。
 
-### 2.3 句柄层：`MCDR_ABI.kt`
+### 1.3 句柄层：`MCDR_ABI.kt`
 
 一个 Kotlin `object`，内部 195 个方法句柄字段：
 
@@ -189,7 +137,7 @@ private fun fd(ret: MemoryLayout, vararg args: MemoryLayout) = FunctionDescripto
 private fun fdv(vararg args: MemoryLayout) = FunctionDescriptor.ofVoid(*args)
 ```
 
-### 2.4 封装层：每个导出的四种形态
+### 1.4 封装层：每个导出的四种形态
 
 `MCDR_ABI` 的 200 个公开函数不是风格统一的 API，而是**四种刻意区分的失败语义**：
 
@@ -217,7 +165,7 @@ fun D3D12CreateSurface(hwnd: Long): Long {
 
 `unexpected(t)` 一律是 `IllegalStateException("MCDR native call failed: $t", t)`。需要带 native 错误串的地方用 `check(value, what)`：它调 `D3D12LastError()`，拼成 `"$what failed: $detail"` 再抛。
 
-### 2.5 描述符打包器
+### 1.5 描述符打包器
 
 `MCDR_PipelineDesc` / `MCDRMeshPipelineDesc` 是布局层的延伸：把 Kotlin 侧的 builder 对象铺进一块 arena，得到一个 `mcdr_pipeline_desc*` / `mcdr_mesh_pipeline_desc*`。
 
@@ -230,12 +178,12 @@ MCDRPipelineDesc().apply { /* 填字段 */ }.pack(arena)   // 返回的段只在
 - **builder 是单次的**：填完字段直接交给 `D3D12CreatePipeline`，不缓存、不复用。
 - **嵌套类是 static nested**（Kotlin 默认），不能写 `inner class` —— Java 侧要能用 `McdrPipelineDesc.ColorTarget(...)` 构造。
 - **字段偏移在类初始化时解析一次**（`off(MCDRLayout.COLOR_TARGET, "srcColor")`），从不写字面量。
-- **`semanticName` 跟着元素走**。旧实现里它是单独一个数组、按位置重新关联（"第 i 个名字给第 i 个元素"），两边数量不等时会静默错配；现在它是 `InputElement` 自己的字段。
-- **未使用的颜色槽用 `format = -1`**（`DXGI_FORMAT_UNKNOWN`），不再需要额外的 sentinel 计数。
+- **`semanticName` 跟着元素走**：它是 `InputElement` 自己的字段，不得另设一个按位置关联的名字数组（"第 i 个名字给第 i 个元素"），两边数量不等会静默错配。
+- **未使用的颜色槽用 `format = -1`**（`DXGI_FORMAT_UNKNOWN`），不用额外的 sentinel 计数。
 - **空 shader 也分配 1 字节**，让指针永远不为 `NULL`：native 校验器拒绝"`NULL` 指针 + 非零长度"，但接受"有效指针 + 长度 0"。
 - mesh 版只有一处语义差别：三个 blob 是 **DXIL** 字节码而不是 HLSL 源码，且没有 input layout / 没有 topology（mesh 管线没有输入装配阶段）。
 
-### 2.6 新增一个导出函数：要改哪几处
+### 1.6 新增一个导出函数：要改哪几处
 
 按顺序做，缺一处就是"能编译、能启动、运行到才炸"。
 
@@ -245,7 +193,7 @@ MCDRPipelineDesc().apply { /* 填字段 */ }.pack(arena)   // 返回的段只在
 4. **`MCDR_Layout.kt`**：新结构体写 `structLayout`（pad 全部显式），加一行 `EXPECTED_C_SIZES`，若是新类型还要登记进 `STRUCTS`（漏登记 = 该结构体完全不被校验）。
 5. **`MCDR_ABI.kt` 加字段**：`private var MH_xxx: MethodHandle? = null`，命名统一小写。
 6. **`bindAll()` 的对应 `bindXxx()`** 里加一行：必需用 `skip`，功能级用 `skipOptional`，描述符用 `fd` / `fdv` 逐字写对每个参数宽度。
-7. **写公开封装**：按 §2.4 选一种失败语义；文档注释里写清返回值的哨兵含义。
+7. **写公开封装**：按 §1.4 选一种失败语义；文档注释里写清返回值的哨兵含义。
 8. **跑自检**：
 
    ```
@@ -255,9 +203,9 @@ MCDRPipelineDesc().apply { /* 填字段 */ }.pack(arena)   // 返回的段只在
    期望看到 `native exports` 与 `kotlin bindings` 同步 +1、`mismatched symbols: (none)`、`struct layout problems: (none)`。它**不需要 DLL、不需要 GPU、不用启动游戏**：符号表是正则解析头文件与 Kotlin 源码得到的，结构体布局是按 MSVC x64 的自然对齐规则静态模拟出来的。
 9. **编译两边**：`cd Illusion; .\gradlew.bat compileKotlin`，native 侧 `MSBuild MCDR\MCDR.vcxproj /p:Configuration=Release /p:Platform=x64`。
 
-## 3 调用约定与内存
+## 2 调用约定与内存
 
-### 3.1 类型映射
+### 2.1 类型映射
 
 | C | ValueLayout | Kotlin 侧读 | 备注 |
 | --- | --- | --- | --- |
@@ -265,12 +213,12 @@ MCDRPipelineDesc().apply { /* 填字段 */ }.pack(arena)   // 返回的段只在
 | `int64_t` / `size_t` / `uint64_t` | `I64` | `as Long` | 需要按无符号解释时自己转 |
 | `void*` / `mcdr_xxx*` | `PTR` | `as MemorySegment` → `.address()` | 句柄在 Kotlin 里存 `Long` |
 | `uint8_t` | `I8` | `as Byte` | 结构体字段用，不作为参数 |
-| `char*`（UTF-8 出参） | `PTR` | 二次调用取串 | §3.3 |
+| `char*`（UTF-8 出参） | `PTR` | 二次调用取串 | §2.3 |
 | `void` | — | — | 用 `fdv(...)` 而不是 `fd(VOID, ...)` |
 
 **句柄约定**：所有句柄在 Kotlin 里都是 `Long`，只在调用边界用 `MemorySegment.ofAddress(handle)` 转成段。反向用 `addr(seg) = seg?.address() ?: 0L`。这样上层代码（渲染后端、录制器）完全不碰 `MemorySegment`，也不必 import `java.lang.foreign`。
 
-### 3.2 Arena：谁分配、谁释放
+### 2.2 Arena：谁分配、谁释放
 
 | Arena | 位置 | 生命周期 | 装什么 |
 | --- | --- | --- | --- |
@@ -286,7 +234,7 @@ MCDRPipelineDesc().apply { /* 填字段 */ }.pack(arena)   // 返回的段只在
 
 指针参数的有效期：头文件没有逐条声明，但代码的用法是**只在本次调用期间有效** —— `pack()` 的返回值在同一段 `use { }` 里直接传给 downcall，随后 arena 关闭。native 侧负责把需要留存的数据拷进 D3D12 对象。
 
-### 3.3 字符串
+### 2.3 字符串
 
 所有跨边界的字符串都是 **UTF-8 + NUL**，由调用方分配：
 
@@ -321,7 +269,7 @@ return if (written > 0) buf.getString(0) else ""
 
 `getString(0)` 默认按 UTF-8 解码并以 NUL 结尾，正合约定；但它要求段的可见长度足够，所以对 native 返回的裸地址必须先 `reinterpret` 一个明确长度（不能一路用 `Long.MAX_VALUE`，除非确实要读到 NUL 为止，像 `mcdrABILayout` 里的字段名那样）。
 
-### 3.4 数组与结构体数组
+### 2.4 数组与结构体数组
 
 数组参数一律是 **(pointer, count)**：
 
@@ -338,9 +286,9 @@ val array = arena.allocate(MCDRLayout.COLOR_TARGET, targets.size.toLong())
 val stride = MCDRLayout.COLOR_TARGET.byteSize()      // 这就是尾部 padding 必须算对的原因
 ```
 
-**索引必须按"实际起始偏移"算**。曾经有一处按 slot 下标而不是 `startDraw` 之后的绝对下标去索引"每槽一份"的类型数组，只有 `startDraw == 0` 的 worker 不炸，其余 worker 抛 `ArrayIndexOutOfBoundsException`，整条并行录制 100% 失败并静默退化成串行。
+**索引必须按"实际起始偏移"算**：索引"每槽一份"的类型数组时用 `startDraw` 之后的绝对下标，不要用 slot 下标 —— 后者只在 `startDraw == 0` 的 worker 上正确，其余 worker 抛 `ArrayIndexOutOfBoundsException`，整条并行录制退化成串行。
 
-### 3.5 返回码与错误串
+### 2.5 返回码与错误串
 
 | 出口 | 约定 |
 | --- | --- |
@@ -352,15 +300,15 @@ val stride = MCDRLayout.COLOR_TARGET.byteSize()      // 这就是尾部 padding 
 
 `mcdrLastError()` 是线程局部的 —— 这也是它不用全局变量的原因：渲染线程与 worker 各自报自己的错，不会互相覆盖。
 
-### 3.6 对齐与 padding
+### 2.6 对齐与 padding
 
 - 头文件**没有** `#pragma pack`，所以布局就是 MSVC x64 的自然对齐：`int64_t`/指针 8 字节对齐，`int32_t`/`float` 4 字节，`uint8_t` 1 字节，结构体整体对齐到其成员的最大对齐。
 - 每个"编译器会插"的位置在 C 侧都写了一个具名 `_padN`，Java 侧必须有对应成员；C 侧没命名、只能靠编译器补的位置（如 `INPUT_ELEMENT` 里 28→32 的 4 字节），Java 侧必须补 `paddingLayout(n)`。
 - **arena 分配的地址**：`scratch()` 用 16 字节对齐（`allocate(need, 16L)`），比结构体最大对齐（8）更严，避免 SIMD 拷贝路径上的意外。
 
-## 4 生命周期与线程
+## 3 生命周期与线程
 
-### 4.1 加载顺序
+### 3.1 加载顺序
 
 `MCDR_ABI` 的 `init { }` 是唯一的加载入口，顺序不可换：
 
@@ -372,17 +320,17 @@ val stride = MCDRLayout.COLOR_TARGET.byteSize()      // 这就是尾部 padding 
 
 任何一步失败都只写 `LOAD_FAILURE`，让类**继续可用**（只是 `isAvailable() == false`）。
 
-### 4.2 `dxrmc\` 目录与"必须同目录"
+### 3.2 `dxrmc\` 目录与"必须同目录"
 
 - DLL 与所有第三方运行库都解到 `<user.dir>\dxrmc\`。`user.dir` 是游戏进程的工作目录，也就是整合包/实例目录。
-- 解压是**内容比较**而不是时间戳比较。JAR 条目的时间戳固定在 1980 纪元，旧的"本地 mtime 更新且大小相同就不覆盖"判断曾让一个陈旧的本地副本长期遮住新构建。
+- 解压是**内容比较**而不是时间戳比较：JAR 条目的时间戳固定在 1980 纪元，按 mtime 判断会让陈旧的本地副本遮住新构建。
 - vendor 解压**从不抛异常**：这些 SDK 是可选的，缺一个必须降级成"该 SDK 报不可用"，而不是让模组起不来。日志只报一行 `SDK runtime DLLs: N extracted, M already current`。
 - 清单由 `vendor/manifest.txt` 驱动（构建期生成）。不硬编码名单的理由：JAR 目录不可枚举，硬编码会漂移。
 - 随发行包发布的是 XeSS 与 Microsoft 的 D3D12Core / DXC；DLSS 与 FidelityFX 按许可证要求不进发行包，只在开发目录里出现。发行版因此会如实报告 DLSS / FSR 不可用。
 
 **为什么必须和第三方运行库同目录**：Windows 的 DLL 搜索顺序里，PATH 排在很后面，把目录追加到 PATH 对"被隐式加载的依赖"并不可靠；而同一目录是加载器与 native 侧都能预期的唯一定位点。具体到本项目，这些运行库都是 native 在运行时按名字去找的，所以必须落在 `MCDR.dll` 旁边。代码里能确认的只有"解压到同一目录、且在 `libraryLookup` 之前完成"这个顺序保证；更细的搜索路径语义代码中未明确。
 
-### 4.3 版本握手与 `isAvailable()`
+### 3.3 版本握手与 `isAvailable()`
 
 ```kotlin
 fun isAvailable(): Boolean = LOAD_FAILURE == null
@@ -393,7 +341,7 @@ fun unavailableReason(): String? = LOAD_FAILURE?.toString()
 
 版本不匹配直接抛 `MCDR ABI version mismatch: java=4, native=3`。这是**故意做成硬失败**的：版本不同意味着结构体可能不同，继续调用就是按错误布局读写内存。
 
-### 4.4 线程约束
+### 3.4 线程约束
 
 | 场景 | 约束 |
 | --- | --- |
@@ -405,9 +353,9 @@ fun unavailableReason(): String? = LOAD_FAILURE?.toString()
 
 upcall 这条要单独说：`onFenceComplete` 在 native 线程上执行，异常一旦逃出去会**直接终止 JVM**（不是抛到某处可以捕获）。所以它自己 `catch (Throwable)`，只打一条 WARN，不依赖任何 `catchException` 包装。
 
-## 5 失败处理
+## 4 失败处理
 
-### 5.1 五类失败，五种处理
+### 4.1 五类失败，五种处理
 
 | 失败 | 检测点 | 处理 | 用户可见后果 |
 | --- | --- | --- | --- |
@@ -417,14 +365,14 @@ upcall 这条要单独说：`onFenceComplete` 在 native 线程上执行，异�
 | 布局/版本不匹配 | `verifyABI()` | 抛 → 记 `LOAD_FAILURE` | 同上，日志里有逐字段明细 |
 | 调用抛异常 | 各封装的 `catch` | 硬失败接口包 `unexpected`；查询接口返回哨兵 | 一条 WARN + 降级 |
 
-### 5.2 显式失败 vs 静默降级
+### 4.2 显式失败 vs 静默降级
 
 分界线是"这个调用的失败会不会让后续状态不可信"：
 
 - **硬失败**（抛 `IllegalStateException`）：创建资源/管线/命令列表、销毁、present、`D3D12LastError()` —— 继续跑下去只会积累不一致状态。
 - **静默降级**（哨兵值）：所有开关类（DLSS 质量、Reflex 模式、VRS、PIX、HDR）、所有能力查询。理由很实际：这些函数大多在"配置被读取"的时刻调用，那时 DLL 是可选的，抛异常等于让玩家改不了配置。
 
-### 5.3 错误信息长什么样
+### 4.3 错误信息长什么样
 
 - 绑定失败：`MCDR export not found: mcdr_dx12CreateSurface`
 - 库缺失：`MCDR.dll is neither packaged in the JAR nor present at ... — build the MCDR native project first`
@@ -434,22 +382,29 @@ upcall 这条要单独说：`onFenceComplete` 在 native 线程上执行，异�
 - 调用：`MCDR native call failed: <原始异常>`
 - 业务：`<what> failed: <mcdrLastError()>`
 
-## 6 常见坑
+### 4.4 跨边界硬约束
 
-1. **编码**：一律 UTF-8，且必须显式写 NUL。用 `String.toByteArray()` 不带字符集就是平台默认编码，在中文 Windows 上是 GBK —— native 收到的是乱码路径。
-2. **字节序**：`MemorySegment.asByteBuffer()` 默认是 **BIG_ENDIAN**，而 x86 是 little。旧 JNI 路径用 `NewDirectByteBuffer` 交出去的缓冲正是这个默认值，结果所有 UBO 里的矩阵都被静默转置。现在的规矩是：拿到 `ByteBuffer` 立刻 `.order(ByteOrder.nativeOrder())`。
-3. **对齐**：`structLayout` 不插 padding（§2.2）。宁可多写一个具名 `_padN` 并在 C 侧也命名它，也不要指望"反正编译器会补"。
-4. **尾部 padding 决定 stride**：算 `byteSize()` 当 stride 之前，先确认 `EXPECTED_C_SIZES` 那一行和 C 的 `sizeof` 一致。
-5. **跨线程 Arena**：`Arena.ofConfined()` 的段只能在本线程用。要跨线程就传值/传句柄，不要传段；逐帧缓冲用 `ThreadLocal` 槽。
-6. **`invokeExact` 必须逐字匹配**：`int32_t` 参数写 `I32`、调用点写 `as Int`。写成 `I64` 或 `as Long` 会在运行时抛 `WrongMethodTypeException`，而且错的可能是**第一次调用**，不是绑定期 —— 所以新封装的冒烟测试一定要真的调一次。
-7. **`MemorySegment.NULL` 与 `ofAddress(0)`**：两者等价；比较时用 `.address() == 0L` 最省事。
-8. **数组索引按绝对位置**：并行录制里"每槽一份"和"每 worker 一份"的数组不是同一种索引，混用只在部分 worker 上炸（§3.4）。
-9. **upcall 里不能抛**：逃出去的异常直接杀 JVM（§4.4）。
-10. **`reinterpret` 要写长度**：native 返回的裸地址没有可见长度，`getString`/`get` 之前必须给出准确长度，否则是越界读。
-11. **不要凭名字猜语义**。`mcdr_dx12CreateDevice(char* buf, int32_t cap)` 名字里带 Create，实际返回 `int32_t` 并只往 `buf` 里写设备摘要（两阶段字符串）；设备的创建是这个调用的副作用。看签名，不要看名字。
-12. **导出名不统一**。绝大多数是 `mcdr_dx12*`，但命令编码器那条是 `MCDR_D3D12_create_command_encoder`（大写 + 下划线）。抄别的绑定行时别照抄命名。
+- native 侧**不抛 Java 异常**，C++ 异常也不得穿过 FFM 边界。
+- 布尔 / 三态入口一律返回 `int32_t`（1 = 成功，0 = 失败或未启用，-1 = 参数或加载失败），失败详情只从 `mcdrLastError()` 读，不要另开错误通道。
+- 需要硬失败时由 JVM 侧封装包成 `IllegalStateException`；native 侧不得感知 JVM 的存在。
+- `FunctionDescriptor` 与 `invokeExact` 的类型必须**逐字匹配**：`int32_t` 用 `I32` 并 `as Int`，`int64_t` / `size_t` / 指针用 `I64` / `PTR` 并 `as Long`；写错是运行期 `WrongMethodTypeException`，不是编译错误。
 
-## 7 文件导航
+## 5 常见坑（用法约束）
+
+1. **编码**：一律 UTF-8 加显式 NUL；`String.toByteArray()` 不带字符集取的是平台默认编码（中文 Windows 上是 GBK），native 收到的是乱码路径。
+2. **字节序**：`MemorySegment.asByteBuffer()` 默认是 **BIG_ENDIAN**，而 x86 是 little；拿到 `ByteBuffer` 立刻 `.order(ByteOrder.nativeOrder())`，否则所有 UBO 里的矩阵都被静默转置。
+3. **对齐**：`structLayout` 不插 padding（§1.2）。宁可多写一个具名 `_padN` 并在 C 侧也命名它，也不要指望"反正编译器会补"。
+4. **尾部 padding 决定 stride**：拿 `byteSize()` 当 stride 之前，先确认 `EXPECTED_C_SIZES` 那一行和 C 的 `sizeof` 一致。
+5. **跨线程 Arena**：`Arena.ofConfined()` 的段只能在本线程用；要跨线程就传值 / 传句柄，不要传段，逐帧缓冲用 `ThreadLocal` 槽。
+6. **`invokeExact` 必须逐字匹配**：`int32_t` 参数写 `I32`、调用点写 `as Int`；写成 `I64` 或 `as Long` 会在运行时抛 `WrongMethodTypeException`，而且可能在**第一次调用**才暴露 —— 新封装必须真的调一次做冒烟。
+7. **`MemorySegment.NULL` 与 `ofAddress(0)`**：两者等价，比较时用 `.address() == 0L`。
+8. **数组索引按绝对位置**：并行录制里"每槽一份"和"每 worker 一份"的数组不是同一种索引，混用只在部分 worker 上炸（§2.4）。
+9. **upcall 里不能抛**：逃出去的异常直接杀 JVM（§3.4）。
+10. **`reinterpret` 要写长度**：native 返回的裸地址没有可见长度，`getString` / `get` 之前必须给出准确长度，否则是越界读。
+11. **不要凭名字猜语义**：`mcdr_dx12CreateDevice(char* buf, int32_t cap)` 名字里带 Create，实际返回 `int32_t` 并只往 `buf` 里写设备摘要（两阶段字符串），设备的创建是这个调用的副作用 —— 看签名，不要看名字。
+12. **导出名不统一**：绝大多数是 `mcdr_dx12*`，但命令编码器那条是 `MCDR_D3D12_create_command_encoder`（大写 + 下划线），抄别的绑定行时别照抄命名。
+
+## 6 文件导航
 
 相对 `Illusion\src\main\kotlin\dev\nts\expdxr\`：
 
@@ -470,10 +425,10 @@ upcall 这条要单独说：`onFenceComplete` 在 native 线程上执行，异�
 | `MCDR\include\mcdr_abi.h` | 契约本体：导出声明、结构体、错误码、版本宏 |
 | `_port\abi_check.py` | 静态自检：符号/签名宽度比对 + 结构体布局镜像比对 |
 
-## 8 文档维护
+## 7 文档维护
 
-- **本文的数字来自 `_port\abi_check.py` 的实际输出**。改了导出数量、结构体字段或版本号，先跑一遍脚本，再同步开头的表格与 §2.6 的步骤。
+- **本文的数字来自 `_port\abi_check.py` 的实际输出**。改了导出数量、结构体字段或版本号，先跑一遍脚本，再同步开头的表格与 §1.6 的步骤。
 - **判定标准是"代码里能读到的"**。凡是头文件注释没写、Kotlin 侧也没实现的，写"代码中未明确"，不要补合理推测。
 - **不要在这里复制源码**。要引代码就引签名与一行关键逻辑，实现细节以源码注释为准 —— 两处都写必然会漂移，而漂移的注释比没有注释更贵。
-- **历史事故只留结论**。本文提到"曾经"的地方，保留的是"什么形状会坏、为什么"，不复述当时的排查过程。
-- **新增坑位就加进 §6**，并尽量给出"触发条件 + 失败形式"，因为这一节的价值在于让人一眼认出自己正踩的是哪一条。
+- **只写当下**。不写设计史与方案对比；必须遵守的写法写成祈使句，已经发现的缺陷单独列成警告清单。
+- **新增坑位就加进 §5**，并尽量给出"触发条件 + 失败形式"，因为这一节的价值在于让人一眼认出自己正踩的是哪一条。

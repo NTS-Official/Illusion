@@ -27,8 +27,8 @@
 ### 1.2 Java 异常：为什么是「崩溃」而不是「降级」
 
 原版 `Minecraft` 的后端选择循环对每个候选后端只 `catch (BackendCreationException)` 然后继续试下一个。
-旧行为下 D3D12 的任何失败都会被这一层吞掉，静默变成一次 OpenGL 启动：用户看到 GL 画面、设置里仍写着
-「Direct3D 12」，除日志外没有任何提示。现行策略（见 `D3D12Fatal` 的类注释）是：
+D3D12 的失败一旦落进这一层，就会静默变成一次 OpenGL 启动：用户看到 GL 画面、设置里仍写着「Direct3D 12」，
+除日志外没有任何提示。因此本后端的失败策略（见 `D3D12Fatal` 的类注释）是：
 
 1. `resetPreferredGraphicsApi(reason)` 把 `options.txt` 的 `preferredGraphicsBackend` 还原成原版默认值
    `"default"` 并立刻保存——与原版自己处理「上次启动不干净」的方式一致。
@@ -159,7 +159,7 @@ watchdog 杀掉（watchdog 只看 `Render thread` 在不在），只能由用户
 `lwjgl-tinyfd` 的 natives DLL 里。而复位说明天然带引号（`reset "d3d12" -> "default"`），
 于是用户看到的就是那句占位符。
 
-现行实现直接用 FFM 调 `user32!MessageBoxW`：
+因此实现直接用 FFM 调 `user32!MessageBoxW`：
 
 - `Linker.nativeLinker().downcallHandle(..., FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS, JAVA_INT))`，
   文本与标题都是 `UTF-16LE` + NUL（`wideString`），因此中文、引号、换行全部原样显示。
@@ -169,7 +169,7 @@ watchdog 杀掉（watchdog 只看 `Render thread` 在不在），只能由用户
 - 失败（非 Windows、符号找不到、调用抛异常）就**回退**到 `MessageBox.error(fallbackMessage)`，
   并且兜底文本先过 `sanitizeForTinyfd`：单双引号都换成反引号（与 NeoForge `FatalErrorReporting` 的做法一致）。
 
-`MessageBoxW` 是模态的、自己跑消息循环，不需要窗口或消息泵——这正是它能用在「窗口还没建 / 已经没了」时机的原因。
+`MessageBoxW` 是模态的、自己跑消息循环，不需要窗口或消息泵，因此能用在「窗口还没建 / 已经没了」的时机。
 
 ### 3.2 为什么正文中英双语
 
@@ -201,7 +201,7 @@ watchdog 杀掉（watchdog 只看 `Render thread` 在不在），只能由用户
 - 生效点：`D3D12Fatal.showPopup` 首行判断 `D3D12Settings.noCrashPopup`，为真时记一条
   `fatal dialog suppressed ([debug] noCrashPopup = true); see the crash report instead`（WARN）后直接返回，
   报告与 `ReportedException` 照旧。
-- 旧逃生口（已弃用，不作为唯一入口）：系统属性 `-Ddxrmc.noPopup=true`；Gradle 侧的 `-Pdxrmc.noPopup`
+- 已弃用的逃生口（不作为唯一入口）：系统属性 `-Ddxrmc.noPopup=true`；Gradle 侧的 `-Pdxrmc.noPopup`
   转发成它。`D3D12Settings` 里这两条是「或」的关系。
 - 与自动化自检配套：`[debug] failDevice` / `selfTest*` 故意让后端失败时，如果不关弹窗，无人值守的
   CI / 回归就会停在一个等点击的模态框上。
@@ -210,7 +210,7 @@ watchdog 杀掉（watchdog 只看 `Render thread` 在不在），只能由用户
 
 ### 4.1 唯一出口：`misc/IllusionLogger.kt`
 
-JVM 侧只有这一个门面，不再直接 `println` / `System.err.println`：
+JVM 侧只有这一个门面，所有地方都不得直接 `println` / `System.err.println`：
 
 | 成员 | 语义 | 门控 |
 | --- | --- | --- |
@@ -286,7 +286,7 @@ int formatLogPrefix(char* out, size_t outSize, const char* level, const char* lo
 `[logging] nativeLogFile`（默认空串 = 只走 stderr）→ `IllusionLogger` → `MCDR_ABI.D3D12SetLogFile(path)`
 → native `setLogFile`。native 侧 `mirrorLogToFile` 的规则：
 
-- 路径优先级：配置路径 `gConfiguredLogPath` > 旧环境变量 `DX12_NATIVE_LOG_FILE`（已弃用，仅在配置为空时生效）
+- 路径优先级：配置路径 `gConfiguredLogPath` > 已弃用的环境变量 `DX12_NATIVE_LOG_FILE`（仅在配置为空时生效）
   > 都没有就不写文件。
 - 以 `"a"` 追加打开，每行 `fprintf` 后立刻 `fflush`——进程被强杀也不丢。
 - `setLogFile("")` 关闭镜像并释放句柄；换路径同样先关旧句柄，下一次写日志时按新路径重开。
@@ -313,7 +313,7 @@ int formatLogPrefix(char* out, size_t outSize, const char* level, const char* lo
 
 ### 4.6 现存的不一致（复核时优先看）
 
-代码里还有几处与上面的规范不完全对齐，写在这里是为了让后来者不要把它们当范本：
+代码里还有几处与上面的规范不完全对齐，列在这里是为了不要把它们当范本：
 
 1. `D3D12GpuBuffer.reportDeviceLostOnce` 用裸 `System.err.println`，且**没有前缀、没有级别**。它是有意绕开
    logger 的（设备已死时要保证这一行落盘），但代价是绕开了所有级别配置与镜像文件。
@@ -347,7 +347,7 @@ int formatLogPrefix(char* out, size_t outSize, const char* level, const char* lo
 | `pixTimingCapture` | `false` | 启用 F9（`选项 → 控制 → DXRMC`）的 PIX **timing** 抓帧 | 按下才抓，帧数在按下瞬间读配置，**不用重启**；ETW 会话要求当前用户能创建（PIX 文档建议加进 `Performance Log Users` 组，不需要提权） |
 | `pixCaptureFrames` | `600`（60..20000） | 一次按键抓多少帧 | 60 fps 下 600 帧约 10 秒，开内存事件后文件可达数百 MB |
 | `debugLayer` | `false` | 带 D3D12 调试层建设备 | 逐调用校验，帧率代价大；**Agility SDK 的 D3D12Core 生效时会被忽略**（inbox 校验层对不上）；`gameRestart()` |
-| `profiling` | `false` | 逐帧/逐批次计时（旧的 `DX12_PROF=1`）：记录、PSO 绑定、pass 提交的 CPU 毫秒 | 每批几次计时读取；`gameRestart()` 类的一次性读取 |
+| `profiling` | `false` | 逐帧/逐批次计时（对应已弃用的 `DX12_PROF=1` 环境变量）：记录、PSO 绑定、pass 提交的 CPU 毫秒 | 每批几次计时读取；`gameRestart()` 类的一次性读取 |
 | `dumpHlsl` | `false` | 把每次翻译出的 HLSL 落盘到游戏目录下 `dxrmc/hlsl/` | 最多 60 对；stage 行为异常时是唯一的现场 |
 | `skipGlSwap` | `false` | 让残留的 GL surface `present()` 变空操作 | 只在 `[renderer] glContext = true` 时才有意义 |
 | `asyncRenderThread` | `true` | 独立渲染线程（acquire/present/fence 等待离主线程） | 关掉是**诊断手段**：怀疑渲染线程与录制线程抢同一个堆时用来隔离；`gameRestart()` |
@@ -371,7 +371,7 @@ int formatLogPrefix(char* out, size_t outSize, const char* level, const char* lo
 - `-Pdxrmc.selfTest=fg-on@20,fg-off@400` → 系统属性 `dxrmc.selfTest`，由
   `dxrmc/framegen/FrameGenerationSelfTest.install()` 在 tick 上按时间点开关帧生成；没设属性时只做一次
   `System.getProperty` 就返回，不注册任何监听器。
-- `-Pdxrmc.noPopup` → 系统属性 `dxrmc.noPopup`，等价于 `[debug] noCrashPopup = true` 的旧逃生口。
+- `-Pdxrmc.noPopup` → 系统属性 `dxrmc.noPopup`，等价于 `[debug] noCrashPopup = true` 的已弃用逃生口。
 
 ### 5.4 设备状态取证（无开关）
 

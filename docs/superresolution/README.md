@@ -3,11 +3,11 @@
 超分（super resolution / upscaling）在本工程里只指一件事：**世界层用比窗口更少的像素着色，
 再由一个后端把结果升采样（upscale）到窗口尺寸**；那张窗口尺寸的图随后与 GUI 合成、最终呈现。
 
-这份文档讲三个问题：这套抽象为什么长成这样、每帧的数据怎么流动、以及**改动时不能破坏的约束**。
+这份文档讲三个问题：这套抽象的结构、每帧的数据怎么流动、以及**改动时不能破坏的约束**。
 DLSS 的专项细节（NGX 初始化、preset、输出纹理契约）见 [`dlss.md`](dlss.md)。
 
 > 建议阅读顺序：第 1～2 节建立概念，第 3 节看一帧的时序，第 4～6 节按你关心的后端或掩码继续，
-> 第 7～9 节是动手前的交互关系与已知坑。
+> 第 7～8 节是动手前的交互关系与硬约束。
 
 ---
 
@@ -84,8 +84,7 @@ DeepLearningSuperSampling   打包 SR_DISPATCH      releaseIfCreated()
 | 历史/复位 | JVM 维护 `resetReason`（首帧、换世界、尺寸、比例、窗口） | `createKey` + `percent` 组合成 `frameKey`，变了就 `reset` |
 | 失败表现 | 跳过本帧，世界层继续走线性 blit | 跳过本帧并记一条「did not run this frame: 原因」 |
 
-门面刻意不做「顺手统一」：DLSS 那条链路上的每个约定都是实机试出来的，
-把它的载荷翻译成 `SR_DISPATCH` 或反过来，收益为零而回归面极大。
+门面刻意不做「顺手统一」：把 DLSS 那条链路的载荷翻译成 `SR_DISPATCH` 或反过来，收益为零而破坏面极大。
 
 ---
 
@@ -220,16 +219,16 @@ DLSS 的选择器只有前 4 档，DLAA 由抗锯齿选项驱动（见 4.6）。
 
 ### 4.6 与抗锯齿、DLAA 的关系
 
-- 抗锯齿取值：`OFF = 0`、`SMAA = 1`、`TAA = 2`、`DLAA = 3`（`dxrMcAaMode`）。DLSS 不再占用第 4 档；
-  旧 DLL 的兼容桥仍会把 `4` 当作「DLSS 开」推给 native。
+- 抗锯齿取值：`OFF = 0`、`SMAA = 1`、`TAA = 2`、`DLAA = 3`（`dxrMcAaMode`）。DLSS 不占第 4 档（取值域
+  里没有 `4`）；旧 DLL 的兼容桥仍会把 `4` 当作「DLSS 开」推给 native。
 - **DLSS 与抗锯齿互斥**：DLSS 自带时间性 AA，先跑我们的 AA 只会把输入糊掉。DLSS 开启期间，
   抗锯齿选项被锁在 OFF 并置灰（`D3D12AntiAliasing.setDlssLock`），退出时恢复用户原值。
 - **DLAA 是「DLSS 在原生分辨率」**：由抗锯齿选项选中 DLAA 触发，此时独立的 DLSS 开关置灰；
   `isEnabled()` 把 DLAA 也算作开启。DLAA 要求 render == target，所以渲染比例被钉到 100%。
 - **DLSS 与 FSR/XeSS 互斥**：切到 FSR/XeSS 时门面会让 DLSS `standDown()`——关闭开关、释放渲染比例
   模式、解锁抗锯齿。这个动作必须排到**帧边界**（`Minecraft.schedule`），因为它会改渲染比例。
-  同时，门面在每一帧发现「DLSS 还开着」时会补一次让位，防止 `options.txt` 里两个开关同时为真
-  （升级用户最常见的组合）导致两家争同一张颜色纹理。
+  同时，门面在每一帧发现「DLSS 还开着」时会补一次让位，防止 `options.txt` 里两个开关同时为真、
+  导致两家争同一张颜色纹理。
 
 ---
 
@@ -243,7 +242,7 @@ DLSS 的选择器只有前 4 档，DLAA 由抗锯齿选项驱动（见 4.6）。
 | --- | --- |
 | `renderWidth` / `renderHeight` | 主目标颜色附件的真实尺寸 |
 | `displayWidth` / `displayHeight` | 呈现目标尺寸（窗口） |
-| `jitterOffsetX` / `jitterOffsetY` | `(Jx, -Jy)`：唯一的 jitter 源是 Halton(2,3)，y 取反是 DLSS 侧实机 A/B 定下的约定；FSR/XeSS 沿用同一份值（待真机复验） |
+| `jitterOffsetX` / `jitterOffsetY` | `(Jx, -Jy)`：唯一的 jitter 源是 Halton(2,3)，y 取反是 DLSS 侧的统一约定；FSR/XeSS 沿用同一份值（待真机复验） |
 | `motionVectorScaleX` / `Y` | `1.0`（MV 已是像素空间，见 5.2） |
 | `preExposure` | `1.0`（没有曝光纹理） |
 | `frameTimeDeltaMs` | 帧间隔，钳在 1.0..200.0 ms，首帧 16.7 ms |
@@ -377,7 +376,7 @@ absorbance → transmittance = clamp(exp(-absorbance), 0.0001, 1)
 
 - 两套键各自记住「用户上次调的值」；关掉 DLSS 时看到的是非 DLSS 那一把尺。
 - DLSS 模式放宽到 25..100 / 步进 1，是因为这一行在 DLSS 打开时**被档位绑定、只读**，
-  只承担「显示当前输入比例」的作用；旧集合 50..90 / 步进 10 让 4 个档位有一半取不到。
+  只承担「显示当前输入比例」的作用；取值域必须覆盖档位表里的每一个百分比，否则档位绑定的值落不到滑条上。
 - DLAA 锁存在 `dlaaLock` 里，优先级高于模式夹取：锁定期间任何路径（滑条、`setDlssMode`、
   `load`、`store`）拿到的值都是 100，否则 DLAA 会因为「渲染 90%、目标 100%」被 native 拒绝。
 
@@ -439,28 +438,18 @@ FG 打开 hudless 时，最终呈现源变成「超分输出的世界层」，UI
     `GPU_SAMPLES = 120` 帧才读一次。
 15. **不要手动改纹理状态**：native 在 evaluate 返回 1 后自己保证「颜色/深度/MV 停在
     `PIXEL_SHADER_RESOURCE`、输出停在 `RENDER_TARGET`」。
+16. **档位百分比不能手改**：`ultra_performance` 的 34% 是下界，33% 会让 NGX 每帧报
+    `Dynamic scaling error … outside of Min … Max` 并交回空纹理（世界全黑、GUI 正常）。
+17. **jitter 只在有消费者时注入**（DLSS 未停滞，或 TAA/DLAA 在跑），上报值固定 `(+Jx, -Jy)`；
+    没有消费者还注入，用户看到的就是整幅 ±0.5 像素的晃动。
+18. **速度通道的闩锁只能用 `D3D12Velocity.forceEnable()` 清**，并按 1 秒限速重试；只把
+    `enabled` 置回 true 撤不回失败步骤。
+19. **`DLSSOutput.release()` 先清 native 的覆盖（`D3D12SetDlssOutput(0)`）、再 `close()`**；
+    `onDlssToggle` 也必须先认领后端（`DLSS`）、再推开关，否则那一行是灰的、超分开不起来。
 
 ---
 
-## 9. 常见坑
-
-| 症状 | 根因 | 正确做法 |
-| --- | --- | --- |
-| 世界全黑、GUI 正常 | NGX 的「Dynamic scaling error」：渲染尺寸低于档位允许的下界（典型是 33% 而不是 34%） | 用档位表里的百分比；不要手改到任意的 33% |
-| 世界全黑、GUI 正常（另一形态） | `pColorOutput` 用的是没有 `USAGE_STORAGE` 的界面目标，UAV 屏障在 `Close()` 时 `E_INVALIDARG` | 用 `DLSSOutput.textureForFrame` 拿 STORAGE 纹理，成功后再 blit |
-| 只有开超分、只在移动时拖影 | 速度 pass 拿到的深度是 0（挂点排在清深度之后），MV 全 0，后端把移动画面当静止累积 | 速度 pass 与深度快照挂在 main pass RETURN |
-| 静止也有轻微整幅抖动 | jitter 被注入但没有消费者（后端停滞/未起来），或上报给后端的 jitter 符号错了 | `isStalled()` 时压掉 jitter；上报值是 `(+Jx, -Jy)` |
-| 超分一帧都没跑，日志说没有 MV 纹理 | 速度通道自我关闭后是「一票否决」：`enabled = false` 且失败的构建步骤记成不再重试，只把 `enabled` 置回 true 撤不回来 | 用 `D3D12Velocity.forceEnable()` 清闩锁，并按 1 秒限速重试 |
-| 选了 FSR 但 DLSS 还在跑，比例被抢 | `options.txt` 里 `dxrMcDlss=true` 与 `dxrMcSrBackend=fsr` 同时存在 | 门面在 `load` 与每帧发现后让 DLSS `standDown()`（帧边界） |
-| DLSS 开关打开，但视频设置里那一行是灰的、超分开不起来 | 后端仍是 `NONE`，而 `isEnabled()` 走的是后端分支 | `onDlssToggle` 必须先认领后端（`DLSS`），再推开关 |
-| 拖动渲染比例后进程直接消失、没有 Java 异常 | 输出纹理 `close()` 早于清 native 的覆盖，native 手里是悬垂指针；下一次 evaluate 写穿它 | `DLSSOutput.release()` 先 `D3D12SetDlssOutput(0)`，再 `close()` |
-| 改比例 / 切 DLAA 后 `Depth texture is closed` 崩溃 | 在渲染线程里就地 `GameRenderer.resize`（`Minecraft.execute` 在渲染线程会内联执行），关掉了本帧还在用的深度纹理 | 一律 `Minecraft.schedule`，落在帧边界 |
-| 掩码统计恒为 0 | OIT 透射率附件没拿到（`captureTransmittance` 传了空），或后端根本不吃掩码（DLSS） | 先看 `SR mask first frame` 那行的 `non-zero%`，再看能力面 `takesMasks` |
-| 半透明物体后面有拖影，关掉超分就没了 | 掩码没开、或掩码重建算错（把系数当透射率直接读） | 打开掩码；确认 HLSL 走的是小波重建而不是直读 |
-
----
-
-## 10. 关键常量速查
+## 9. 关键常量速查
 
 | 常量 | 值 | 位置 / 含义 |
 | --- | --- | --- |
@@ -483,7 +472,7 @@ FG 打开 hudless 时，最终呈现源变成「超分输出的世界层」，UI
 
 ---
 
-## 11. 文件导航
+## 10. 文件导航
 
 路径以 `Illusion\src\main\kotlin\dev\nts\expdxr\` 为起点（mixin 在 `Illusion\src\main\java\` 下，已单独标注）。
 
@@ -510,7 +499,7 @@ native 侧对应实现（本仓库 `MCDR\`，不在本文范围内）：`MCDR\sr
 
 ---
 
-## 12. 文档维护
+## 11. 文档维护
 
 - 本文对应源码目录：`Illusion\src\main\kotlin\dev\nts\expdxr\dxrmc\sr\`（含 `dlss\` 子目录），
   以及上表列出的渲染比例 / jitter / 速度 / GUI 拆分 / mixin 挂点。

@@ -5,7 +5,7 @@ DLSS 是本工程里唯一「不是我们自己实现」的超分后端：它由
 另一个档位——渲染比例 100%、只做时间性抗锯齿、不做放大。
 
 单独成篇的原因：这条路径有自己的一套状态机、自己的失败语义、以及大量「看起来可以统一、
-一改就回归」的约定。总览见 [`README.md`](README.md)。
+改了就坏」的约定。总览见 [`README.md`](README.md)。
 
 ---
 
@@ -86,14 +86,14 @@ Performance 时打出一条「DLSS 无法运行」的假警告。
 
 | UI 顺序 | 名字 | 送给 native 的值 | 语义 |
 | --- | --- | --- | --- |
-| 0 | `default` | 0 | 不设 hint，由 NGX 按档位自选（历史默认） |
+| 0 | `default` | 0 | 不设 hint，由 NGX 按档位自选（默认） |
 | 1 | `j` | 10 | 与 K 同代；官方说明「鬼影更少、闪烁更多」 |
 | 2 | `k` | 11 | 官方说明「A/B 里画质最好」；DLAA / Balanced / Quality 的默认 |
 | 3 | `l` | 12 | Ultra Performance 的官方默认 |
 | 4 | `m` | 13 | Performance 的官方默认 |
 
-- 数值是 NGX 的 `NVSDK_NGX_DLSS_Hint_Render_Preset`，**不是**本工程自定义编号；CNN 时代的
-  `5`（E）/ `6`（F）已弃用，`7`～`9`（G/H/I）保留，所以没有放进选择器。
+- 数值是 NGX 的 `NVSDK_NGX_DLSS_Hint_Render_Preset`，**不是**本工程自定义编号；
+  `5`（E）/ `6`（F）已不再支持，`7`～`9`（G/H/I）保留，所以没有放进选择器。
 - preset 是 `CreateFeature` 的输入：改一次就重建 feature（世界层重建一帧，和改档位同量级），
   tooltip 里写明了这一点。
 - 保存时若不写这一行，按钮每次启动都会回到 `default`，而且日志里没有任何痕迹——这是最容易漏的一处持久化。
@@ -158,7 +158,7 @@ Performance 时打出一条「DLSS 无法运行」的假警告。
 `pushDlssConstants` 每帧给 native 的 Streamline `sl::Constants` 填：`viewProjection`、`prevViewProjection`、
 `projection`、jitter、`mvecScale`、相机基（right/up/fwd）与位置、near/far、FOV、aspect 以及几个布尔。
 
-三个容易踩错的点：
+三个硬约束：
 
 - **视图矩阵必须含相机平移**：`worldSpaceView = V_rot * T(-camPos)`，平移列 `[12..14]`
   等于 `-(row_r(V_rot) · camPos)`。世界层是相机相对空间，原始视图只有旋转；少了平移，静止正常、一走就糊。
@@ -206,7 +206,7 @@ reverse-Z 的投影在构造时 near/far 是互换的。
 
 ### 6.4 旧 DLL 兼容桥
 
-`mcdr_dx12SetDlssEnabled` 之前，DLSS 的闸门是「抗锯齿模式 == 4」。旧 DLL 只认这个，所以保留了一段桥：
+旧 DLL 上没有 `mcdr_dx12SetDlssEnabled` 这个导出，只认「抗锯齿模式 == 4」，所以保留了一段桥：
 
 - `LEGACY_DLSS_AA_MODE = 4`，直接调 `D3D12SetAntiAliasing`（绕过 `D3D12AntiAliasing.validateValue`，
   因为公开取值域里已经没有 4）；
@@ -300,32 +300,19 @@ recreate）后进程直接消失、没有任何 Java 异常**，与「设备移�
 「本帧不交接」，native 继续用它自己的私有 UAV，行为等同于没有这个特性。所有失败路径都有
 一次性 note，且只在状态变化时打一行。
 
----
+交接与释放的硬约束（违反的后果是黑屏、悬空指针或静默失效）：
 
-## 9. 历史坑（为什么某几处必须那样写）
-
-| 现象 | 当时的原因 | 现在的写法 |
-| --- | --- | --- |
-| 整片米白、GUI 正常 | Evaluate 挂在清深度那一刻，主目标颜色还是清屏色（`190,179,167`，min == max），DLSS 拿到常数输入 | Evaluate 挪到 SMAA 之后、`GuiRenderer.render` 之前 |
-| 只在移动时拖影，只在 DLSS 下出现 | 速度 pass 挂在 `GameRenderer.render` 清深度之前，实测深度 `mean=0.0`，MV 整张 0 | 速度 pass 与深度快照挂在帧图 main pass 的 RETURN |
-| 深度快照一次都没发生 | 曾挂在 `addAlwaysOnTopPass` 的 pass 体，而它只在 `hasAnyAlwaysOnTop()` 为真时才进帧图 | 改挂无条件执行的 main pass |
-| 关闭 DLSS 后仍然抖 | jitter 被注入但没有消费者（DLSS 停滞），整幅 ±0.5 像素晃动 | `hasJitterConsumer()` 检查消费者；停滞状态不再注入 |
-| 「DLSS 抖」，翻 jitter 符号也没用 | 同一次 options 回调里闸门先开又关，native 从未进入 evaluate，而 jitter 照旧注入；另有一次实验把「两轴同时取负」当成单轴反号，错误量的模长不变所以测不出差别 | 每帧无条件对齐闸门；上报值固定 `(+Jx, -Jy)` |
-| 一帧内出现两组 jitter | 26.3 一帧可能多次上传关卡投影，每次上传都推进 jitter，几何与 DLSS 拿到不同相位 | 按帧戳去重，一帧只推进一次 |
-| DLAA 静止残余抖动 | 上报的 jitter 少翻了 y 轴，等于每帧多做一次竖直去抖 | `reportedJitter` 只翻 y |
-| DLAA 一开，比例被夹到 90% | 锁定只加在滑条取值上，`apply → store → setPercent` 仍按 DLSS 模式夹到 90%，native 拒绝 DLAA | 锁定在 `setPercent` 里生效，优先级最高 |
-| 改渲染比例 / 进出 DLAA 时 `Depth texture is closed` | 在渲染线程里就地 `GameRenderer.resize`（`Minecraft.execute` 在渲染线程会内联执行），关掉本帧还在用的深度纹理 | 一律 `Minecraft.schedule`，落在帧边界 |
-| 拖动比例后无声退出 | 输出纹理先 close、后撤销 native 引用 | 先 `SetDlssOutput(0)`，再 `close()` |
-| 选了 Performance 却报「DLSS 不能跑」 | 把 `SetDlssQuality` 的返回值 `0`（= Performance 已生效）当失败 | 按第 2 节的返回值表判读 |
-| 每次关 DLSS 都报「本机无法运行 DLSS」 | 把 `SetDlssEnabled` 的返回 `0`（= 现在是关的）当失败 | 同上；能力只由 `QueryDlss` 回答 |
-| 一开 DLSS 就黑屏且 NGX 日志刷 `Dynamic scaling error` | 33% 低于 3.0x 的下界 | `ultra_performance` 用 34%，并在比例低于标称值时抬回 |
-| 超分一帧都没跑，日志说没有输出目标 | `targetForFrame()` 在「主目标逻辑尺寸 == 窗口」时早退返回 null，而 DLSS 永远需要一张独立的窗口尺寸输出 | 单独提供 `ensureTargetForDlss()`，不复用那个早退 |
-| 关掉超分后自然抖动依旧 | 数据面是「我们打开的」却没还回去 | 只还原自己强制打开的字段，并 INFO 一行 |
-| 黑帧熔断把每个会话都判成黑 | 读回时把 barrier 的 StateBefore 写死成 `COMMON`，而输出纹理停在 `COPY_SOURCE` / `UNORDERED_ACCESS`，读到的是未定义内容（实测恒 0） | 整条读回熔断**已停用**；判断「有没有在干活」改用 evaluate 返回值与日志 |
+- **先撤销 native 的引用、再 `close()`**：`D3D12SetDlssOutput(0L)` → `existing.close()`；顺序反了 native
+  手里就是悬空指针，拖动渲染比例后进程无异常消失。
+- **jitter 一帧只推进一次**（按帧戳去重），上报值固定 `(+Jx, -Jy)`；一帧内推进多次会让几何与 DLSS
+  拿到不同相位。
+- **改渲染比例、进出 DLAA 一律走 `Minecraft.schedule`**，不要在渲染线程里就地 `GameRenderer.resize`
+  （`Minecraft.execute` 在渲染线程会内联执行），否则会关掉本帧还在用的深度纹理。
+- **判断 DLSS 有没有在干活看 evaluate 返回值与日志**，不要读回输出纹理做黑帧熔断——读回内容不可信。
 
 ---
 
-## 10. 文件导航
+## 9. 文件导航
 
 路径以 `Illusion\src\main\kotlin\dev\nts\expdxr\` 为起点（mixin 在 `Illusion\src\main\java\` 下，已标注）。
 
@@ -349,7 +336,7 @@ native 侧（本仓库 `MCDR\`）：`MCDR\src\advanced\d3d12_dlss.cpp`、
 
 ---
 
-## 11. 文档维护
+## 10. 文档维护
 
 - 本文对应源码：`Illusion\src\main\kotlin\dev\nts\expdxr\dxrmc\sr\dlss\`（`DLSS.kt`、`DLSSOutput.kt`），
   以及上表列出的 jitter / 速度 / 渲染比例 / GUI 拆分 / mixin 挂点。

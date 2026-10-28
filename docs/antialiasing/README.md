@@ -160,8 +160,8 @@ CycleButton 重新读值，界面会停留在旧文字上。
 | 视频选项 | 渲染缩放 | `100%` | 偏离 100% 才需要 GUI 拆分；同时决定 DLAA 是否成立 |
 | 帧生成设置 | 后端 | 关 | hudless 只对 FSR-FG 生效，见第 6 节 |
 
-旧的 `-D` 属性（`dxrmc.temporal`、`dxrmc.temporal.jitter`、`dxrmc.sharpen`）仍能被读到，
-但只在配置停在默认值时才生效，属于**已弃用的逃生口**，不是功能入口。
+已弃用的 `-D` 属性（`dxrmc.temporal`、`dxrmc.temporal.jitter`、`dxrmc.sharpen`）仍能被读到，
+但只在配置停在默认值时才生效，属于**兼容逃生口**，不是功能入口。
 
 ## 3. 时间性重投影
 
@@ -197,8 +197,8 @@ private fun hasJitterConsumer() = D3D12TAA.isSelected() ||
 ```
 
 只有 `isActive()` 且 `hasJitterConsumer()` 且 `jitterEnabled` 都为真才真正改写矩阵，否则
-`jitterX/Y = 0`。第二道闸门是修出来的：SMAA / OFF 下没有任何消费者会补偿这份偏移，
-再注入就是整幅画面逐帧轻微抖动（用户实测过）。`[debug] temporalChain = true` 不能绕过它。
+`jitterX/Y = 0`。第二道闸门的必要性：SMAA / OFF 下没有任何消费者补偿这份偏移，
+再注入就是整幅画面逐帧轻微抖动。`[debug] temporalChain = true` 不能绕过它。
 
 ### 3.2 历史缓冲的 ping-pong
 
@@ -214,13 +214,12 @@ MCDR_ABI.dx12ApplyTaaToTexture(ctx, scene, motion, jitterX, jitterY, prevJitterX
     blend = 0.0625f, reset = reset, sharpenAmount = D3D12PostSharpen.taaAmount)
 ```
 
-为什么历史要归 native：早期 JVM 侧自己持有历史纹理，在传送、改窗口尺寸这类时刻会在上一帧的
-命令列表还在飞的时候销毁资源，实测能把 D3D12 设备打掉（设备移除，整局结束）。现在 native 在
-录制新一帧时按当前尺寸确保历史存在（`taaEnsureHistory`），JVM 只负责告诉它「这份历史还能不能
-用」。
+之所以必须归 native：JVM 自己持有历史纹理时，在传送、改窗口尺寸这类时刻会在上一帧的命令列表
+还在飞的时候销毁资源，能把 D3D12 设备打掉（设备移除，整局结束）。native 在录制新一帧时按当前
+尺寸确保历史存在（`taaEnsureHistory`），JVM 只负责告诉它「这份历史还能不能用」。
 
-混合权重 `BLEND = 0.0625f`，即 `lerp(history, current, 1/16)`，时间常数 16 帧。代码注释里
-比较过另外两档：1/8 收敛快但更糊，1/32 更平滑但运动边缘残留拖影。1/16 是实测定下来的。
+混合权重 `BLEND = 0.0625f`，即 `lerp(history, current, 1/16)`，时间常数 16 帧。另两档的
+取舍：1/8 收敛快但更糊，1/32 更平滑但运动边缘残留拖影。
 
 `reset = true` 时 native 只把当前帧写进历史、不与上一帧混合。JVM 侧把
 `D3D12Temporal.historyGeneration` 与自己记的上一份比较，不等就置 `reset`。代数在
@@ -354,7 +353,7 @@ prevWorld = world + (prv - cur) + CameraDelta
    同一资源同时是 RTV 与 SRV。独立 RT 让「写速度」和「读深度/颜色」互不干扰。
 3. **vanilla 拿不到逐物体运动**。实体变换提交时烘进顶点（`ModelPart.render`），
    `DynamicTransforms.ModelViewMat` 只是相机 model-view，连续几何还会合并提交，绘制级没有稳定
-   物体身份；早期 MRT 直接写运动矢量的方案拿不到位移，已删掉，改成现在的「深度反投影 + 物体表」。
+   物体身份；MRT 直写运动矢量拿不到位移，逐物体位移只能由「深度反投影 + 物体表」推出。
 4. **尺寸与生命周期独立**。速度缓冲跟着渲染分辨率走，GUI 目标跟着窗口走；两者的重建时机、
    失败处理、是否被帧生成借用都不一样。混在一张目标里，任何一边 resize 都要同时照顾另一边。
 
@@ -366,8 +365,8 @@ prevWorld = world + (prv - cur) + CameraDelta
 GUI 不参与抗锯齿，也不参与速度缓冲，原因分三层：
 
 1. **时序**：GUI 在抗锯齿之后才画，TAA / SMAA 都在「世界画完、GUI 未画」那一刻执行，界面天然
-   不被处理。早期把 SMAA 放在最终 blit 之前时，世界与 GUI 已合成完毕，界面文字被一起柔化 ——
-   这就是「GUI 发虚」的来源；TAA 同理，resolve 之后再画 GUI，界面保持像素锐利。
+   不被处理。SMAA / TAA 若挪到最终 blit 之前，世界与 GUI 已合成完毕，界面文字会被一起柔化
+   （「GUI 发虚」）；resolve 之后再画 GUI，界面保持像素锐利。
 2. **语义**：速度缓冲是「世界坐标 → 屏幕」的重投影，需要深度。GUI 没有世界坐标、没有可信深度，
    对它算运动矢量没有意义；把 GUI 混进去只会让文字随镜头轻微拉伸。
 3. **尺寸**：GUI 的 scissor 按**窗口像素**算，世界层按渲染分辨率。两者在渲染缩放不等于 100%
@@ -538,27 +537,15 @@ TAA 的锐化不是单独一趟：`sharpenAmount` 作为参数进 native 的 res
 | hudless 未就绪日志节流 | `10` 秒 | `NOT_READY_LOG_INTERVAL_NANOS` |
 | SMAA 趟数 | `3` | native 三阶段，最后一趟经 scratch 拷回 |
 
-## 9. 容易踩的点
+改投影注入或新增时域消费者时，先把下面四条守住，破一条就是画面错位或错误拖影：
 
-1. **jitter 的符号约定**：注入投影用 `-clipJitter`，上报给 DLSS 与速度缓冲补偿用 `(+Jx, -Jy)`；
-   三处不一致就会「翻符号照样抖」。
-2. **本帧投影必须抖动后再乘 view**，否则反投影逐像素差半个像素，边缘发虚。
-3. **`prevClip.w <= 1e-4` 不能省**：负 w 会把位置镜像到画面另一处，症状是沙地泛白、树叶发紫。
-4. **不要用 JOML 求逆**：列主序与 `set/get` 的行主序约定混用会把结果转置，表现为整幅反向拖影。
-5. **`"3d hud"` 的投影不能抖**：它不参与时间性重投影，抖了只会让物品栏与手持物错位。
-6. **同一帧只能推进一次**：投影每帧可能上传多次，`beginFrame()` 用 present 计数而非时间窗判定；
-   时间窗在低帧率下会误判，导致 jitter 多滚一次、整幅画面逐帧跳动。
-7. **TAA 历史不要自己拿**：JVM 持有会在传送、改尺寸时踩掉还在飞的命令列表（实测能打掉设备）。
-8. **锐化不能写回历史**，也不能 `src == dst`；DLAA / DLSS 必须走 scratch 两趟。
-9. **SMAA 挂点的意义**是「只处理世界层」，挪回最终 blit 之前就会把 GUI 一起柔化。
-10. **`D3D12Temporal.reset()` 只有 DLSS 退出会话一个调用点**；传送 / 换世界 / 切分辨率没有显式
-    接线，最需要复核。
-11. **Kotlin 的 `OBJECT_BOX_MARGIN = 0.35f` 是死常量**，实际生效的是 HLSL 的 `0.25`，边界处
-    可能漏判。
-12. **`hasJitterConsumer()` 用的是 `isSelected()` 而非 `isActive()`**：TAA 自我关闭后 jitter 仍
-    注入但没人消费，画面会轻微抖。
+- jitter 只写投影矩阵 `[8]` / `[9]`（列主序 `m[0][2]` / `m[1][2]`）：注入取 `-clipJitter`、
+  上报与补偿取 `(+Jx, -Jy)`；`"3d hud"` 一律不抖。
+- 本帧投影用抖动后的那份再乘 view，反投影保留 `prevClip.w <= 1e-4` 守卫；`beginFrame()` 每帧
+  只推进一次，按 present 计数而非时间窗判定。
+- 锐化不回写 TAA 历史、不 `src == dst`，DLAA / DLSS 一律走 scratch 两趟。
 
-## 10. 文件导航
+## 9. 文件导航
 
 路径相对于 `Illusion\src\main\kotlin\dev\nts\expdxr\`。
 
@@ -586,7 +573,7 @@ Java 侧挂点（不在上面的相对路径下）：
 | `Illusion\src\main\java\dev\nts\expdxr\mixin\render\GameRendererSmaaWorldMixin.java` | 抗锯齿 / SR / GUI 拆分的唯一顺序挂点，以及每帧的 DLSS 记账 |
 | `Illusion\src\main\java\dev\nts\expdxr\mixin\render\LevelRendererMainPassDepthMixin.java` | 主 pass RETURN：采集时域数据并录速度 pass（深度被清之前） |
 
-## 11. 文档维护
+## 10. 文档维护
 
 - **事实来源是代码**：每条数值都对应一个 Kotlin 常量或配置默认值，改代码时顺手改第 8 节常量表
   与第 2.7 节配置表。
@@ -596,5 +583,5 @@ Java 侧挂点（不在上面的相对路径下）：
   数据面滚不滚，后者决定 jitter 注不注），只改一处会出现「抖但没人补偿」或「有消费者但没数据」。
 - **新增 GUI 目标用途时**，同步 `pushUiTextureToFrameGen` 的重推时机与 `presentSourceTexture`
   的优先级，这两处是耦合最紧的地方。
-- 本文不写问题编号、会话记录或仓库外的排障文档；指代历史决策用描述性说法。超分与帧生成的细节
-  见同级 `superresolution`、`framegen` 目录。
+- **只写当下**：不写设计史、方案对比与问题编号，也不引用仓库外的排障文档；必须遵守的写法写成
+  祈使句，已发现的缺陷单独列成警告清单。超分与帧生成的细节见同级 `superresolution`、`framegen` 目录。

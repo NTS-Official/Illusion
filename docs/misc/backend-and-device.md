@@ -362,8 +362,8 @@ close 掉，之后 `D3D12MapBuffer` 返回 null → `IllegalStateException`。�
   实测会让进程私有字节以 900 MB/min 量级线性上涨。
 - 堆缓冲由 GC 管理，代价是要在 `writeToBuffer` 时做一次拷贝 —— 这次拷贝本来就要做（进 staging 块）。
 
-默认字节序与原行为一致（BIG_ENDIAN）；**只有 `D3D12GpuBuffer.map` 返回的视图被强制改成
-LITTLE_ENDIAN**，见 §4.6。
+默认字节序为 BIG_ENDIAN；**只有 `D3D12GpuBuffer.map` 返回的视图被强制改成 LITTLE_ENDIAN**，
+见 §4.6。
 
 ### 4.4 上传路径
 
@@ -374,7 +374,7 @@ writeToBuffer(dst, data)
     transientMemory.uploadStaging(data, 1, USAGE_COPY_SRC)   // 写进 staging 块，返回块内切片
     D3D12CopyBuffer(ctx, staging, 0, dst, 0, total)
 
-copyBufferToTexture(...)   // 必须先 ensureListOpen()，块分配改造后不再顺带录制命令
+copyBufferToTexture(...)   // 必须先 ensureListOpen()：分配 staging 不录制命令
     skipBytes = (sourceX + sourceY * sourceWidth) * dst.format.blockSize()
 ```
 
@@ -383,9 +383,8 @@ copyBufferToTexture(...)   // 必须先 ensureListOpen()，块分配改造后不
 在这里抓，是因为这两类 UBO 位于 `UNIFORM | COPY_DST` 堆、**不可 map**，而这是唯一能拿到「本帧新鲜
 字节」的时刻。
 
-**不做 NaN 检测/替换**：早期版本会把非有限浮点批量替换成 0，结果把顶点数据也覆写了（顶点缓冲同样
-走 `writeToBuffer`），表现为整屏黑或几何塌陷。现在与官方 `VulkanCommandEncoder` 行为对齐，只记录
-不修改。
+**不做 NaN 检测/替换**：`writeToBuffer` 只记录非有限浮点、不修改，与官方 `VulkanCommandEncoder`
+行为对齐。顶点数据同样走 `writeToBuffer`，批量替换会连顶点一起覆写，表现为整屏黑或几何塌陷。
 
 ### 4.5 读回路径
 
@@ -394,7 +393,7 @@ copyBufferToTexture(...)   // 必须先 ensureListOpen()，块分配改造后不
   `submit()`，随后同步跑回调。
 - `D3D12GpuQueryPool` 的读取是**阻塞**的：native 把时间戳 resolve 到 readback 缓冲、提交、等围栏，
   然后返回。它不适合放在热路径上按帧调用。
-- 截图路径的历史教训见 §7 第 6 条。
+- 截图路径的读回回调必须挂在设备级全局队列，见 §5。
 
 ### 4.6 mapped 内存的约束
 
@@ -438,6 +437,14 @@ copyBufferToTexture(...)   // 必须先 ensureListOpen()，块分配改造后不
 | 22 | 描述符堆重绑 | native 在 begin 与每次 push 时都 `SetDescriptorHeaps({drawHeap})` | 只绑一次会在帧中途丢堆 | `d3d12_device.cpp` |
 | 23 | 异步 allocator ring | 4 帧轮转（`kFramesInFlight = 4`），与 `fenceValue % 4` 同步 | 复用未完成的 allocator → 命令列表语义损坏 | `d3d12_async_executor.cppm:40` |
 | 24 | `pushConstants` | 无根常量路径，直接忽略并只 warn 一次 | 依赖它的 shader 拿到脏常量 | `D3D12RenderPassBackend.pushConstants` |
+
+以下五条写法与上表数值同等严格：
+
+- **拷贝完成回调必须挂到设备级全局队列 `GLOBAL_CALLBACKS`**：任何一次 `submit()` 都会抽干它；挂在单个编码器上的调用若不提交，回调永不执行，READBACK 缓冲每次泄漏。
+- **先 `setPipeline()` 再 `pushDescriptors()`**：绑定表是「条目序号 → register 序号」，由管线布局决定；没有管线时只能记日志跳过（SKIP）。
+- **meshlet 先换 PSO 再 `pushDescriptors()`**：`SetGraphicsRootSignature` 会清掉已绑的根描述符表，顺序反了地形整片消失且不报错。
+- **`copyBufferToTexture()` 先 `ensureListOpen()`**：分配 staging 不录制命令，帧外（资源重载）调用不自查就会命中 `dx12CopyBufferToTexture: no open command list`。
+- **管线 `close()` 先取走 handle 再归零**：`DestroyPipeline` 不幂等，重复销毁同一指针是原生 double free（退出码 `0xC0000374`）。
 
 ---
 
@@ -496,81 +503,7 @@ copyBufferToTexture(...)   // 必须先 ensureListOpen()，块分配改造后不
 
 ---
 
-## 7. 常见坑与历史决策
-
-1. **为什么没有 GL/Vulkan 回退。**
-   早期版本让自检失败后抛 `BackendCreationException`，结果被原版「尝试下一个候选后端」的逻辑吞掉，
-   游戏以 GL 启动，玩家以为 D3D12 生效但画面完全不对。现在抛 `ReportedException` 并重置
-   `preferredGraphicsBackend`：要么 D3D12 能跑，要么带着一份崩溃报告退出。
-
-2. **为什么编码器是共享单例。**
-   曾经每帧 `new` 一个编码器：绘制记在 A 上，帧末提交的是新建的空 B，于是空命令列表被提交，
-   back buffer 里是上一帧的垃圾 —— 表现为窗口狂闪。官方 `VulkanDevice` 也是构造期建一个、之后复用。
-
-3. **为什么 `pipelineCacheFlipY` 的键是值语义。**
-   误用 `IdentityHashMap` 时，每次传入的 `FlipYKey` 都是新对象 → 永远 miss → flipY 管线每帧重编译，
-   直接表现为低帧率。主缓存用 `IdentityHashMap` 是**对的**（`RenderPipeline` 是同一实例），
-   两者键语义相反，改的时候不要顺手统一。
-
-4. **为什么 `getOrCompilePipeline` 命中后还要 `isValid()`。**
-   资源重载（改语言、开高对比度）会让前端 close 掉所有 `CompiledRenderPipeline`，但缓存条目还在。
-   早期用 `computeIfAbsent` 原样返回，于是 `setPipeline` 抛「Pipeline … is not valid」，第二次切高
-   对比度必崩。
-
-5. **`close()` 里先取走 handle 再归零。**
-   26.3 前端会逐条 `close()` 管线，而 native 的 `DestroyPipeline` 不是幂等的 —— 重复销毁同一个指针
-   会触发原生 double free，退出码 `0xC0000374`（堆损坏）。先置零再销毁，第二次调用就是空操作。
-
-6. **截图为什么曾经每秒泄漏 1.6 MB。**
-   两个独立的 bug 叠加：① 围栏回调队列原来是**每个编码器一份**，而原版截图只
-   `createCommandEncoder().copyTextureToBuffer(..., callback, 0)` 从不提交这个编码器，回调永不执行；
-   ② 抽干队列的写法是 `val run = pendingCallbacks` 之后紧跟 `clear()` —— 别名之后 `run` 就是那个
-   空列表，循环体永远不跑。现在回调是**设备级全局队列**，任何一次提交都会抽干它。
-
-7. **为什么 staging 块映射失败后就丢弃。**
-   一块「已经证明不可映射」的 UPLOAD 堆缓冲再放回池里，只会把失败传播到后续几十帧。现在的做法是
-   WARN 一次（带块句柄、容量、偏移、长度、异常原文），`close()` 它 —— 由于 `close()` 走延迟删除，
-   立即释放不会打断在飞的命令列表 —— 然后换新块重试。早期这里是直接让整帧崩在
-   `dx12MapBuffer returned null`。
-
-8. **为什么 `uploadStaging` 不再给每次上传建目标缓冲。**
-   旧实现每次上传建两个缓冲（UPLOAD staging + DEFAULT 目标），而 `writeToBuffer` 每帧几十次，
-   于是每帧上百次 `ID3D12CreateBuffer`，采样占渲染线程约 16%。现在目标是「块内切片 + 一次
-   `CopyBuffer`」，缓冲创建次数降到常数级。
-
-9. **为什么 `copyBufferToTexture` 里要显式 `ensureListOpen()`。**
-   块分配改造后，分配 staging 不再顺带录制命令。帧外（资源重载）调用时若不自查，就会命中
-   `dx12CopyBufferToTexture: no open command list`，表现为白屏 + 五颜六色闪烁。
-
-10. **为什么 `pushDescriptors` 之前必须先设管线。**
-    绑定表是「条目序号 → register 序号」，由管线布局决定；没有管线时只能记日志跳过（SKIP），
-    否则写进去的 register 编号毫无意义。
-
-11. **为什么 meshlet 要先换 PSO 再 `pushDescriptors`。**
-    native 的 `SetGraphicsRootSignature` 会清掉已绑的根描述符表。顺序反了，mesh shader 拿到的是
-    空表或上一管线的表，读到的全是垃圾 —— 表现为地形整片消失，而不是报错。
-
-12. **为什么放弃 DXGI 独占全屏。**
-    `SetFullscreenState` 会卡死 `Present`、并锁住 Alt+Tab。独占交给 SDL 切显示模式，交换链始终是
-    窗口化的 flip 模型。
-
-13. **为什么 `acquireNextTexture` 是延迟的。**
-    同步获取意味着在帧首等「上一帧的 Present 完成」（实测 0.13–1.7 ms）。现在只登记意图，真正
-    `D3D12AcquireSurface` 推到 blit 之前，把这段等待与本帧的录制重叠。
-
-14. **为什么自检里「先用普通 API 清一次色」的步骤不能省。**
-    自检代码的注释记录了实测：同一条命令列表里，如果**第一个动作**就是 render pass 清屏，之后回读
-    到的仍是 (0,0,0,0)；先调一次普通的 `D3D12ClearColorTexture` 再开 pass，就能读到正确颜色。
-    这是实测得到的顺序依赖，机制在代码中未明确 —— 保留这段顺序，别「优化」掉。
-
-15. **为什么 `#include` 不从 `ShaderSource.getInclude` 拿。**
-    那份缓存返回的指针只在原版 shaderc 的 include 回调期间有效，之后读到的是已释放内存，尾部会混进
-    替换字符（`U+FFFD`），shaderc 报 `unexpected token`。现在直接从 `ResourceManager` 读
-    `shaders/include/<path>`，读不到才回退，并丢弃含替换字符的结果。
-
----
-
-## 8. 文件导航
+## 7. 文件导航
 
 路径相对 `Illusion\src\main\kotlin\dev\nts\expdxr\`。
 
@@ -608,7 +541,7 @@ copyBufferToTexture(...)   // 必须先 ensureListOpen()，块分配改造后不
 
 ---
 
-## 9. 文档维护
+## 8. 文档维护
 
 改这一层时，请同步更新本文的三类内容：
 

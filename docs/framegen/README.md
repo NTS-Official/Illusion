@@ -1,6 +1,6 @@
 # 帧生成与 Reflex 设计说明
 
-本文讲 Illusion（mod id `dxr_mc`）里「帧生成（frame generation）」与「Reflex」两个子系统的设计：它们要解决什么、一帧的时间线上各自插在哪里、JVM 与 native 怎么分工、哪些约束不能动，以及为什么历史上没有选另一种做法。内容全部来自源码、注释与实现；代码里没有明确写出来的标「代码中未明确」。
+本文讲 Illusion（mod id `dxr_mc`）里「帧生成（frame generation）」与「Reflex」两个子系统的设计：它们要解决什么、一帧的时间线上各自插在哪里、JVM 与 native 怎么分工、哪些约束不能动。内容全部来自源码、注释与实现；代码里没有明确写出来的标「代码中未明确」。
 
 阅读顺序建议：先读 §1（概念）与 §2.2（一帧的时序），再按需查 §5（常量）、§6（不变量）。
 
@@ -77,7 +77,7 @@ hudless 由 JVM 决定，因为只有 JVM 知道「这一帧有没有 3D 世界�
 每个后端的 `available / runtimeLoaded / deviceSupported / chainCompatible / needsReflex / needsUiResource / needsHudless / transitionsInputs / maxGeneratedFrames / chainOwner / latencyProvider / note` 都由 native 的 `fillCaps` 填，JVM 只读不猜。
 
 - JVM 侧 1 秒 TTL 缓存整套能力表，`push()` 时再作废一次；不每帧查的原因是跨 ABI 调用。
-- 不能用「有 D3D12 适配器」推断「帧生成可用」：运行库加载、设备特性、链能不能包，是三件独立的事。旧实现按适配器推断，于是在什么都没加载的机器上也显示「可用」。
+- 不能用「有 D3D12 适配器」推断「帧生成可用」：运行库加载、设备特性、链能不能包，是三件独立的事。
 - `chainCompatible` 必须按**将要建的链**判断。否则从 Streamline 代理链启动的用户点开 FSR-FG 后永远建不出 provider——它一直认为自己「链不兼容」，表现就是点了开关什么都不发生。
 
 ## 2. 架构与数据流
@@ -103,8 +103,6 @@ native（MCDR，C++23 模块）
   src/advanced/d3d12_xessfg.cpp    ← XeSS-FG provider
   src/core/d3d12_surface.cpp       ← Present 两侧的钩子时序
 ```
-
-为什么门面放在 `dxrmc/framegen` 而不是 `dxrmc/sr/dlss` 里：早期这一层挂在 DLSS 包下，包名、选项名、能力判断全是「DLSS」味的，等于把「帧生成」写死成了「DLSS-G」。改成后端无关门面之后，加 FSR-FG / XeSS-FG 只是多一个 `CANDIDATES` 项和一个后端分支。
 
 为什么 native 的注册表在 `d3d12_framegen.cpp` 而不是各家 provider 里：注册表要在 Present 两侧挂钩、要看交换链状态、要解包 `Dx12Object`，这三件事只有 device 模块能做。provider 只管自己的 SDK。
 
@@ -218,7 +216,7 @@ native 注册表里维护三套计数，**不能混用**：
 
 帧生成要求 Reflex 必须开。`NvidiaReflex.push(mode)` 里做了兜底：帧生成开启时，`mode == 0` 会被提升为 `1`；`ensurePrerequisites` 里还会显式调用 `forceOn()` 并记住「是帧生成逼的」（`forcedByFrameGeneration`），关掉帧生成时再 `releaseFrameGenerationForce()` 还原用户原来的选择。
 
-为什么不能只写 `OPTION.set(1)`：`Options.load()` 期间 `OptionInstance.set` 不触发回调，写了选项但 native 没收到，于是「界面显示开、实际没开」。所以强制路径必须同时写选项与 native 两处。同样的理由，`save()` 写的是 `currentMode` 而不是 `OPTION.get()`：原版在某些时机会把选项重置回默认值（实测把 `boost` 写成了 `off`），信选项就会把用户的选择弄丢。
+为什么不能只写 `OPTION.set(1)`：`Options.load()` 期间 `OptionInstance.set` 不触发回调，写了选项但 native 没收到，于是「界面显示开、实际没开」。所以强制路径必须同时写选项与 native 两处。同样的理由，`save()` 写的是 `currentMode` 而不是 `OPTION.get()`：原版在某些时机会把选项重置回默认值，信选项就会把用户的选择弄丢。
 
 ### 3.3 限帧
 
@@ -330,36 +328,18 @@ Reflex 每帧两个点：`before_present`（帧起点 + 限帧 sleep）与 `afte
 14. **「帧生成开着」与 Reflex `off` 不能并存**：帧生成开启时，Reflex 下拉只提供 `on` / `boost`，`off` 被隐藏；同理，帧生成开启时不允许切换超分后端。
 15. **进程内只有一个 Reflex 上下文、一个 XeLL 上下文**（XeLL 是进程级单例）。
 16. **`FrameGenerationConstants` 只在真正要出帧的渲染帧推**，且与 SR 后端无关。
+17. **插帧常量必须含相机平移**：`view` 用 `V_rot * T(-camPos)` 重新拼一次（世界层是相机相对空间，`clipToPrevClip` 缺平移就会「静止正常、一走动就拖影」）；推送时统一转成 XeSS-FG 的行主序，漏转的表现是画面整块偏移或完全不插帧。
+18. **hudless 下 GUI 目标每帧清成 `(0,0,0,0)`**，否则 UI 纹理带着上一帧内容叠上去就是残影；GUI 目标必须待在窗口尺寸上（`renderScale < 100%` 时塞回主目标会让 scissor 越界、进世界第一帧就崩）。
+19. **能力表必须说清「为什么不能开」**：`note` 区分 `runtimeLoaded` / `deviceSupported` / `chainCompatible` 三种原因，`backend == 0` 时直接走「关」的文案，F3 的 `output` 与倍率按当前生效的 provider 取数、关闭时复位成 1.0（≥ 1.25 才显示）。
+20. **动态倍率一次只走一帧**，倍率变化交给 SDK 的 `eDynamic`（每帧重算会在 2× / 3× 之间来回跳）；能力表缓存在 `push()` 时作废，`save()` 写当前生效的 `currentMode`。
 
-## 7. 常见坑与历史决策
-
-| 坑 / 决策 | 根因 | 现在的做法 |
-| --- | --- | --- |
-| 能力表按秒缓存引出的假故障 | 界面打开时缓存可能是「还没加载运行库」时的快照 | `push()` 时主动作废一次；状态行说「为什么不能开」而不是「有 / 没有」 |
-| 状态行对着 `backend = 0` 查能力表 | 得到「native 库没有帧生成入口」，于是默认状态就显示失败 | 后端为 0 时直接走「关」的文案 |
-| 「不支持」混成一句话 | `runtimeLoaded = 0`（发行版没带运行库）/ `deviceSupported = 0`（机器不行）/ `chainCompatible = 0`（链包不了）三者的用户行动完全不同 | `note` 必须说清是哪一种 |
-| `chainCompatible` 按当前链判断 | 从 Streamline 代理链启动时 FSR-FG 永远认为自己不兼容，于是永远不建 provider，用户点开关什么都不发生 | 按「将要建的链」判断 |
-| 动态倍率每帧重算 | 在 2× / 3× 之间反复跳，观感是帧时间忽快忽慢 | 一次只走一帧，倍率变化交给 SDK 的 `eDynamic` |
-| F3 的 `output` 写死 DLSS-G 的计数 | 另两家永远显示 1×，看起来像「帧生成没生效」 | 按当前生效的 provider 取数，取不到才回退 |
-| F3 倍率显示关闭后不复位 | 呈现计数还停在旧值，关掉后仍显示 `120/240 (FG 2.0x)` | 关闭时平滑值复位成 1.0，且只有 ≥ 1.25 才显示倍率 |
-| 相机平移没有烘进 `view` 矩阵 | 「静止正常、一走动就拖影」：世界层是相机相对空间，`clipToPrevClip` 必须含平移 | 推常量时用 `V_rot * T(-camPos)` 重新拼一次 |
-| 插帧常量只跟着 DLSS 路径推 | 超分换成 FSR / XeSS 后那段代码不跑，XeSS-FG 拿不到矩阵，「链包成功了但每帧只出 1 张」 | 常量抽成独立对象，与超分后端无关 |
-| 矩阵序 | XeSS-FG 契约是行主序、DLSS 侧是列主序；转错的表现是画面整块偏移或完全不插帧 | 推送时统一转一次 |
-| hudless 下 GUI 目标忘了清成全透明 | UI 纹理带上上一帧内容，叠在世界层上就是残影 | 每帧清成 `(0,0,0,0)` |
-| GUI 目标不是窗口尺寸 | `renderScale < 100%` 时 vanilla 的 scissor 越界直接抛异常（进世界第一帧就崩） | GUI 永远待在自己的窗口尺寸目标里；「塞回主目标」的兜底对缩放场景不安全 |
-| hudless 就绪判据放宽 | 只看「链已包」时实测整个界面消失（UI 注册在一条没人 present 的链上） | 要求「链已包 + UI 纹理已交 + 至少一次插帧 dispatch」三条同时成立 |
-| `setUiComposition` 每帧都推 | 跨 ABI 调用进了热路径，且重复推会让后端不断重建合成资源 | 只在值变化时推 |
-| 对「帧生成」做自动后端选择 | 会把用户带进一个他自己没选过的路径，出问题也无法解释 | 去掉，改为用户决定（§2.7） |
-| 把开关做成环境变量或 marker 文件 | 游戏里不可见、改完要重启、文档里也找不到 | 所有面向玩家的开关都在 `config/dxr_mc-client.toml` 与视频设置里 |
-| `save` 用 `OPTION.get()` 而不是当前模式 | 原版会把选项重置成默认值，实测把 `boost` 写成了 `off` | 保存当前真正生效的模式 |
-
-## 8. 配置与界面入口
+## 7. 配置与界面入口
 
 - `config/dxr_mc-client.toml`：`[dlss] reflexFrameLimitUs`（0..100000 微秒）。其余状态走 `options.txt`（与超分、视频选项同一套持久化），因为它们要在「视频设置」界面里即时生效，而配置项需要重开界面才刷新。
 - 视频设置界面的结构：NVIDIA 段为 DLSS 状态行 → DLSS 开关 → 预设 → 画质 → **Reflex** → **DLSS 帧生成** →（DLSS-G 生效时）倍率滑条 → 帧生成状态行 → 运行时状态行 → 回滚警告；AMD 段为 FSR 状态行 → FSR 开关 → 画质 → **FSR 帧生成** →（生效时）「固定 2×」说明；Intel 段为 XeSS 状态行 → XeSS 开关 → 画质 → **XeSS 帧生成** →（生效时）倍率滑条。
 - 三个帧生成开关互锁：点开一家，另外两家自动关，全灭就是不启用。倍率滑条只跟着亮着的那家出现。状态行只说「为什么不能开 / 已就绪」；运行时那行摊开 native 的 `picked / rebuilds`，省得用户为了看它去翻日志。
 
-## 9. 文件导航
+## 8. 文件导航
 
 相对 `Illusion\src\main\kotlin\dev\nts\expdxr\`：
 
@@ -390,7 +370,7 @@ native 侧（相对 `MCDR\src\`）：
 
 接口定义：`MCDR\include\mcdr_abi.h` 的帧生成段与 Reflex 段。
 
-## 10. 文档维护
+## 9. 文档维护
 
 - 本文的事实来源是源码注释与实现。改代码时请同步本文，尤其是能力表字段语义（§1.6）、时序的三个顺序点（§2.2）、不变量（§6）、常量表（§5）。
 - 新增一个帧生成后端时，至少要动这些地方：`CANDIDATES` 与 `BACKEND_NAMES`、native 的 `makeXxxProvider` + `fillXxxCaps`、`MCDR_ABI` 的枚举、视频设置里的一段开关与状态行，以及本文的 §1.2 表格与 §5.3 枚举。

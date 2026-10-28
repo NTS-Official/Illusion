@@ -5,22 +5,16 @@
 
 ## 1. 为什么不能把原版 GLSL 直接喂给 D3D12
 
-原版（26.3 起）交付 GLSL 源码 + 自带 `ShaderManager` 编译缓存；D3D12 不认 GLSL，必须拿到 DXIL。三条硬约束：
+D3D12 不认 GLSL，只接受 DXIL；DXIL 只能由 DXC 产出（`D3DCompile` 到 shader model 5.1 为止，产出的是 DXBC）。
+因此本站必须自己持有一条链：**GLSL →（shaderc / glslang）→ SPIR-V（含反射）→ 生成 HLSL（SPIRV-Cross）→ DXC → DXIL**。
+直接把手上的 GLSL 喂给 D3D12 不可能——没有 DXIL 就没有 `CreateGraphicsPipelineState` 的输入。
 
-1. **DXIL 只能由 DXC 产出。** `D3DCompile` 到 shader model 5.1 为止、产出 DXBC。`MCDR_ABI` 注释写死了：
-   "D3DCompile stops at shader model 5.1, so an amplification/mesh shader can only come from DXC."
-2. **SM 5.1 / DXBC 兜底已删除。** 图形管线硬要求 SM 6.9，无降级路径（`graphicsShaderModelProfile()`
-   只有 `"6_9"` 与 `""` 两种返回）。SM 6.9 要求两件事同时成立：本机 `dxcompiler.dll` 能编 6_9
-   （`caps.dxcSupportsSm69()`，注释给的下限是「DXC 1.9.2502 或更新」）；设备
-   `CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL)` 报 `>= 6.9`——只有 Agility SDK 1.619 的
-   `D3D12Core.dll` 报 6.9，inbox core 最高 6.8。
-3. **mesh / VRS 本身就要求 SM 6.x。** mesh 用 `ms_6_9` / `as_6_9` 编译，`meshPipelineSupported()` 另要求
-   feature level ≥ 12_2、mesh tier ≠ 0、`ID3D12Device2` 可用；VRS 不查 profile 而查 `D3D12_OPTIONS6`
-   （`ShadingRateTier` / `ShadingRateImageTileSize` / `AdditionalShadingRatesSupported`）。
+经 SPIR-V 而非文本直译，是因为只有它能提供稳定的「反射 + 重编号」：原版 GLSL 的 binding 由 shaderc / SPIRV-Cross
+分配、无法预知，必须拿到 SPIR-V 后按自己的规则改写（见 6.1 与 10.1）。
 
-因此本站自己持有一条链：**GLSL → SPIR-V → HLSL → DXIL**。之所以经 SPIR-V 而非文本翻译，是因为只有它能
-提供稳定的「反射 + 重编号」：原版 GLSL 的 binding 由 shaderc / SPIRV-Cross 分配，我们无法预知，
-必须拿到 SPIR-V 后按自己的规则改写。
+图形管线硬要求 SM 6.9、没有 SM 5.1 / DXBC 兜底（`graphicsShaderModelProfile()` 只返回 `"6_9"` 或 `""`）：
+本机 `dxcompiler.dll` 要能编 6_9（`caps.dxcSupportsSm69()`，下限 DXC 1.9.2502），设备 `CheckFeatureSupport`
+要报 `>= 6.9`——只有 Agility SDK 1.619 的 `D3D12Core.dll` 报 6.9，inbox core 最高 6.8。
 
 ## 2. 全链路总览
 
@@ -73,7 +67,7 @@
 `Minecraft.loadCriticalShaders()` 预热的 3 条（GUI / GUI_TEXTURED / TRACY_BLIT）内，于是它成为第一条走空源的管线。
 
 原版 GL 后端的 `GlRenderPass.setPipeline` 不校验 `isValid()`，这个竞态在 GL 上只是「画不出来」；D3D12 沿用
-`VulkanRenderPass.setPipeline` 的严格语义（抛异常），于是变成致命错误。修法是 `D3D12FallbackShaderSource`：
+`VulkanRenderPass.setPipeline` 的严格语义（抛异常），于是变成致命错误。因此有 `D3D12FallbackShaderSource`：
 `GameRendererPreloadUiShaderMixin` 在 `preloadUiShader` HEAD 捕获当时的 `ResourceProvider`
 （= `vanillaPackResources.asProvider()`，已能解析 `minecraft:core/position_tex_color`），首次捕获打一行 info；
 之后主源返回 `null` 就回退到它，首次资源重载后主源恢复、回退不再触发。两条源都拿不到时打
@@ -90,7 +84,7 @@ include 同样走两条源。`readShaderInclude` 优先**直接按原版路径**
 
 ### 5.1 define 注入
 
-26.3 删掉了 blaze3d 的 `GlslPreprocessor`，`injectShaderDefines(source, defines)` 自己拼 `#define`：插在
+26.3 没有 blaze3d 的 `GlslPreprocessor`，`injectShaderDefines(source, defines)` 自己拼 `#define`：插在
 `#version` 行**之后**（`#version` 必须是第一条指令，写在前面 shaderc 直接 parse error）、无 `#version` 时前缀、
 保证结果以换行结尾。全局 define 是 `.define("gl_VertexID", "gl_VertexIndex")`、
 `.define("gl_InstanceID", "gl_InstanceIndex")` 与 `.define("RENDERPEARL_DEPTH_IS_ZERO_TO_ONE")`。
@@ -164,7 +158,7 @@ provided: …`。类型校验也在此：`SAMPLED_IMAGE` 只接受 dim 1 或 3�
 片元采样器**，同名去重（先到先得）。UBO 的名字必须在 `flattenUniforms(pipeline.bindGroupLayouts)` 里，否则
 `"Unable to find shader defined uniform (<name>)"`。采样器则**看 `UniformType`、不看名字是否存在**：26.3 会为
 每个纹理 uniform 都报一条 `COMBINED_IMAGE_SAMPLER` 描述，「名字出现」不再等于「texel buffer」；只有
-`type() == UniformType.TEXEL_BUFFER` 才记 UTB，其余记采样纹理（旧判据会把 `Sampler0` 当 UTB、再报
+`type() == UniformType.TEXEL_BUFFER` 才记 UTB，其余记采样纹理（按名字判会把 `Sampler0` 当 UTB、再报
 `"must have type of SpvDimBuffer"`）。
 
 产物 `D3D12CompiledShader(vertexHlsl, fragmentHlsl, entries, vertexShaderInputs, semanticNames)` 五个字段都参与
@@ -202,8 +196,8 @@ HLSL 文本做正则/字符串插入，**不改 SPIR-V**。
 `no gl_Position assignment found in <…> vertex HLSL, Y-flip NOT injected`。
 
 `flipY` 的来源：GUI 离屏 pass（有深度附件、usage 为 GuiItemAtlas / PictureInPicture）的正交投影带
-`invertY=true`，整条 pass 的几何都要翻。判据必须「整个 pass 一起翻」，**不能**按管线名白名单：早期白名单列了
-`entity_cutout` / `item_cutout`、漏掉 `entity_translucent`，结果物品栏里的玩家模型「头在底下、腿在上面」。
+`invertY=true`，整条 pass 的几何都要翻。判据必须「整个 pass 一起翻」，**不能**按管线名白名单：漏掉一条管线
+就会翻与不翻混在一起，物品栏里的玩家模型会「头在底下、腿在上面」。
 `animate_sprite` 则是无条件翻：它的用途（`TextureAtlas.uploadInitialContents` / `SpriteContents.drawToAtlas`）
 没有深度附件、被上面那套判据排除，必须单独识别。
 
@@ -285,9 +279,9 @@ SRV 表固定放在根参数索引 `cbvCount`（所有 CBV 之后），故「SRV
 `BorderColor = OPAQUE_BLACK`、`MinLOD = 0.0f`、`MaxLOD = D3D12_FLOAT32_MAX`、`ShaderRegister = b.reg`
 （= 条目下标，与 SRV 同号）、`ShaderVisibility = ALL`。
 
-地址模式用 `WRAP` 而非 `CLAMP` 是有代价换来的：原版 `AbstractTexture` 默认采样器是 REPEAT/REPEAT，而天气粒子
+地址模式必须用 `WRAP` 而不能用 `CLAMP`：原版 `AbstractTexture` 默认采样器是 REPEAT/REPEAT，而天气粒子
 （雨/雪）的 `v = y*0.25 + offset` 能到 16~40；`CLAMP` 会把整根雨柱采成边缘像素、渲染成贯穿屏幕的实心竖条。
-改 `WRAP` 后正常平铺，而对 UV 已在 [0,1] 内的纹理（图集、字体、lightmap）两者等价。
+`WRAP` 下正常平铺，而对 UV 已在 [0,1] 内的纹理（图集、字体、lightmap）两者等价。
 
 ### 10.4 sampler 的静态/动态之分
 
@@ -327,8 +321,8 @@ D3D12 要求 CBV 的 GPU 地址按 256 字节对齐（root descriptor 同一条�
 
 `getOrCompilePipeline` 命中时**先验活**：`isValid()` 定义为 `handle != 0`，而原版在资源重载（例如切换
 「高对比度」资源包）时会把 `CompiledRenderPipeline` 全部 `close()`，缓存里握着同一实例、`close()` 后 `handle`
-已置 0。旧实现直接返回该对象，于是 `setPipeline` 抛 "Pipeline … is not valid" 且**一条 COMPILE FAILED 都不会打**
-（因为根本没编译）；现在失效就丢掉重编。`clearPipelineCache()` 先 `close()` 每条管线并清空两个管线缓存，再
+已置 0。若不验活直接返回该对象，`setPipeline` 就会抛 "Pipeline … is not valid" 且**一条 COMPILE FAILED 都不会打**
+（因为根本没编译）；所以失效就丢掉重编。`clearPipelineCache()` 先 `close()` 每条管线并清空两个管线缓存，再
 `close()` 每个着色器模块并清空 `shaderCache`；`close()` 幂等（先取走句柄再归零），因为原版
 `FrontendGpuDevice.close()` 也会逐条 close 同一批对象，不归零就是同一条 `Dx12Pipeline*` 被销毁两次（堆损坏）。
 

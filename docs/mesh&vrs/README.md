@@ -70,7 +70,7 @@
   - `packedMin` = `minXYZ | quadCount << 24`
   - `packedMax` = `maxXYZ | directionMask << 24`
   - 然后依次是 `sectionId`、`localVertexOffset`、`firstQuad`、3 个 0 填充。
-  - 注释里的理由：两条描述符正好占一条 64 B cache line；最初设想的 16 B 装不下。
+  - 用 32 B 而不是 16 B：两条描述符正好占一条 64 B cache line。
 - `isPure = Integer.bitCount(directionMask) == 1`：单方向 meshlet 占比是切分质量的主要指标
   （按朝向分桶后，理论上大部分应为纯方向）。
 - `build()` 在 `stride < 28` 或四边形数为 0 时返回 null，调用方必须把它当「切不出」处理。
@@ -86,10 +86,10 @@
   实例流（16 B / 段，`stepRate = 1`）。
 - 捕获结果按顶点切片偏移（`slice.offset`）索引；一批里存 `drawCount × 4` 个 int
   （indexCount / firstIndex / baseVertex / baseInstance）。
-- **每帧清空**。曾经用过「超过 64 条只留最新 offset」的启发式，会连别的图层的批一起删掉，
-  结果日志里出现 `no captured MDI list for offset 0/2920/4620`、地形整片不画。
+- **每帧清空**，不要用「超过 64 条只留最新 offset」这类剪枝：它会连别的图层的批一起删掉，
+  日志里就会出现 `no captured MDI list for offset 0/2920/4620`，地形整片不画。
 - 段的键用 `SectionPos.asLong(blockToSectionCoord(x/y/z))`，但写进段表的是**方块坐标**
-  （`chunkX/Y/Z` 直接参与距离计算）。用方块坐标当键时实测 369 段只命中 1 段。
+  （`chunkX/Y/Z` 直接参与距离计算）。用方块坐标当键会让几乎全部段查不到。
 - `buildTables()` 的契约：任一段缺 meshlet、或缺这一层，**整批返回 null**。
   没有 IMR 回退，部分派发只会画出缺块的画面，不如整批跳过并留证据。
 
@@ -140,8 +140,8 @@ MS 的顶点属性不是从 IA 阶段来的，得把 spvc（SPIRV-Cross）翻译
 - 视锥剔除：用段盒子的中心与半径
   - `radius = length((mx - mn) * 0.5)`
   - 中心换到相机相对坐标后过一次 `ModelViewMat`、再一次 `ProjMat`。
-  - `W = clip.w`：reversed-Z 下 `m23 = -1`，相机前方的 `w` 为正。
-    历史上这里写成 `-clip.w`，导致 64 格外整片被剔。
+  - `W = clip.w`：reversed-Z 下 `m23 = -1`，相机前方的 `w` 为正。写成 `-clip.w` 会把
+    64 格外整片剔掉。
   - 侧边界用 `radius * length(p0 ± p3)` 量级近似，近边界用 `radius * length(p3.xyz)`。
   - `slack = 64.0`：源码注释明确说 8 太小、会剔掉地平线远处的 meshlet，**不要再调小**。
     代价是远处的剔除收益会打折。
@@ -257,9 +257,9 @@ MS 的顶点属性不是从 IA 阶段来的，得把 spvc（SPIRV-Cross）翻译
 ### 3.1 选项只有 OFF / AUTO
 
 - 入口在 vanilla 视频设置的第四组「Illusion 设置」里，是一个循环按钮。
-- 档位只有两档：**OFF** 与 **AUTO**（早期的手动档位已经删除，只剩枚举名兼容）。
+- 档位只有两档：**OFF** 与 **AUTO**。
 - 持久化到 `options.txt` 的 `dxrMcShadingRate`，存的是枚举名。
-  读取时：精确匹配枚举名；名字以 `RATE_` 开头（旧的手动档位）当 AUTO；其余当 OFF。
+  读取时：精确匹配枚举名；名字以 `RATE_` 开头（旧存档里的手动档位）当 AUTO；其余当 OFF。
 - `isEnabled() = 档位 == AUTO && !nativeRefused`；
   `isAvailable() = D3D12AdapterInfo.current != null`（非 D3D12 后端时按钮置灰）。
 - `push()` 会把「AUTO 要求的最高速率」（2X2）推给 native 做能力预检：

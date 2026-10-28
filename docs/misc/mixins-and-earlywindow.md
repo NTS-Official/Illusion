@@ -49,12 +49,6 @@ mixin 处理的是接口拿到**之前**、以及接口给不了的东西：
 最后一条不是风格问题：Mixin 会对被注入代码引用的类做 `IllegalClassLoadError` 检查。`FpsLimitCompat` 之所以单独放在
 `compat` 包、`EarlyWindowSurface` 之所以放在 `misc\fmlelw_control`，就是为了绕开这个检查。
 
-### 1.4 边界案例：计时段为什么 Java 侧只有两行
-
-10 个 `*ProfMixin` 的 Java 侧只有 `D3D12RenderProf.begin(段)` 与 `end()` 两次静态调用，段定义与统计都在 Kotlin。
-mixin 的职责被压缩成「在最准的那一行报告开始/结束」，而不是「实现计时器」。这条界线值得照抄：
-**注入点附近只放「必须在此刻发生」的东西，其余全部挪进 Kotlin。**
-
 ## 2. 注册：三个文件决定一切
 
 ### 2.1 `neoforge.mods.toml`
@@ -171,11 +165,11 @@ D3D12 时**保留**，因为游戏每个后端尝试都会建一次窗口，我�
 | `render\SectionUploadCaptureMixin` | `SectionRenderDispatcher$RenderSection#addSectionBuffersToUberBuffer` | `@Inject` HEAD | 记下每段每层的 indexCount 与缓冲尺寸，供 meshlet 几何构建 |
 | `render\DynamicGpuDataCaptureMixin` | `DynamicGpuData#writeChunkSectionCommands`（HEAD/RETURN）、`#writeChunkSectionsInstanced`（HEAD） | `@Inject` ×3 | 抓 `drawIndexedIndirect` 的参数缓冲，mesh 路径按同一份参数重放 |
 
-深度采集点的选址值得单独说明，因为这是「看起来哪都能挂、其实只有一个点对」的典型：帧图 main pass 是唯一无条
-件进入帧图的 pass，深度那一刻有效、且在全部 `clearDepthTexture` 之前；试过挂在 `GameRenderer.render` 里，四点
-采样全为 `mean=0.0`（那时深度已被清过三次）；`always_on_top` pass 因为 `hasAnyAlwaysOnTop()` 为假从来没跑到过。
-`SectionUploadCaptureMixin` 用 `addSectionBuffersToUberBuffer` 而不是 `SectionCompiler.compile`：后者能成功应用，
-但回调一次也不触发。这条差异当时花了很久才定位，注释里保留了结论。
+深度唯一有效的采集点是 `LevelRenderer#lambda$addMainPass$0` 的 RETURN：帧图 main pass 是唯一无条件进入帧图的 pass，
+深度在那一刻有效、且在全部 `clearDepthTexture` 之前。**不要改挂 `GameRenderer.render`**（那时深度已清过三次，采样全为
+`mean=0.0`），也不要挂 `always_on_top` pass（`hasAnyAlwaysOnTop()` 为假时根本不跑）。
+`SectionUploadCaptureMixin` 必须挂 `addSectionBuffersToUberBuffer`，不要改挂 `SectionCompiler.compile`：后者能成功应用，
+但回调一次也不触发。
 
 ### 3.7 视频设置与选项（10）
 
@@ -284,20 +278,17 @@ loading window and the game window are two different windows」。所以目标�
 | `setMinecraftVersion` / `setNeoForgeVersion` / `crash` / `stopEventPolling()` | 只打日志；`stopEventPolling` 空实现（我们从没启动过事件轮询） | — |
 | `displayFatalErrorAndExit(...)` | 打 ERROR 后 `Runtime.getRuntime().halt(1)` | 加载阶段没有可用的崩溃界面 |
 
-### 5.3 三个实现细节（都是踩过的坑）
+### 5.3 三个实现细节（必须这样做）
 
-**软件 renderer，而不是默认 renderer。** `SDL_CreateRenderer(window, "software")` 失败时才退回默认 renderer（打一条 WARN）。
-软件 renderer 在任何显卡 / 任何驱动状态下都能画那张加载屏，这在「显卡后端正好还没起来」的阶段是刚需。
+**用软件 renderer，不用默认 renderer。** 调 `SDL_CreateRenderer(window, "software")`，返回 0 时才退回默认 renderer 并打
+一条 WARN —— 软件 renderer 在任何显卡 / 驱动状态下都能画出加载屏，而这一步正好发生在显卡后端还没起来的时候。
 
-**加载屏用 AWT 合成，整帧走 surface → texture 而不是流式纹理上传。** logo 是 `assets\logo_flat_dark.jpg`，
-字形表是原版 Mojangles 的 ASCII 页（`assets\dxrmc\mojangles_ascii.png`，16×16 格、每格 8×8），进度条填充 `0xC46BFF`、
-轨道 `0x2E3238`、背景纯黑、说明文字 `0xD8,0xDC,0xE2`。合成后的整帧经 `SDL_CreateSurfaceFrom`（`ARGB8888`）+
-`SDL_CreateTextureFromSurface` + `RenderTexture` 上屏。为什么不直接建流式纹理：软件 renderer 会**静默忽略**流式纹理上传 ——
-不报错、不显示；走 surface 转换等于把像素格式协商交回 SDL。
+**加载屏用 AWT 合成，整帧走 surface → texture，不要建流式纹理。** 素材：`assets\logo_flat_dark.jpg`、Mojangles ASCII 页
+（`assets\dxrmc\mojangles_ascii.png`，16×16 格、每格 8×8）；配色：进度条 `0xC46BFF`、轨道 `0x2E3238`、背景纯黑、文字 `0xD8,0xDC,0xE2`；
+整帧经 `SDL_CreateSurfaceFrom`（`ARGB8888`）+ `SDL_CreateTextureFromSurface` + `RenderTexture` 上屏 —— 软件 renderer **静默忽略**流式纹理上传。
 
-**绝不能在 `periodicTick()` 里 drain SDL 事件。** `SDL_PollEvent(NULL)` 只要还有待处理事件就一直返回 `true`，而 FML 是在
-加载线程上调用 `periodicTick()` 的 —— 清一次事件队列就是把加载线程卡死。这条写成代码里的 NOTE 注释，
-并且是这个组件唯一一条「看起来是遗漏、其实是故意」的地方。
+**不要在 `periodicTick()` 里 drain SDL 事件。** FML 在加载线程上调用 `periodicTick()`，而 `SDL_PollEvent(NULL)` 只要还有
+待处理事件就一直返回 `true` —— 清一次事件队列就卡死加载线程。代码里用 NOTE 注释标明这是故意的。
 
 ### 5.4 交接协议：两个系统属性
 

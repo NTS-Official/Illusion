@@ -315,6 +315,26 @@ mesh tier 时被忽略，没写是管线创建时读还是每帧读。
 `Setting(option)`（真正的一行控件，持有原版 `OptionInstance`）。`pages()` 每次打开都重算，因为
 条目依赖运行时状态；**不要在静态初始化时缓存页**，否则第一次打开的状态会被永久沿用。
 
+#### 6.3.1 嵌套子页
+
+一页里还要再分组时，给 `D3D12VideoSettingsPage` 传 `subPages`（此时 `entries` 不使用）：
+
+```kotlin
+D3D12VideoSettingsPage(
+    translatable("dxr_mc.video.tab.illusion"),
+    subPages = listOf(
+        D3D12VideoSettingsSubPage(translatable("dxr_mc.video.group.nvidia"), nvidiaRows),
+        D3D12VideoSettingsSubPage(translatable("dxr_mc.video.group.amd"), amdRows),
+        D3D12VideoSettingsSubPage(translatable("dxr_mc.video.group.intel"), intelRows),
+    ),
+)
+```
+
+- 子页标题横着排在内容区顶部；宽度 = 标题像素宽 + 两侧内边距（12 → 排不下压到 4 → 再排不下按内容区截断）。
+- 下面的行整体让出一行（`D3D12SubTabWidget.HEIGHT + GAP`），行仍然是同一套 `Heading` / `Note` / `Setting`。
+- 每个页签各自记住自己选中的子页，切走再切回不会跳回第一组。
+- 子页标题不参与滚动、不弹提示；行照旧滚动与裁剪。
+
 ### 6.4 控件种类
 
 | 控件 | 外观 | 行为 |
@@ -322,6 +342,7 @@ mesh tier 时被忽略，没写是管线创建时读还是每帧读。
 | `D3D12TitleWidget` / `D3D12HeadingWidget` | 顶部标题条 / ACCENT 紫分组标题 | 不交互 |
 | `D3D12NoteWidget` | 灰色小字，`warning` 时红色 | 不交互 |
 | `D3D12TabWidget` | 120×25，选中时左侧 1px 紫条 | 点击切页并播 UI 音 |
+| `D3D12SubTabWidget` | 18 高，宽度随标题文本，选中时下缘 1px 紫条 | 点击切子页并播 UI 音 |
 | `D3D12OptionWidget` | 开关 / 滑条 / 枚举 / 折叠行 | 见下 |
 | `D3D12ButtonWidget` | 深底白字，可淡入淡出 | 应用 / 撤销 / 完成 |
 
@@ -428,7 +449,7 @@ mesh tier 时被忽略，没写是管线创建时读还是每帧读。
 
 ---
 
-## 8. 细节与坑
+## 8. 细节与约束
 
 ### 8.1 滑条取整
 
@@ -443,8 +464,8 @@ mesh tier 时被忽略，没写是管线创建时读还是每帧读。
 
 ### 8.2 滑条点击分区
 
-滑条右半边按位置设值，左半边是「退一档」（`previous`）；早期实现两边都按比例设值，点一下标题
-就把取值拉到 0。折叠展开后的整条滑条只按位置，不退档。
+滑条右半边按位置设值，左半边是「退一档」（`previous`）。不要两边都按比例设值，否则点一下标题
+就会把取值拉到 0。折叠展开后的整条滑条只按位置，不退档。
 
 ### 8.3 折叠行
 
@@ -504,7 +525,7 @@ false 都会在下一帧被拉回），不是只在首帧设一次——只设�
 | `misc\gui\D3D12VideoSettingsScreen.kt` | 视频设置屏幕：布局、页签、滚动、绘制、输入、应用/撤销 |
 | `misc\gui\D3D12VideoSettingsContent.kt` | 四个页面的内容、条目类型、灰化联动与取值过滤 |
 | `misc\gui\D3D12Widget.kt` | 控件基类、`WidgetRenderer`（提取器的 alpha/scissor 封装）、调色板 |
-| `misc\gui\D3D12Widgets.kt` | 标题/分组/说明/页签/设置行/按钮六种控件 |
+| `misc\gui\D3D12Widgets.kt` | 标题/分组/说明/页签/二级页签/设置行/按钮七种控件 |
 | `d3d12\render\advanced\vrs\D3D12RenderScale.kt` | 渲染缩放选项、25% 步进取值集合、DLAA 锁定 |
 | `d3d12\render\advanced\D3D12AntiAliasing.kt` | 抗锯齿选项（原版取值集合上的 `OptionInstance`） |
 | `dxrmc\nvidia\reflex\NvidiaReflex.kt` | Reflex 三档选项、`options.txt` 读写、与帧生成的互锁 |
@@ -531,7 +552,7 @@ false 都会在下一帧被拉回），不是只在首帧设一次——只设�
 
 ## 10. 文档维护
 
-- **事实来源只有代码**：不引用仓库外的文档或编号；需要指代某个历史决定时只讲结论。
+- **只写当下**：不写设计史、方案对比与问题编号，也不引用仓库外的排障文档。
 - **改代码时同步改本文**：新增/删除选项、改默认值、改生效时机、改灰化条件、改布局常量，都在
   本文有对应段落。§5.2 的两张清单和 §6.6 的矩阵最容易过期。
 - **不要写死行号**：文件会漂移，用文件名 + 符号名（属性名、函数名、键名）定位。
