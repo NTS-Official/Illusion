@@ -4,7 +4,7 @@
 <br>
 <img src="https://img.shields.io/github/actions/workflow/status/NTS-Official/Illusion/build.yml?style=for-the-badge">
 <br>
-<img src="https://img.shields.io/badge/Kotlin%202.4-Java%20FFM%20API-orange?style=for-the-badge&logo=kotlin">
+<img src="https://img.shields.io/badge/Kotlin%202.5-Java%20FFM%20API-orange?style=for-the-badge&logo=kotlin">
 <img src="https://img.shields.io/badge/DirectX%2012-grey?style=for-the-badge&logo=cplusplus&label=C%2B%2B23&labelColor=blue">
 <br>
 <img src="https://img.shields.io/badge/Streamline%202.14-green?style=for-the-badge&logo=nvidia&labelColor=grey">
@@ -16,6 +16,9 @@
 </div>
 
 # DirectX Minecraft Graphics Experimental Project
+
+> [!Note]
+> Shaders compiling chain is undergoing a rewrite. Hybrid RT/PT solution is still in very early development.
 
 [English] | [[简体中文](docs/README_ZH.md)]
 
@@ -38,7 +41,7 @@ Since the original project is a rather hard-to-watch exercise in wish-driven pro
 > [!WARNING]
 > This mod is still in early development; it is yet another of the [author](https://github.com/NTS-Official)'s [hole-digging projects that may never be finished](https://github.com/NTS-Official/wgpu-mc-neo).
 
-Illusion is a Minecraft NeoForge mod based on Microsoft's DirectX 12 backend, aiming to bring advanced graphics features to Minecraft — ray tracing (not implemented), mesh shaders, temporal anti-aliasing, NVIDIA's whole Streamline suite (deep learning super sampling, frame generation, ray reconstruction and ray denoising), and more.<br>
+Illusion is a Minecraft NeoForge mod based on Microsoft's DirectX 12 backend, aiming to bring advanced graphics features to Minecraft — ray tracing, mesh shaders, temporal anti-aliasing, NVIDIA's whole Streamline suite (deep learning super sampling, frame generation, ray reconstruction and ray denoising), and more.<br>
 It also takes advantage of DirectX's strengths on the Windows platform and Microsoft's PIX diagnostic tools to create an experimental platform that is easy to develop on.
 
 ## MCDR

@@ -4,7 +4,7 @@
 <br>
 <img src="https://img.shields.io/github/actions/workflow/status/NTS-Official/Illusion/build.yml?style=for-the-badge">
 <br>
-<img src="https://img.shields.io/badge/Kotlin%202.4-Java%20FFM%20API-orange?style=for-the-badge&logo=kotlin">
+<img src="https://img.shields.io/badge/Kotlin%202.5-Java%20FFM%20API-orange?style=for-the-badge&logo=kotlin">
 <img src="https://img.shields.io/badge/DirectX%2012-grey?style=for-the-badge&logo=cplusplus&label=C%2B%2B23&labelColor=blue">
 <br>
 <img src="https://img.shields.io/badge/Streamline%202.14-green?style=for-the-badge&logo=nvidia&labelColor=grey">
@@ -25,6 +25,9 @@
 > 坦白地说，这个项目所做的基本上就是在“盲目追新”，在能跑起来的前提下引入尽可能多的新特性。
 
 ## 幻光影现
+
+> [!Note]
+> 着色器编译链正在经历重写，混合光追方案仍在非常不成熟的早期当中。
 
 ### 缘起
 
