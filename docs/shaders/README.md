@@ -7,6 +7,10 @@
 
 D3D12 不认 GLSL，只接受 DXIL；DXIL 只能由 DXC 产出（`D3DCompile` 到 shader model 5.1 为止，产出的是 DXBC）。
 因此本站必须自己持有一条链：**GLSL →（shaderc / glslang）→ SPIR-V（含反射）→ 生成 HLSL（SPIRV-Cross）→ DXC → DXIL**。
+
+> 手写的光追着色器不走这条链：它们是 shaderpack 里的 `.hlsl` 文件，由 `D3D12RtShaderSources`
+> 直接交给 DXC，见 `docs/rt/README.md` §10。
+
 直接把手上的 GLSL 喂给 D3D12 不可能——没有 DXIL 就没有 `CreateGraphicsPipelineState` 的输入。
 
 经 SPIR-V 而非文本直译，是因为只有它能提供稳定的「反射 + 重编号」：原版 GLSL 的 binding 由 shaderc / SPIRV-Cross
@@ -242,8 +246,11 @@ COM 对象会在 CRT 退出阶段触发 ucrtbase fail-fast（0xc0000409）。dll
 | 单条读入上限 / 关闭 | `64 << 20`（64 MB） / `MCDR_DXIL_CACHE=0` |
 
 把 dll 的「大小 + mtime」掺进键等价于「换 DXC 就整体失效」，无需手动清缓存。动机见注释：DXC 单次 0.4~3 s
-且在主线程，一个会话几十个着色器，启动累计停顿十几秒。日志：命中 `(disk cache hit)`、未命中
-`(took <N> ms)`。缓存文件的清理 / 容量上限**代码中未明确**（只限制单条读入大小）。
+且在主线程，一个会话几十个着色器，启动累计停顿十几秒。
+
+日志：**命中完全静默**（热缓存下启动会命中上百次，逐条打只会淹没真正的失败）；未命中打一行
+`dxil: <profile> <entry> (<N> ms)`；设备销毁时汇总 `<k> compiled, <m> cached`，命中率异常说明缓存键失效了。
+缓存文件的清理 / 容量上限**代码中未明确**（只限制单条读入大小）。
 
 ### 9.4 HLSL 落盘（可选诊断）
 
@@ -264,7 +271,8 @@ COM 对象会在 CRT 退出阶段触发 ucrtbase fail-fast（0xc0000409）。dll
 | --- | --- | --- | --- |
 | 0 | `UNIFORM_BUFFER` | `b{i}` | **root descriptor CBV**（每个 CBV 一个根参数） |
 | 1 | `SAMPLED_IMAGE` | `t{i}` + `s{i}` | 单个 descriptor table + **static sampler** |
-| 2 | `TEXEL_BUFFER` | `t{i}` | 同一个 descriptor table（**不配 sampler**） |
+| 2 | `TEXEL_BUFFER` | `t{i}` | 同一个 descriptor table（**不配 sampler**，类型化缓冲视图） |
+| 3 | `RAW_BUFFER` | `t{i}` | 同一个 descriptor table（**不配 sampler**，RAW 缓冲视图 `R32_TYPELESS` + RAW 标志，供 `ByteAddressBuffer` 使用） |
 
 `b` / `t` / `s` 是各自寄存器空间但都沿用同一下标 `i`：第 0 条是 UBO、第 1 条是纹理时 HLSL 里是 `b0` 与 `t1`。
 **CBV 寄存器号不稠密**（`cbvRegs.push_back(b.reg)` 保留原号），只有**根参数索引**按出现顺序稠密编号；
@@ -308,6 +316,25 @@ D3D12 要求 CBV 的 GPU 地址按 256 字节对齐（root descriptor 同一条�
 （变换/贴图乱掉），排查成本远高于一次报错。Java 侧原样带进异常：
 `throw IllegalStateException("dx12PushDescriptors failed: ${MCDR_ABI.D3D12LastError()}")`。
 
+### 10.6 多 SRV/UAV compute（光追路径）
+
+`D3D12CreateComputePipelineEx(dxil, srvCount, uavCount)` 建一条根签名为
+`[0] SRV 表 t0..`、`[1] UAV 表 u0..`、`[2] b0（8 个 int32）` 的 compute PSO；
+`D3D12DispatchComputeEx(ctx, pso, srvs, uavs, constants, x, y, z)` 一次绑完再 dispatch。
+
+```kotlin
+val pso = MCDR_ABI.D3D12CreateComputePipelineEx(dxil, srvCount = 4, uavCount = 3)
+MCDR_ABI.D3D12DispatchComputeEx(ctx, pso,
+    longArrayOf(depth, normal, motion, material),
+    longArrayOf(direct, indirect, specular),
+    intArrayOf(width, height, frameIndex), (w + 7) / 8, (h + 7) / 8, 1)
+```
+
+- `srvCount` / `uavCount` 各 0..16，不能同时为 0；`srvCount + uavCount <= 64`（描述符堆 64 槽）。
+- SRV 侧若纹理已带现成视图（`cpuHandle` 非 0）直接拷，否则按纹理格式建 `Texture2D` 的 SRV（mip 0，单级）。
+- UAV 侧一律新建视图，且纹理必须带 `USAGE_STORAGE`（位 32），否则返回 0 并记日志。
+- 同一张纹理不能既在 `srvs` 又在 `uavs`；dispatch 前后 native 自己过渡（SRV ↔ `NON_PIXEL_SHADER_RESOURCE`、UAV ↔ `UNORDERED_ACCESS`，用完回 `COMMON`），调用方不需要额外发屏障。
+
 ## 11. 缓存层次
 
 | 层 | 键 | 容器 | 失效 |
@@ -350,9 +377,9 @@ D3D12 要求 CBV 的 GPU 地址按 256 字节对齐（root descriptor 同一条�
 - **线宽变体**：拓扑是 `LINES` / `DEBUG_LINES` 时额外建一条 `TRIANGLES` PSO（D3D12 没有宽线，`LINELIST` 恒
   1px；原版每段 4 顶点 / 6 索引恰好摊成一条带子）。建失败只 warn
   `"line quad variant for {} failed; lines stay 1px"`。
-- **meshlet 变体**：仅当 `D3D12Settings.meshTerrain` 且管线名含 `terrain`、不含 `shadow`。失败逐级降级：
-  AS 解析不到 uniform → 退回不剔除的 MS；MS/AS 编译失败 → 再退一次；带 AS 的 PSO 建失败 → 试不带 AS 的同一份
-  MS。全失败只 warn `"meshlet variant for {} failed"`，普通 PSO 照用。
+- **meshlet 变体**：转换器产出的地形 VS 也能被 `D3D12MeshletShader.build` 包装（详见 §16）。AS 解析不到 uniform 就退回不剔除的
+  MS；MS/AS 编译失败再退一次；带 AS 的 PSO 建失败就试不带 AS 的同一份 MS。全失败只 warn
+  `"meshlet variant for {} failed"`，普通 PSO 照用。
 
 ### 12.3 致命：整条图形管线不可用
 
@@ -392,7 +419,7 @@ D3D12 要求 CBV 的 GPU 地址按 256 字节对齐（root descriptor 同一条�
 2. `rebind` 必须发生在克隆体上；缓存里的原始 SPIR-V 永不改写。
 3. 绑定条目下标 == SPIR-V binding == HLSL 寄存器号（`b`/`t`/`s` 共用同一下标）。
 4. CBV 根参数索引稠密（0..cbvCount-1）而寄存器号不稠密；SRV 表参数索引恒为 `cbvCount`。
-5. 每个 `SAMPLED_IMAGE` 条目必须有同号 `t{i}` 与 `s{i}`；`TEXEL_BUFFER` 只有 `t{i}`。
+5. 每个 `SAMPLED_IMAGE` 条目必须有同号 `t{i}` 与 `s{i}`；`TEXEL_BUFFER` / `RAW_BUFFER` 只有 `t{i}`。
 6. 顶点属性语义名按 **SPIR-V location** 分配（0 → POSITION，n → TEXCOORD(n-1)），与 HLSL 声明顺序无关。
 7. `semanticNames` 可短于 input layout 元素数，原生补 `TEXCOORD<n>`；多余语义名被忽略。
 8. 输入布局 stride 必须**逐 slot** 算：优先元素自带 stride，否则取该 slot 内 `offset + 元素字节数` 的上界；
@@ -422,9 +449,98 @@ daemon 线程 `backend-stack-sampler`（`MAX_PRIORITY`）每 2 ms 取一次 `tar
 「MC 窗口内的 JNI/后端开销」混在一起无法归因，本类能区分 `MCDR_ABI.*` 与 `net.minecraft.*` /
 `com.mojang.blaze3d.*`。代价是 `Thread.getStackTrace()` 会强制安全点、开销约 1~2%，故只在性能剖析开关打开时启用。
 
-## 16. 文件导航
+## 16. 独立转换器（shadow 与 primary）
 
-路径相对于 `Illusion\src\main\kotlin\dev\nts\expdxr\`：
+除上面这条 glslang → SPIR-V → SPIRV-Cross 主链外，还有一条独立转换路径：`illusion_shader.dll`（Rust，
+`Illusion-shaders-extension`）直接吃同一份展开后的 GLSL，输出 HLSL 与一份资源清单（manifest）。它用 FFM
+以 JSON 进 / JSON 出调用，在渲染线程同步执行。两种用法：
+
+- **shadow**（`shaderConverter`）：每条 stage 都再转一遍，只记录，出图仍走主链。
+- **primary**（`shaderConverterPrimary`）：命中的管线用转换器产物出图，其余继续走主链，随时可关掉回退。
+
+- **开关**：`config/dxr_mc-client.toml` 的 `[debug] shaderConverter`（默认 `false`）与
+  `[debug] shaderConverterDll`（默认 `dxrmc/illusion_shader.dll`，相对游戏工作目录）。DLL 缺失只在第一次
+  `warn`，之后保持关闭。
+- **入口**：`D3D12Device.compileShader` 在 `createIntermediary` 之前调 `shadowConvert`；它复用
+  `injectShaderDefines` + `expandShaderIncludes` 的结果，所以两条链看到的是同一份源码与同一批 define。
+- **产物**：`<工作目录>/dxrmc/converter/<id>.<stage>.hlsl` 与同名 `.manifest.json`（上限 400 对）；转换失败
+  时把展开后的源码写成 `<id>.<stage>.failed.glsl`，用于和 `_research\mc263-src` 的语料副本对比。
+- **日志**：成功 `debug`，失败 `warn`（带 `kind` 与首行 message），`close()` 汇总
+  `shader converter shadow: N stages, N ok, N failed, cache H hit(s), M conversion(s), K entrie(s)`；转换器返回 `warnings` 时另记 `shader converter: <stage> <id> warnings: …`（内容是方言层的降级说明，例如 texel buffer 被降成只读 storage buffer、`gl_PointSize` 赋值被丢弃）。影子路径的异常**不得**影响主链：失败只记日志。
+- **请求缓存**：`IllusionShaderBridge.convert` 以**序列化后的请求 JSON** 为键缓存响应（访问序 `LinkedHashMap`，上限
+  2048 条）。转换对同一请求是确定的（`tests/deterministic.rs` 钉住），所以命中时直接复用 HLSL 与 manifest；
+  实测一次会话 442 个影子 stage + 221 条 primary 管线共 884 次调用，355 次命中缓存、529 次真正转换。
+  请求里的寄存器/属性来自管线，因此不同管线即使共用同一份源码也不会命中——这是有意的，改键为「源码 + define」会让
+  寄存器映射错位。每条约 10–40 KB HLSL，2048 条上限约百 MB 量级，打包大量变体时需要留意。
+- **实测（26.3 开发客户端）**：标题界面与进入世界后的全部 stage 都能转换；`gl_PointSize` 的赋值在方言层被丢弃（D3D12 无点大小），`debug_point` 不再失败。
+
+
+**primary 路径**由 `D3D12Device.applyConverterPrimary` 实现，限制与要点：
+
+- **开关**：`[debug] shaderConverterPrimary`（默认 `false`）配合 `[debug] shaderConverterPipelines`
+  （逗号分隔的子串过滤器；**留空表示全部管线都尝试**；不要写 `core/xxx`，管线名形如
+  `minecraft:pipeline/gui_textured`）。留空时一次世界内会话里 **221 条管线**切到转换器（部分 OIT 变体只在世界里有对应内容时才出现），
+  不再有按类别跳过的管线（地形也在内，见下面的 meshlet 变体）。
+- **资源寄存器**：根签名的寄存器号就是 `D3D12CompiledShader.entries` 的下标，所以转换时按 entries 的
+  name→index 传 `bindings` 覆盖表（cbuffer 用结构体名，texture 用变量名，sampler 复用所属 texture 的
+  寄存器），并固定 `register_layout = "host"`。两者缺一，naga 就会按自己的顺序编号，PSO 创建返回
+  `0x80070057`（E_INVALIDARG，着色器声明了根签名里没有的寄存器）。
+- **顶点输入**：转换器按宿主顶点格式的元素顺序编号 `LOC<n>`，**覆盖** shader 自带的
+  `layout(location = ...)`；`semanticNames` 相应改成 `LOC<location>`。原版 `core/text` 的声明顺序是
+  Position、Color、UV0，而格式是 POSITION → TEX_COORD → COLOR，不覆盖就会把顶点色当 uv，glyph 变成纯色块。
+  naga 会把 shader 从不读取的输入裁掉，所以转换后的参数个数**可以少于**宿主格式元素数。宿主按名字把这一次转换返回的 `stage_io.inputs[]`（名字 + location）对回格式元素，被裁掉的元素给 `UNUSED<下标>` 作语义（D3D12 允许布局里有 shader 不消费的元素）；转换器保留的输入若在布局里找不到，跳过该管线，原因 `vertex attribute missing from the layout`。
+  **location 必须取自主转换的响应**：`converterReady` 缓存的 artifact 来自影子转换（不带 `vertex_attributes`，按声明顺序编号），拿它的 location 会错位——首版按缓存 manifest 组装时 25 条管线 PSO 失败（`semanticNames` 出现 `LOC6` 而 shader 只有 `LOC0..5`），改成主转换重新解析后归零。
+- **与旧链补丁的等价关系**：`D3D12ShaderCompiler.compile` 对 SPIRV-Cross 的产物打三类补丁，primary 路径必须显式处理这几种语义，而不是让它们悄悄消失：
+  1. **Y 翻转**（`flipY`，图集烘制管线见第 2 条）：转换时传 `flip_y = true`，由转换器在每条 `gl_Position` 整值赋值后插入 `gl_Position.y = -gl_Position.y;`（方言层第 10 条改写）。成员写（`gl_Position.y = ...`）不处理，避免重复翻转。旧链的 `injectVertexYFlip` 对转换器产物不生效，所以这条只能由 `flip_y` 承担。
+  2. **lightmap 翻转**：旧链在 `!flipY` 且管线名含 `lightmap` 时把 `texCoord.y = 1.0f - texCoord.y;` 插进 `frag_main` 入口。primary 改为在请求里传 `flip_texcoord = "texCoord"`，由转换器在 `main` 开头插入 `texCoordFlipped` 副本并改写读取（naga 不接受对 `in` 赋值），不再跳过这条管线。
+  3. **图集烘制（`animate_sprite`）**：旧链对它**无条件**翻 Y（`needsYFlip = isAtlasBake || flipY`：烘制无深度附件，被 `flipY` 判据排除）。primary 用同一判据 `flipVertices = flipY || pipeName.contains("animate_sprite")`，只把它作为**顶点**请求的 `flip_y`。**漏掉这一步会让每一帧烘进图集的镜像位置，整张图集错位**——按钮上出现熔炉、方块显示别的方块、文字（不走图集）正常，而旧链完全正常，只能靠整条 pass 留在旧链掩盖。它早先 PSO 被拒（`0x80070057`）是阶段链接问题（见第 5 条），与 Y 翻转无关。
+  4. **全屏 blit 的 texCoord 翻转**（旧链 §8.3）：判据是顶点着色器为 `minecraft:core/screenquad`、`!flipY`、管线名不含 `lightmap`、且片元的 GLSL 里存在用 `texCoord` 取样的 `texture*(…)` 调用。primary 对同一批管线传 `flip_texcoord = "texCoord"`。**这条不能省**：`blit_depth` / `blit_depth_during_depth_bounds` 会把主深度拷进 OIT 的 depth-bounds 纹理，不翻转就写成上下镜像，OIT 随后按镜像深度剔除，半透明几何（云）整片消失——本轮正是先按名字跳过这三个 pass，定位到根因后改成传 `flip_texcoord`，207 条管线全部切到转换器且云层正常。
+  5. **阶段接口补齐**（旧链无对应补丁，D3D12 独有）：D3D12 按 `(semantic, index)` 的**寄存器与分量掩码**做 VS→PS 链接，而两个阶段各自打包——顶点写 `LOC0`(float)、`LOC1`(float2) 时占 `reg0.x` 与 `reg0.yz`，片元只声明 `LOC1` 时会被打进 `reg0.xy`，掩码不是 `reg0.yz` 的子集，`CreateGraphicsPipelineState` 直接拒绝（调试层报 `#662 … Semantic 'LOC', Index '1' … not a subset`）。primary 因此把顶点的 `stage_io.outputs[]`（location + `hlsl_type`）作为 `vertex_outputs` 传给片元转换，转换器按顶点顺序重建参数表、缺的补成 `dxr_pad<loc>`，并在 `main` 开头用 `if (dxr_pad<loc> == 1234.5678) discard;` 读取它，防止编译器把未用输入从签名里裁掉。`animate_sprite_blit` 就是这条修好的。
+- **跳过原因**：`close()` 打印一行汇总 `shader converter primary: N pipelines rendered converted HLSL, M kept the old chain (reason=count, ...)`，按次数降序。原因是固定类别（便于计数），逐条细节只在前 20 条同名 debug 行里：
+  `pipeline filter`（`shaderConverterPipelines` 未命中）、`vertex artifact missing` / `fragment artifact missing`（影子转换没留下该 stage）、`meshlet variant`、`missing resource`（manifest 的资源名在 `entries` 里找不到）、`vertex attribute missing from the layout`（转换器保留的顶点输入在宿主格式里找不到）、`vertex conversion failed` / `fragment conversion failed`（ABI 返回错误，细节在 debug 行）、`vertex conversion threw` / `fragment conversion threw`（FFM 调用异常）、`storage image`（转换器已产出 `RWTexture*`，但宿主绑定只有 SRV/CBV 槽位，带 UAV 的管线整条留在旧链）。
+- **texel buffer（buffer texture）**：转换器把 `uniform isamplerBuffer` 降级成只读 storage buffer，HLSL 侧是 `ByteAddressBuffer`；宿主把对应绑定条目从 `TEXEL_BUFFER` 改写成 `RAW_BUFFER`（原生 `pushDescriptors` 的 `type = 3`），描述符用 RAW 视图（`R32_TYPELESS` + RAW 标志）。语料里的 buffer texture 是 `R8_SINT`，一个 texel 一个字节，转换器生成的 `dxr_texel_<X>(index)` 按 `(index & 3) * 8` 取出低字节并符号扩展，所以宿主不需要重新打包数据。`CloudFaces`（`minecraft:pipeline/clouds`）据此切到 primary。
+- **storage image（UAV）**：转换器把 `uniform image3D X;` 变成 `RWTexture3D<float4> X : register(u<n>)`，manifest 的 `resources.storage_images[]` 记下名字、寄存器、格式与访问方式；宿主的 `converterStage` 读出该列表，非空就整条管线按 `storage image` 跳过（`D3D12BindGroupEntry.Type` 还没有 UAV 条目，`pushDescriptors` 也没有 `u` 槽位）。`verify` 已能比对 UAV 组，所以转换器侧的正确性有离线保障，缺的只是宿主绑定。
+- **meshlet 变体**：`D3D12MeshletShader.build` 接受两种 VS 形态——旧链的 spvc 产物
+  （`SPIRV_Cross_Input` + `main`）与转换器的 naga 产物（`XxxOutput main(参数 : LOC<n>, …)`）。naga 形态按
+  参数重建 `struct DxrVertexInput` 并把入口改成 `vs_main(...)`，`verts[vid] = vs_main(vin.…)` 按位置传参；
+  顶点格式里没有的元素（`ChunkPosition`/`ChunkVisibility`）从 `SectionDesc` 填。AS 剔除需要解析
+  `CameraBlockPos` / `CameraOffset` / `ModelViewMat` / `ProjMat` 四个称呼——spvc 产物带 `_81_` 这类唯一化
+  前缀，转换器产物是裸名（`float4x4 ProjMat;` + `global_2.ProjMat`），所以名字前缀必须可空；解析不到时
+  回退成不剔除的 meshlet 并 warn `AS build failed (...), meshlets without culling`，`cull=true` 的自定义
+  语义不变。地形没有索引绘制回退，所以 `build` 连 MS 都建不出时仍须留旧链（原因 `meshlet variant`）。
+- **两条链互为回退**：转换产物过了 DXC 却被设备拒绝（`dx12CreateGraphicsPipeline = 0`，典型是 `#662`
+  阶段链接不匹配；`buildNativeDesc` 抛异常同样算）时，宿主先把产物落到
+  `dxrmc/converter/failed_<pipeline>.{vs,ps}.hlsl` + `entries.txt` + `io.txt`，打 warn
+  `<pipeline>: device rejected the converted shader, falling back to the SPIR-V chain`，再用 SPIR-V 链
+  重建同一条管线并继续使用。单条转换产物再坏也只是退回旧链，不会让管线失效。实测把 12 条地形片元的
+  首个输入语义全改成 `LOC9` 造出链接错误：12 条全部触发回退、`CreateGraphicsPipelineState` 失败 0 次、
+  世界照常出图。
+- **诊断落盘**：primary 成功的管线把 HLSL、manifest 与 plan 写到
+  `dxrmc/converter/primary/<pipeline>.{vs,ps}.hlsl` + `.plan.txt`（前 400 条）；meshlet 变体把生成的 MS 与
+  它吃的 VS 源写到 `dxrmc/converter/mesh/<pipeline>.{ms,vs}.hlsl`（前 4 条）。只写盘，不参与渲染。
+- **验证状态**：`gui` / `position` / `text` 家族在标题界面切换后画面正确（含 `gui_text` 的 glyph 与
+  `gui_textured` 的按钮背景）；世界内留空过滤器时 **221 条管线**切到转换器（`gui`/`position`/`text`、
+  `solid_block`/`cutout_block`/`translucent_block`、`item_cutout`（7 个资源、`flip_y`）、粒子、天空、云
+  （`CloudFaces` 走 RAW SRV）、`blit_depth`、天气、OIT 系列、图集烘制（`animate_sprite` 两个 pass）、
+  12 条地形管线（meshlet 变体 `as=true`）等），
+  `CreateGraphicsPipelineState` 失败 **0 次**，
+  `terrain batch skipped` **0 次**，画面正常出图（沙地、方块纹理、准星与云层都对；云按
+  `flip_texcoord` 翻转后的深度边界正常出图，不再出现整片消失或空洞；地形与旧链同视角截图一致）。
+- **离线校验**：`Illusion-shaders-extension` 的 `verify` 子命令把同一批语料交给 DXC 编译，并把 DXIL 里的
+  资源绑定与 `ISG1`/`OSG1` 入口签名逐条对回 manifest（location 取 `LOC<n>` 的语义索引，因此 DXC 把多个
+  标量并进同一 register 也不会误判）。原版 26.3 语料 72/72 通过；光影包 Complementary r5.8.1 的 183 个 in-scope 入口文件（含 3 个 compute）在 SM 6.0 与 6.9 下也是 183/183（见 `Illusion-shaders-extension\docs\verification.md` §5）。manifest 与
+  DXIL 对不上（寄存器被改写、`LOC` 与类型不符）会在进游戏前被它拦下；宿主顶点格式与 manifest 的顺序是否
+  一致，仍由宿主按 `vertex_attributes` 传属性顺序这条约定保证，离线校验看不到。规则与用法见
+  `Illusion-shaders-extension\docs\verification.md`。
+- **宿主形态的回归锁**：转换器的 16 份快照里有 `host_bindings.fsh`（`register_layout = host` + 显式
+  `bindings`，cbuffer `b3`、texture/sampler `t7`/`s7`）与 `host_inputs_declared.vsh`（属性顺序覆盖声明里
+  的 `layout(location)`）；`src\abi.rs` 的 `honours_every_documented_request_field` 直接走 C 入口，确认
+  文档里的每个请求字段都真的到达编译器 —— 宿主侧那两个字段（`bindings`、`vertex_attributes`）以后若再被
+  漏传，会在 `cargo test` 里暴露，而不是等到实机的 `0x80070057`。
+
+## 17. 文件导航
+
+路径相对于 `Illusion\src\main\kotlin\io\github\dxegp\`：
 
 | 文件 | 职责 |
 | --- | --- |
@@ -432,11 +548,12 @@ daemon 线程 `backend-stack-sampler`（`MAX_PRIORITY`）每 2 ms 取一次 `tar
 | `d3d12\render\shader\D3D12IntermediaryShaderModule.kt` | SPIR-V 容器与反射、`rebind` 重编号、克隆、SPIRV-Cross → HLSL |
 | `d3d12\render\shader\D3D12CompiledShader.kt` | 一条管线的编译产物（HLSL 对、绑定条目、输入名、语义名） |
 | `d3d12\render\shader\D3D12FallbackShaderSource.kt` | 首次资源重载前，用捕获的 vanilla `ResourceProvider` 作后备源 |
+| `d3d12\render\shader\IllusionShaderBridge.kt` | 独立转换器 DLL 的 FFM 绑定（`load` / `convert`，JSON 进 / JSON 出） |
 | `d3d12\render\shader\D3D12GpuSampler.kt` | `GpuSampler` 的 D3D12 实现（含 mip bias 与幂等关闭） |
 | `d3d12\render\shader\D3D12StackSampler.kt` | 渲染线程 CPU 栈采样的诊断工具（不是纹理采样器） |
 | `d3d12\render\adapter\D3D12Device.kt` | 着色器/管线缓存、`buildNativeDesc`、`compilePipeline`、mesh 与线宽变体 |
 | `d3d12\backend\D3D12CompiledRenderPipeline.kt` | 已编译管线（PSO 句柄、绑定推导、变体管理、幂等 `close`） |
-| `d3d12\backend\D3D12BindGroupEntry.kt` | 绑定条目类型（UBO / 采样纹理 / texel buffer） |
+| `d3d12\backend\D3D12BindGroupEntry.kt` | 绑定条目类型（UBO / 采样纹理 / texel buffer / RAW 缓冲） |
 | `d3d12\backend\D3D12RenderPassBackend.kt` | pass 内 `setPipeline`、`pushDescriptors`、uniform 下标映射 |
 | `d3d12\backend\D3D12PipelineBridge.kt` | `location` → `RenderPipeline` 的登记与查回 |
 | `d3d12\render\advanced\mesh\D3D12MeshletShader.kt` | 把地形顶点着色器包装成 `ms_main` / `as_main` |
@@ -446,7 +563,7 @@ daemon 线程 `backend-stack-sampler`（`MAX_PRIORITY`）每 2 ms 取一次 `tar
 `graphicsShaderModelProfile` / `createGraphicsPipeline`；`c_abi\abi_mesh.cpp` 的 `mcdr_dx12CompileShaderDxc`；
 `advanced\d3d12_mesh_base.cpp` 的 `meshPipelineSupported` 与 mesh 根签名。
 
-## 17. 文档维护
+## 18. 文档维护
 
 - 本文每条都能在源码里定位。改动下列任一处后请同步本文：`D3D12ShaderCompiler` 的正则/插入点（Y 翻转、
   lightmap、blit）；`rebind` 的编号规则或 `addToBindGroup` 的类型判定；原生根签名的「CBV 稠密 / SRV 表在
@@ -456,3 +573,17 @@ daemon 线程 `backend-stack-sampler`（`MAX_PRIORITY`）每 2 ms 取一次 `tar
 - 新增绑定类型（例如 UAV）前，先确认根签名、`pushDescriptors` 与 `D3D12BindGroupEntry.Type` 三处能同时表达，
   否则会出现「编译通过但运行期读错寄存器」。
 - 文中标注「代码中未明确」的地方是已知文档空白、不是疏漏；补全前请先改代码注释。
+
+
+
+
+
+
+
+
+
+
+
+
+
+

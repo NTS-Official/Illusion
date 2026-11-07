@@ -37,6 +37,10 @@
 - `D3D12GpuSurface.present()` 末尾：`D3D12Temporal.onFramePresented()` 递增「帧身份」，
   然后 `D3D12GUISplit.armUiComposition()` 为**下一帧**裁决 hudless 呈现。
 
+`D3D12Temporal.frameTimestampNanos` 按呈现帧身份缓存 `System.nanoTime()`。投影首次上传推进历史，
+同帧重复上传共用该时间戳；RT 相机、G-Buffer 重放、降噪历史和曝光也使用它。
+`Minecraft.frameTimeNs` 是帧耗时，不能用于识别帧或计算相邻帧的时间间隔。
+
 数据流可以压成一条线：
 
 ```
@@ -82,6 +86,10 @@ D3D12SMAAWorld.applyIfEnabled()  // 不看模式，交给 native 判
 「有没有世界、主目标是不是 D3D12 纹理、有没有共享 encoder」，然后无条件调
 `recordSmaaWorldPass()`；模式判断在 native 里（不是 SMAA 就返回 0）。这样做的好处是挂点恒定、
 JVM 侧没有第二份模式状态；代价是 SMAA 分支每帧都要付一次调用。
+
+窗口或渲染目标尺寸变化后，native 的 world-result scratch 必须按自身资源的实际描述检查
+宽高、格式、mip、数组层数与 sample count/quality。不要复用已由其他 SMAA 目标更新的尺寸缓存；
+尺寸不匹配的 scratch 参与 `CopyResource` 会触发调试层错误并破坏输出。
 
 ### 2.3 DLAA 的特殊地位
 
@@ -172,31 +180,45 @@ CycleButton 重新读值，界面会停留在旧文字上。
 
 - 序列：Halton(2, 3)，两轴分别取 base 2 与 base 3 的 radical inverse，值域 `(0,1)`，减 `0.5`
   之后变成以 0 为中心的像素偏移，范围 `[-0.5, +0.5)`。
-- 长度：`DEFAULT_JITTER_SAMPLES = 16`（2 的幂，与后端 8/16 采样档位对齐）；Halton 表惰性生成并
-  缓存，长度取 `max(jitterSamples, 16)`。
-- 取第几个：`index = frameIndex % 16`，`frameIndex` 每帧加一，与速度缓冲的乒乓、TAA 的帧号
-  同一个节拍（都在 `D3D12Temporal.beginFrame()` 里推进）。
+- 长度：`DEFAULT_JITTER_SAMPLES = 16`；`D3D12TemporalSampling.sample` 是唯一序列生成器，按
+  `frameIndex % jitterSamples + 1` 计算 Halton，不维护第二份 PT 序列。
+- `frameIndex` 在 `D3D12Temporal.beginFrame()` 里推进，与速度缓冲的乒乓、TAA 帧号共用节拍。
 
-注入位置是 vanilla 的关卡投影矩阵 UBO：
+非 RT 路径在 vanilla 的关卡投影矩阵 UBO 注入偏移；RT 路径只在 G-Buffer 重放的独立投影切片注入：
 
 - buffer label：`"Camera projection matrix UBO level"`（64 字节）；
-- 列主序的 `out[8]`（`m[0][2]`）与 `out[9]`（`m[1][2]`）各减去 `clipJitterX/Y`，其中
-  `clipJitter = 2 * jitter / 尺寸`。
+- `clipJitter = 2 * jitter / 渲染尺寸`，由 `D3D12TemporalSampling.jitterProjection` 左乘 clip 平移。
+  对每列执行 `row0 += clipJitterX * row3`、`row1 += clipJitterY * row3`。
 
-推导（代码注释里给了完整链条）：`clip.x = ... + m[0][2] * view.z`，透视下 `clip.w = -view.z`，
-所以 `m[0][2] += δ` 等价于 `clip.x += -δ * clip.w`；要让 NDC 平移 `c`，取 `δ = -c`。
+纯透视矩阵中它等价于 `[8]` / `[9]` 减去 clip 偏移；包含原版 bob 的最终投影必须对完整行操作，
+否则摇晃的平移与旋转会改变实际偏移。屏幕内容位移为 `(+Jx,-Jy)`，采样点偏移方向相反。
 
 **只抖 `level`，不抖 `"3d hud"`**：后者是正交投影，抖了会让物品栏与手持物错位。
 
 注入有双重闸门，缺一不可：
 
 ```kotlin
-fun isActive() = enabled || D3D12TAA.isSelected() || DeepLearningSuperSampling.isEnabled()
-private fun hasJitterConsumer() = D3D12TAA.isSelected() ||
-    (DeepLearningSuperSampling.isEnabled() && !DeepLearningSuperSampling.isStalled())
+fun isActive() = enabled || D3D12Settings.rtEnabled ||
+    D3D12TAA.isSelected() || DeepLearningSuperSampling.isEnabled()
+private fun hasJitterConsumer() = if (D3D12Settings.rtEnabled) {
+    D3D12RtFrame.hasTemporalResolve()
+} else {
+    D3D12TAA.isSelected() ||
+        (DeepLearningSuperSampling.isEnabled() && !DeepLearningSuperSampling.isStalled())
+}
 ```
 
-只有 `isActive()` 且 `hasJitterConsumer()` 且 `jitterEnabled` 都为真才真正改写矩阵，否则
+RT 捕获关卡投影原始字节并保持原版 UBO 不变；原版世界与失败直通画面使用稳定投影。
+`rtReplayProjection` 按当前 G-Buffer 尺寸生成采样矩阵，`replayGBuffer` 将它提交给 native，后者上传到 256 字节对齐的帧内缓冲，
+只替换重放批次的 `Projection` 绑定。尺寸来自 `D3D12RtPipelinePlan.configured`。
+只有上一帧实际完成 RR 或 NRD 后独立 SR，且 trace/render 尺寸相同、当前 Plan 未变，才启用下一帧偏移。
+首帧、失败后、世界/配置/尺寸切换及没有独立 SR 的 `NRD_SR` 100% 路径使用零偏移。
+只有所有批次重放成功后才调用 `commitRtReplay`；`frameJitter(frameNanos)` 只返回该帧已提交重放的偏移。
+帧时间戳与 present 序号必须同时匹配，禁止把前帧偏移交给新帧。SDK 矩阵与 RT MV 保持无 jitter。
+偏移启停触发 RT 统一历史复位，逐帧 Halton 变化不视为 camera cut。
+原版行走与受伤摇晃仍保留，见 [光追相机约定](../rt/README.md#192-算法与约定)。
+
+只有 `isActive()` 且 `hasJitterConsumer()` 且 `jitterEnabled` 都为真才在对应投影中注入非零偏移，否则
 `jitterX/Y = 0`。第二道闸门的必要性：SMAA / OFF 下没有任何消费者补偿这份偏移，
 再注入就是整幅画面逐帧轻微抖动。`[debug] temporalChain = true` 不能绕过它。
 
@@ -269,7 +291,7 @@ DXIL，没有 SM 5.1 兜底）。资源绑定：
 
 - **本帧投影必须用抖动后的那份**再乘 view。深度就是用抖动后的投影渲出来的，反投影用未抖动的
   矩阵，逐像素就会差半个像素。
-- **jitter 的 y 要反号**。抖动注入在投影矩阵第 2 列，经透视除法后内容在像素坐标上位移
+- **jitter 的 y 要反号**。clip 平移经透视除法后内容在像素坐标上位移
   `(+Jx, -Jy)`，补偿量因此是 `(+Jx, -Jy)`。
 - 相机平移必须单独补：terrain 与实体的顶点是**相机相对坐标**，只靠 view-projection 变换
   会漏掉相机自身的位移；`CameraDelta` 就是补这一块。
@@ -521,7 +543,7 @@ TAA 的锐化不是单独一趟：`sharpenAmount` 作为参数进 native 的 res
 | TAA 混合权重 `BLEND` | `0.0625f`（1/16） | `D3D12Taa.kt`，`lerp(history, current, BLEND)` |
 | 抖动序列长度 | `16` | `D3D12Temporal.DEFAULT_JITTER_SAMPLES` |
 | 抖动值域 | `[-0.5, +0.5)` 像素 | Halton(2,3) 减 0.5 |
-| 抖动注入下标 | 投影矩阵 `[8]` / `[9]` | 列主序 `m[0][2]` / `m[1][2]` |
+| 抖动注入方式 | clip 平移左乘投影 | 对完整 row0 / row1 加 row3 的缩放，保留 bob |
 | 速度缓冲格式 | `RG16_FLOAT` | 两张乒乓，`beginFrame` 同时换 |
 | 速度常量缓冲 | `256` 字节（实用 172） | `CBV_SIZE` |
 | 物体表上限 | `256` 行 × `16` float = `16384` 字节 | 超出丢弃 + 每秒最多一行 warn |
@@ -539,15 +561,14 @@ TAA 的锐化不是单独一趟：`sharpenAmount` 作为参数进 native 的 res
 
 改投影注入或新增时域消费者时，先把下面四条守住，破一条就是画面错位或错误拖影：
 
-- jitter 只写投影矩阵 `[8]` / `[9]`（列主序 `m[0][2]` / `m[1][2]`）：注入取 `-clipJitter`、
-  上报与补偿取 `(+Jx, -Jy)`；`"3d hud"` 一律不抖。
+- jitter 左乘关卡投影的 clip 平移，按完整行处理 bob；上报与补偿取 `(+Jx,-Jy)`，`"3d hud"` 一律不抖。
 - 本帧投影用抖动后的那份再乘 view，反投影保留 `prevClip.w <= 1e-4` 守卫；`beginFrame()` 每帧
   只推进一次，按 present 计数而非时间窗判定。
 - 锐化不回写 TAA 历史、不 `src == dst`，DLAA / DLSS 一律走 scratch 两趟。
 
 ## 9. 文件导航
 
-路径相对于 `Illusion\src\main\kotlin\dev\nts\expdxr\`。
+路径相对于 `Illusion\src\main\kotlin\io\github\dxegp\`。
 
 | 文件 | 职责 |
 | --- | --- |
@@ -555,13 +576,14 @@ TAA 的锐化不是单独一趟：`sharpenAmount` 作为参数进 native 的 res
 | `d3d12/render/advanced/D3D12PostSharpen.kt` | 5-tap unsharp 的强度、scratch 纹理、导出探测与两趟落地 |
 | `d3d12/render/advanced/taa/D3D12Taa.kt` | TAA 的 JVM 侧薄壳：选模式、传 jitter / 代数 / 锐化量、失败自关闭 |
 | `d3d12/render/advanced/taa/D3D12Temporal.kt` | 时间性数据面：Halton 抖动、投影注入、相机矩阵快照、历史代数的唯一来源 |
+| `d3d12/render/advanced/taa/D3D12TemporalSampling.kt` | 纯 Halton 生成器与完整 clip 平移，供产品及离线数值对照共用 |
 | `d3d12/render/advanced/taa/D3D12Velocity.kt` | 速度缓冲：双 RT 乒乓、常量块、内联 HLSL 全屏 pass、闩锁与资源释放 |
 | `d3d12/render/advanced/taa/D3D12ObjectMotion.kt` | 逐物体快照：位置外推、可见性/距离过滤、物体行缓冲 |
 | `d3d12/render/advanced/smaa/D3D12SmaaWorld.kt` | SMAA 的世界层挂点与「确实跑了」的结论性日志 |
 | `d3d12/render/advanced/smaa/D3D12GuiSplit.kt` | 窗口尺寸 GUI 目标、世界层搬运、hudless 武装与呈现源选择 |
 | `d3d12/backend/D3D12CommandEncoderBackend.kt` | 把四条 pass（velocity / SMAA / TAA / 锐化）追加进本帧命令列表 |
 | `d3d12/render/core/D3D12GpuSurface.kt` | 最终 blit 与 present：选呈现源、录兜底速度 pass、帧边界裁决 hudless |
-| `dxrmc/sr/dlss/DLSS.kt` | DLAA / DLSS 的升采样与锐化两趟、退出会话时的时间性复位 |
+| `dxrmc/superresolution/dlss/DLSS.kt` | DLAA / DLSS 的升采样与锐化两趟、退出会话时的时间性复位 |
 | `dxrmc/framegen/FrameGeneration.kt` | `hudlessWanted()`：帧生成后端与「有没有世界层」的判定 |
 | `misc/settings/D3D12Settings.kt` | 配置到运行期快照的解析（含已弃用的 `-D` 逃生口） |
 | `IllusionConfig.kt` | TOML 定义：`sharpenAmount`、`taaSharpenAmount`、`temporalChain`、`temporalJitter` |
@@ -570,8 +592,8 @@ Java 侧挂点（不在上面的相对路径下）：
 
 | 文件 | 职责 |
 | --- | --- |
-| `Illusion\src\main\java\dev\nts\expdxr\mixin\render\GameRendererSmaaWorldMixin.java` | 抗锯齿 / SR / GUI 拆分的唯一顺序挂点，以及每帧的 DLSS 记账 |
-| `Illusion\src\main\java\dev\nts\expdxr\mixin\render\LevelRendererMainPassDepthMixin.java` | 主 pass RETURN：采集时域数据并录速度 pass（深度被清之前） |
+| `Illusion\src\main\java\io\github\dxegp\mixin\render\GameRendererSmaaWorldMixin.java` | 抗锯齿 / SR / GUI 拆分的唯一顺序挂点，以及每帧的 DLSS 记账 |
+| `Illusion\src\main\java\io\github\dxegp\mixin\render\LevelRendererMainPassDepthMixin.java` | 主 pass RETURN：采集时域数据并录速度 pass（深度被清之前） |
 
 ## 10. 文档维护
 

@@ -14,7 +14,12 @@ Illusion（幻光影现）是 Minecraft NeoForge 模组，把渲染后端换成�
 - native 侧是 C++23 动态库 **MCDR**（同一仓库的 `MCDR\` 目录），通过 **Java FFM API** 调用，
   **不使用 JNI**。
 - 高级特性：DLSS / FSR / XeSS 超分，DLSS-G / FSR-FG / XeSS-FG 帧生成，NVIDIA Reflex，
-  TAA / SMAA，mesh shader（meshlet），VRS 与渲染比例；光线追踪**尚未实现**。
+  TAA / SMAA，mesh shader（meshlet），VRS 与渲染比例；光线追踪使用 **B-DXR** 硬件路径：
+  导出几何 → G-Buffer → BLAS/TLAS → 状态对象 + SBT + `DispatchRays` → 降噪与合光。
+  `RAW` 保留硬件追踪并跳过降噪；Work Graph 调度尚未实现，选择 WG 时回退 DXR。
+  设备不支持硬件 DXR 时关闭光追。场景自检使用独立 CPU 参考，视觉效果由用户分别验收。
+- 光影包从「视频设置 → 光影包」里选；`[rt]` 那组键是**包作用域**的，入口只有「光影包 → 光影包设置」，
+  由包自己的 `shaders/configs.json` 声明（见 `rt/README.md` 的 11.6 节）。
 
 ## 文档地图
 
@@ -26,6 +31,7 @@ Illusion（幻光影现）是 Minecraft NeoForge 模组，把渲染后端换成�
 | [`antialiasing/README.md`](antialiasing/README.md) | TAA / SMAA / 后期锐化：历史缓冲、速度缓冲 | 残影、抖动、GUI 拆分问题 |
 | [`mesh&vrs/README.md`](mesh&vrs/README.md) | mesh shader（meshlet）与 VRS / 渲染比例 | 地形管线、性能取舍 |
 | [`shaders/README.md`](shaders/README.md) | 着色器管线：原版管线 → HLSL → DXC → PSO | 编译失败、绑定错位 |
+| [`rt/README.md`](rt/README.md) | 光线追踪：`[rt]` 配置、日志、查询、导出几何/材质缓存、G-Buffer pass、逐帧派发与合光、加速结构（BLAS/TLAS）、inline `RayQuery` 与 B-DXR（状态对象 + SBT）、光影包位置与选中规则、静态检查与实机验收清单 | 复查光追配置、核对导出与 G-Buffer、改派发规模或 HLSL、动加速结构或 DXR 档 |
 | [`misc/backend-and-device.md`](misc/backend-and-device.md) | D3D12 后端、设备、资源与内存管理 | 加资源类型、改每帧流程 |
 | [`misc/ffm-abi.md`](misc/ffm-abi.md) | JVM ↔ native 的 FFM ABI | 新增或修改 native 导出 |
 | [`misc/debug-and-crash.md`](misc/debug-and-crash.md) | 崩溃处理、诊断与日志体系 | 崩溃、黑屏、日志看不懂 |
@@ -41,7 +47,7 @@ Illusion（幻光影现）是 Minecraft NeoForge 模组，把渲染后端换成�
   代码里没写清的地方标注「代码中未明确」，不要替它补脑。
 - **只写当下**：不写设计史、方案对比与"当初为什么这样"；必须遵守的写法写成祈使句，
   已经发现的缺陷单独列成警告清单。
-- **源码导航**：每篇结尾的表格用相对 `Illusion\src\main\kotlin\dev\nts\expdxr\` 的路径。
+- **源码导航**：每篇结尾的表格用相对 `Illusion\src\main\kotlin\io\github\dxegp\` 的路径。
 - **文档维护**：改了对应子系统的行为，同一次改动里更新文档；文档与代码冲突时以代码为准，
   并顺手把文档改对。
 - **注释与文档的分工**：源码注释只写"违反就会出错"的约束（一两行），解释性内容放这里，
@@ -49,5 +55,6 @@ Illusion（幻光影现）是 Minecraft NeoForge 模组，把渲染后端换成�
 
 ## 相关文档
 
-- `MCDR\docs\` —— native 库 MCDR 的设计文档（C++ 侧，另行编写）。
+- `MCDR\docs\overview.md` —— native 库 MCDR 的设计文档（C++ 侧，ABI 的另一端）；
+  JVM 与 native 的调用契约在 [`misc/ffm-abi.md`](misc/ffm-abi.md)，两端对读。
 - `Illusion\README.md` / `Illusion\README_ZH.md` —— 面向玩家的功能介绍与使用说明。

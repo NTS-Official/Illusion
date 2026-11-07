@@ -85,11 +85,11 @@ hudless 由 JVM 决定，因为只有 JVM 知道「这一帧有没有 3D 世界�
 ### 2.1 分层
 
 ```
-JVM（策略层，dev.nts.expdxr）
+JVM（策略层，io.github.dxegp）
   dxrmc/framegen/FrameGeneration.kt            ← 门面：选项、互锁、持久化、文案、push 到 native
   dxrmc/framegen/FrameGenerationSelfTest.kt    ← 自动化验收钩子（不是功能入口）
-  dxrmc/nvidia/reflex/NvidiaReflex.kt          ← Reflex 模式 + 被帧生成强制开启的策略
-  dxrmc/sr/FrameGenerationConstants.kt         ← 插帧用的 view/projection/jitter 常量
+  dxrmc/superresolution/dlss/NvidiaReflex.kt          ← Reflex 模式 + 被帧生成强制开启的策略
+  dxrmc/superresolution/FrameGenerationConstants.kt         ← 插帧用的 view/projection/jitter 常量
   d3d12/render/advanced/smaa/D3D12GuiSplit.kt  ← 世界层 / UI 层拆分与 hudless 裁决
   d3d12/render/core/D3D12GpuSurface.kt         ← present：调 native、帧计数、裁决挂点
   d3d12/extern/MCDR_ABI.kt + MCDRLayout.kt     ← FFM 绑定与结构体布局（唯一 native 入口）
@@ -341,14 +341,14 @@ Reflex 每帧两个点：`before_present`（帧起点 + 限帧 sleep）与 `afte
 
 ## 8. 文件导航
 
-相对 `Illusion\src\main\kotlin\dev\nts\expdxr\`：
+相对 `Illusion\src\main\kotlin\io\github\dxegp\`：
 
 | 路径 | 职责 |
 | --- | --- |
 | `dxrmc/framegen/FrameGeneration.kt` | 帧生成门面：后端选择、倍率、互锁、持久化、状态文案、推送 native |
 | `dxrmc/framegen/FrameGenerationSelfTest.kt` | 自动化自检：按 tick 改设置、打印能力表、强制选后端 |
-| `dxrmc/nvidia/reflex/NvidiaReflex.kt` | Reflex 模式、被帧生成强制开启、持久化 |
-| `dxrmc/sr/FrameGenerationConstants.kt` | 插帧的 view/projection/抖动/复位常量（行主序） |
+| `dxrmc/superresolution/dlss/NvidiaReflex.kt` | Reflex 模式、被帧生成强制开启、持久化 |
+| `dxrmc/superresolution/FrameGenerationConstants.kt` | 插帧的 view/projection/抖动/复位常量（行主序） |
 | `d3d12/render/advanced/smaa/D3D12GuiSplit.kt` | 世界层 / UI 层拆分、hudless 裁决、UI 纹理注册 |
 | `d3d12/render/core/D3D12GpuSurface.kt` | present 入口、F3 计数、调用 `armUiComposition` |
 | `d3d12/extern/MCDR_ABI.kt` | 帧生成与 Reflex 的 FFM 绑定 |

@@ -1,0 +1,11 @@
+# 在 detekt 默认规则上叠加；只关掉对 D3D12 渲染 / FFM 代码系统性误报的规则。
+style:
+  MagicNumber:
+    active: false # 寄存器槽位、DXGI 枚举、着色器常量
+  ReturnCount:
+    active: false
+  MaxLineLength:
+    active: false
+exceptions:
+  TooGenericExceptionCaught:
+    active: false # FFM 调用失败统一 catch Throwable 后走 IllusionLogger

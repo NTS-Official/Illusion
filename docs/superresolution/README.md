@@ -6,6 +6,13 @@
 这份文档讲三个问题：这套抽象的结构、每帧的数据怎么流动、以及**改动时不能破坏的约束**。
 DLSS 的专项细节（NGX 初始化、preset、输出纹理契约）见 [`dlss.md`](dlss.md)。
 
+启用光追时，本目录的光栅 SR 求值与 DLSS guide 捕获提前返回。光追倍率由
+`[rt] renderScale` 控制；主目标与世界层附件保持窗口尺寸，视频界面保存的光栅比例或 SR 质量档不会再次缩小主目标。
+`NRD_SR` 在低于 100% 时使用所选 provider 重建窗口尺寸；DLSS 使用独立 Streamline viewport 2，
+XeSS/FSR 使用通用 SR 入口，RR 使用 viewport 1。质量档按实际输入/输出尺寸查询。
+输入颜色、设备深度与失败回退见 [光追的 NRD 后独立 SR](../rt/README.md#264-nrd-后独立-sr)。
+NRD 后独立 SR 在重调制前为两路光照重新加入当前子像素偏移，材质与设备深度保持当前 G-Buffer 采样位置。
+
 > 建议阅读顺序：第 1～2 节建立概念，第 3 节看一帧的时序，第 4～6 节按你关心的后端或掩码继续，
 > 第 7～8 节是动手前的交互关系与硬约束。
 
@@ -35,7 +42,7 @@ DLSS 的专项细节（NGX 初始化、preset、输出纹理契约）见 [`dlss.
 
 | 术语 | 在本工程里的含义 |
 | --- | --- |
-| SR / 超分 | 本子系统，`dxrmc.sr` 包；不包含帧生成 |
+| SR / 超分 | 本子系统，`experimental.superresolution` 包；不包含帧生成 |
 | upscale / 升采样 | 把渲染尺寸的图放大到呈现尺寸。注意 FSR/XeSS/DLSS 都是**时间性**的（吃上一帧历史） |
 | jitter | 亚像素投影抖动，逐帧给相机投影加一个 `[-0.5, +0.5)` 像素的偏移，唯一来源是 `D3D12Temporal` 的 Halton(2,3)，16 相位 |
 | MV | motion vector，屏幕空间像素位移，由 `D3D12Velocity` 的速度 pass 产出 |
@@ -130,7 +137,7 @@ DeepLearningSuperSampling   打包 SR_DISPATCH      releaseIfCreated()
 
 ### 4.1 枚举与持久化
 
-`dev.nts.expdxr.IllusionConfig` 里的 `SrBackend`（`id` 与 `mcdr_abi.h` 的 `MCDR_SR_BACKEND_*` 逐值对应）：
+`io.github.dxegp.IllusionConfig` 里的 `SrBackend`（`id` 与 `mcdr_abi.h` 的 `MCDR_SR_BACKEND_*` 逐值对应）：
 
 | 枚举 | id | 含义 |
 | --- | --- | --- |
@@ -254,7 +261,7 @@ DLSS 的选择器只有前 4 档，DLAA 由抗锯齿选项驱动（见 4.6）。
 | `sharpness` | 滑条 0..100 ÷ 100 |
 | `reset` | `frameKey` 变化（后端/尺寸/比例）时置位 |
 | `hdrInput` | **固定 0**：本工程把超分输入一律当 SDR 处理，是否设置 FSR 的高动态范围标志由 native 决定 |
-| `flags` | 0 |
+| `flags` | 光栅为 0（MV 含 jitter）；RT XeSS/FSR 为 `MCDR_SR_FLAG_UNJITTERED_MV`（1），见 [RT 独立 SR](../rt/README.md#264-nrd-后独立-sr) |
 | `pColorInput` / `pDepth` / `pMotionVectors` | 主目标颜色、主目标深度、速度 pass 本帧的句柄 |
 | `pColorOutput` | 必须是带 `USAGE_STORAGE` 的纹理（见 5.3） |
 | `pReactiveMask` | `D3D12SrMask.produce(...)` 的返回值，0 表示「没有掩码」 |
@@ -474,15 +481,15 @@ FG 打开 hudless 时，最终呈现源变成「超分输出的世界层」，UI
 
 ## 10. 文件导航
 
-路径以 `Illusion\src\main\kotlin\dev\nts\expdxr\` 为起点（mixin 在 `Illusion\src\main\java\` 下，已单独标注）。
+路径以 `Illusion\src\main\kotlin\io\github\dxegp\` 为起点（mixin 在 `Illusion\src\main\java\` 下，已单独标注）。
 
 | 文件 | 职责 |
 | --- | --- |
-| `dxrmc/sr/SuperResolution.kt` | 超分门面：后端选择与调度、`SR_DISPATCH` 打包、FSR/XeSS 的 evaluate 与 blit、UI 选项、CPU/GPU 耗时统计 |
-| `dxrmc/sr/D3D12SrMask.kt` | 反应性掩码：OIT 透射率的小波重建 HLSL、PSO、dispatch 与首帧统计 |
-| `dxrmc/sr/FrameGenerationConstants.kt` | 每帧给帧生成后端推 view/projection/jitter/mvScale/reset（与超分后端解耦） |
-| `dxrmc/sr/dlss/DLSS.kt` | DLSS / DLAA 主实现：数据面、NGX 开关与档位、preset、深度快照、输出交接、抗锯齿互斥 |
-| `dxrmc/sr/dlss/DLSSOutput.kt` | DLSS 输出纹理（JVM 侧创建、交给 native）与释放顺序 |
+| `dxrmc/superresolution/SuperResolution.kt` | 超分门面：后端选择与调度、`SR_DISPATCH` 打包、FSR/XeSS 的 evaluate 与 blit、UI 选项、CPU/GPU 耗时统计 |
+| `dxrmc/superresolution/D3D12SrMask.kt` | 反应性掩码：OIT 透射率的小波重建 HLSL、PSO、dispatch 与首帧统计 |
+| `dxrmc/superresolution/FrameGenerationConstants.kt` | 每帧给帧生成后端推 view/projection/jitter/mvScale/reset（与超分后端解耦） |
+| `dxrmc/superresolution/dlss/DLSS.kt` | DLSS / DLAA 主实现：数据面、NGX 开关与档位、preset、深度快照、输出交接、抗锯齿互斥 |
+| `dxrmc/superresolution/dlss/DLSSOutput.kt` | DLSS 输出纹理（JVM 侧创建、交给 native）与释放顺序 |
 | `IllusionConfig.kt` | `SrBackend` 枚举（`id` 与 native 宏逐值对应）及 `[sr]` 配置项 |
 | `d3d12/extern/MCDR_ABI.kt` | `mcdr_dx12Sr*` / `mcdr_dx12*Dlss*` 的 FFM 绑定、`SrCaps` 数据类、返回值语义 |
 | `d3d12/render/advanced/vrs/D3D12RenderScale.kt` | 渲染比例：两套取值域、DLAA 锁、帧边界重建主目标 |
@@ -501,7 +508,7 @@ native 侧对应实现（本仓库 `MCDR\`，不在本文范围内）：`MCDR\sr
 
 ## 11. 文档维护
 
-- 本文对应源码目录：`Illusion\src\main\kotlin\dev\nts\expdxr\dxrmc\sr\`（含 `dlss\` 子目录），
+- 本文对应源码目录：`Illusion\src\main\kotlin\io\github\dxegp\experimental\superresolution\`（含 `dlss\` 子目录），
   以及上表列出的渲染比例 / jitter / 速度 / GUI 拆分 / mixin 挂点。
 - **改了代码就同步改本文**，尤其是：载荷字段的增删、质量档位的百分比、常量数值、
   帧内挂点顺序、掩码的生产方式、后端互斥规则。这些地方一旦文档与代码不一致，

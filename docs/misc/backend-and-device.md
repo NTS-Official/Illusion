@@ -3,7 +3,7 @@
 本文说明 Blaze3D 的 GPU 抽象（`GpuBackend` / `GpuDevice` / `CommandEncoder` / `RenderPass` / 资源四件套）
 在 D3D12 上是怎么落地的：对象由谁持有、在哪一刻释放、内存怎么分块复用、哪些数值一旦改动就会立刻出错。
 
-范围：`Illusion\src\main\kotlin\dev\nts\expdxr\d3d12\` 下的 `backend\`、`render\adapter\`、`render\core\`
+范围：`Illusion\src\main\kotlin\io\github\dxegp\d3d12\` 下的 `backend\`、`render\adapter\`、`render\core\`
 三个包，以及它们调用的 C ABI（`MCDR.dll`）。**不展开**：GLSL→SPIR-V→HLSL→DXIL 的编译细节、
 呈现与后处理管线（SMAA/TAA/VRS/DLSS）、meshlet 几何构建算法、配置系统。
 
@@ -63,10 +63,10 @@ Blaze3D 接口层
       ▼
   CommandEncoderBackend ── D3D12CommandEncoderBackend
       ├── ctx : Long                   native CommandContext*
-      ├── transientMemory              UBO ring(3×4096B) + staging 池(3 块，512KB 起)
+      ├── transientMemory              映射上传块（512KiB 起）+ 按 fence 回收的三路池
       ├── currentRenderPass ────────► D3D12RenderPassBackend    每次 createRenderPass 新建
       ├── pendingSubmit                异步渲染线程握手中（多帧飞行）
-      └── companion GLOBAL_CALLBACKS   设备级围栏回调队列
+      └── pendingCallbacks            当前编码器的读回完成回调
       │
       ├── createRenderPass() ───────► D3D12RenderPassBackend
       │        renderArea · outputWidth/Height · hasDepth · colorTargetHandle · flipY
@@ -186,18 +186,18 @@ surface.present()         D3D12Temporal.onFramePresented() → blitSkipped 时�
 
 ### 3.3 一帧的两种提交模式
 
-同步模式（`asyncRenderThread` 关闭时，也是异步握手超时后的降级路径）：
+同步模式（`asyncRenderThread` 关闭、无 active surface 或一次性编码器）：
 
 ```
-submit() → settlePendingSubmit() → D3D12BeginCommandList（幂等）→ D3D12Submit
-        → transientMemory.rotate() → 执行本帧攒下的回调
+submit() → ensureListOpen() → D3D12Submit → 检查非零提交结果
+        → 确认本次录制的 RT history → transientMemory.rotate() → 执行回调
 ```
 
 异步渲染线程模式（`asyncRenderThread = true`）：
 
 ```
-主线程 submit()  → D3D12AsyncRenderBeginFrame → 等渲染线程就绪（阻塞，5s 超时）
-                → D3D12AsyncSendCommandsReady → pendingSubmit = true（不阻塞，下一帧再结算）
+主线程 submit()  → D3D12AsyncRenderBeginStatus → pendingSubmit = true
+                → 等渲染线程就绪（阻塞，5s 超时）→ D3D12AsyncSendCommandsReady
 渲染线程        → Close + ExecuteCommandLists + Present
 ```
 
@@ -208,8 +208,14 @@ submit() → settlePendingSubmit() → D3D12BeginCommandList（幂等）→ D3D1
   围栏 token。所以 `submit()` 的判定是 `device != null && D3D12AsyncRenderBeginFrame(ctx)`。
 - **allocator Reset 与 begin 只能由主线程在帧开始做**，渲染线程只允许 Close + Execute + Present。
   反过来的话主线程已录制的整帧命令会被丢弃，back buffer 永不写入 → 窗口狂闪。
-- 握手超时（5s）或 `D3D12AsyncRenderBeginFrame` 失败 → 降级同步路径，并 `D3D12ClearAsyncRenderCtx()`
-  清掉渲染线程上的上下文，避免下一帧错位。
+- `D3D12AsyncRenderBeginStatus` 返回 1 表示已取得异步所有权，0 表示未启用异步路径，-1 表示请求失败。
+  只有 0 可以走同步路径；-1 必须停止本次提交，禁止与仍活动的异步上下文竞争。
+- 就绪等待超时、命令交接失败或提交完成等待超时必须中断调用，并保留 `pendingSubmit`。
+  禁止同步重提、重新打开列表、清除活动上下文或销毁编码器；等待超时不证明工作已经停止。
+- `D3D12AsyncRenderWaitStatus` 返回 1 才确认本次录制的 history、view、projection 和 jitter；
+  0 表示仍未完成，-1 表示终态失败。终态失败取消对应 pending，下一次调用可重新录制。
+- 每次打开新的命令列表生成独立 `recordingIdentity`。RT pending 只接受相同录制身份的提交确认或取消，
+  一次性编码器与其他编码器不能确认或撤销帧历史；未提交列表被重录时取消旧 pending。
 - `ensureListOpen()` **先结算 `pendingSubmit` 再读 `listOpen`**。顺序颠倒会在多帧飞行时读到渲染线程
   尚未 Close 的中间态，主线程于是往一条正在被关闭的列表里写命令（数据竞争）。
 
@@ -282,6 +288,21 @@ val token = MCDR_ABI.D3D12GetFenceValue(ctx) + 1
 `StagedVertexBuffer.endFrame` / `MappableRingBuffer.rotate` 这类调用是在帧**中间**取 token 的。
 用全局序列会让 token 提前「已完成」，缓冲提前回收 —— 表现为随机的画面错位，且极难复现。
 
+### 3.7.1 提交必须串行：`gSubmitMutex` 与 atomic 的打开列表计数
+
+`submitCommandList` 里「分配 fence 值 → `ExecuteCommandLists` → `Signal` → 记账」这一整段在
+`std::mutex gSubmitMutex` 下执行。
+
+**现状：所有提交都在同一个线程。** Minecraft 的主线程就叫 `Render thread`，客户端 tick 事件与渲染是同一
+条线程（崩溃日志里能看到 `ClientTickEvent$Post` 的栈帧落在 `"Render thread"` 上），所以光追自检在 tick 里
+建自己的编码器提交、与当帧渲染是顺序的，不是并发的。这条锁是**防御性的**：一旦有第二个线程提交
+（异步上传、后台预烘、别的模组），不加锁就会把「列表 A」配上「列表 B 的 fence 值」，等待方按自己那个值
+提前醒来读到还没写完的缓冲 —— 不报错、只是结果不对，和「随机画错但不崩」一样难查。
+
+`gOpenListCount`（当前打开的列表数）是 `std::atomic<int>`。它是延迟删除的判据之一
+（`gOpenListCount == 0` 才允许 `flushPendingDeletes`），普通 `int` 下两个线程的 `++`/`--` 会丢更新，
+判据就可能提前成立、释放 GPU 还在用（或即将用）的资源。日志里打印它时一律 `.load()`。
+
 ### 3.8 设备关闭的固定顺序
 
 ```
@@ -303,25 +324,55 @@ D3D12AdapterInfo.current = null
 
 ---
 
+### 3.9 屏障提交与影子状态跟踪
+
+JVM 侧只从 `D3D12Barrier` 发屏障：
+
+```kotlin
+MCDR_ABI.D3D12Barrier(ctx, listOf(
+    MCDR_ABI.BarrierDesc(gbuffer, MCDR_ABI.D3D12State.RENDER_TARGET,
+                         MCDR_ABI.D3D12State.PIXEL_SHADER_RESOURCE),
+    MCDR_ABI.BarrierDesc(radiance, 0, 0, kind = MCDR_ABI.BarrierKind.UAV),
+))
+```
+
+`false` 只表示参数错或列表未开；`before == after` 的条目在 native 侧被丢弃，不算失败。`flags = 1/2` 是 split barrier 的 begin-only/end-only，只发 begin 必须补 end。`subresource` 默认 `ALL_SUBRESOURCES`（-1）。
+
+读影子账本（S0 期间每帧或退出时打一次）：
+
+```kotlin
+MCDR_ABI.D3D12QueryRtTrackStats()?.let { s ->
+    if (s.mismatches > 0) IllusionLogger.warnFormat("rt_state_mismatch %d %s", s.mismatches, s.note)
+}
+```
+
+`mismatches` = 声明的 `StateBefore` 与账本不一致的次数，`note` 是最后一次的 `decl=/track=`；`firstUse` = 首次登记（无法校验）的次数。影子模式只记账，不改变任何已提交的屏障。
+
+能力面在建完设备后读一次：
+
+```kotlin
+val caps = MCDR_ABI.D3D12QueryRtCaps()
+if (caps != null) IllusionLogger.infoMessage("rt caps: ${caps.preferredBackend} wg=${caps.workGraphsTier}")
+```
+
+`workGraphsSupported` 要求 `options21Queried` 为真（Windows SDK 10.0.26100 起 `OPTIONS21` 才有 `workGraphsTier` 字段）；`serActuallyReorders` 恒为 0，等换 `directx-headers` 才可能非零。
+
 ## 4. 内存策略
 
-### 4.1 瞬时内存的三层
+### 4.1 瞬时内存
 
-`D3D12TransientMemory` 镜像官方 `VulkanTransientMemory` 的接口，但实现完全不同 —— Vulkan 那边靠
-`VmaAllocation`，D3D12 这边靠三种手写分配器：
+`D3D12TransientMemory` 实现原版瞬时内存接口。映射常量与 staging 上传共用 UPLOAD 块，
+按编码器的完成 fence 决定复用与释放：
 
 | 分配器 | 用途 | 容量 | 生命周期 |
 | --- | --- | --- | --- |
-| UBO ring | 每帧 `setUniform` 的常量缓冲 | 3 × 4096 B 常驻缓冲 | 归 ring 自己，随 `close()` 释放，**永不进 frame 列表** |
-| staging 块 | 上传源（UPLOAD 堆） | 512 KB 起，超过 8 MB 不入池 | 3 个池，每池上限 4 MB |
-| frame 列表 | 无法复用的 GPU 缓冲 | — | 超过 2 帧（`FRAMES_IN_FLIGHT`）后 close |
+| 映射上传块 | `allocateGpuMapped`、`allocateStaging` 与 staging 上传 | 512 KiB 起，超过 8 MiB 不入池 | 3 个池，每池上限 4 MiB；完成 fence 后复用 |
+| frame 列表 | 独立 GPU 缓冲、超大块与池满后的块 | — | 超过 2 次轮转且所属 fence 完成后 close |
 
 关键常量：
 
 ```
-FRAMES_IN_FLIGHT        = 2        // 帧列表保留几帧
-UBO_RING_COUNT          = 3        // 与帧列表解耦，3 个槽轮转
-UBO_RING_BLOCK_SIZE     = 4096L    // 单个 UBO ring 缓冲大小
+FRAMES_IN_FLIGHT        = 2        // 帧列表最少保留两次轮转，释放仍需 fence 完成
 STAGING_BLOCK_SIZE      = 512 KiB  // 一个 staging 块的初始大小
 MIN_BLOCK_ALIGNMENT     = 512L     // D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT
 STAGING_POOL_COUNT      = 3
@@ -332,26 +383,29 @@ MAX_STAGING_MAP_RETRIES = 1
 
 ### 4.2 分块与回收
 
-staging 块是 **bump 分配器**（只向前推进，不回收块内单块）：
+映射上传块只向前分配。`alignment` 必须为正，实际对齐取请求值与 512 B 的最小公倍数；
+单次映射长度限制为 `0..Int.MAX_VALUE`。块内放不下时获取另一个足够大的块，不回绕覆盖已返回的切片：
 
 ```
 allocateInStagingBlock(size, alignment):
-    align  = alignment.coerceAtLeast(512)          // 纹理上传要求 512 的倍数
+    align  = lcm(alignment, 512)                  // 同时满足请求与纹理上传对齐
     offset = roundUp(used, align)
     if (offset + size > block.size()) { 换块；offset = 0 }
 ```
 
-换块时旧块进 `retiredPooledStagingBlocks`，`rotate()` 里的 `recycleStagingBlocks()` 决定它的去向：
-放回池（总字节 ≤ 4 MB）或进 frame 列表（等 2 帧后 close）。池号 `(idx + 1) % 3`，所以一个块被复用
-时已经过了 3 帧 > 2 帧，GPU 侧早执行完了。
+分配前调用 `ensureListOpen`，结算上一笔异步提交，再记录 `D3D12GetFenceValue(ctx) + 1` 作为
+当前列表的目标 fence。每块保存最后一次分配对应的目标值，不能在异步 `rotate()` 时猜测已提交值。
+
+换块时旧块进 `retiredPooledStagingBlocks`；`rotate()` 将块及 fence 放回本路池，超过池上限的块进入
+frame 列表。获取池内块必须先通过 `D3D12WaitForFence(ctx, fence, 0)`；未完成的块保留，改用其他块或
+新建，不为复用阻塞 GPU。池号轮转本身不能证明 GPU 已执行完毕。
+
+frame 列表超过两次轮转后，只有最旧列表中的全部目标 fence 完成才关闭缓冲。超大块和池满后的块遵守
+相同规则；native 资源销毁继续走延迟释放。`close()` 释放分配器持有的全部缓冲。
 
 为什么是 512 而不是 256：纹理上传走 `PLACED_FOOTPRINT`，`Offset` 必须是
 `D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT`（512）的倍数；用 256 对齐会让 `CopyTextureRegion` 的
 校验失败或内容错位 —— 后者更难查，因为不报错。
-
-为什么 UBO ring 不能进 frame 列表：ring 是常驻缓冲，一旦进了 frame 列表，第 3 次 `rotate()` 就会把它
-close 掉，之后 `D3D12MapBuffer` 返回 null → `IllegalStateException`。这是「看起来只是内存管理的写法」
-而实际会让第 3 帧必崩的典型。
 
 ### 4.3 `allocateCpu` 为什么用堆缓冲
 
@@ -388,12 +442,16 @@ copyBufferToTexture(...)   // 必须先 ensureListOpen()：分配 staging 不录
 
 ### 4.5 读回路径
 
-- `copyTextureToBuffer(tex, dst, offset, callback, mip)`：目标必须是 READBACK 堆缓冲
-  （`USAGE_MAP_READ`），回调进 `GLOBAL_CALLBACKS`。`device == null`（一次性编码器）时立刻
-  `submit()`，随后同步跑回调。
+- `copyTextureToBuffer(tex, dst, offset, callback, mip)`：CPU 读取的目标使用 READBACK 堆
+  （`USAGE_MAP_READ`）。回调归属于录制拷贝的编码器，提交后等待该编码器本次 fence 完成才执行。
+  异步提交先等待渲染线程提交完成，再等待 GPU；没有读回回调时不增加等待。
+  `device == null`（一次性编码器）立即提交；帧共享编码器在正常帧提交时处理。
+- native 保持从上到下的紧凑行序。行距不满足 256 B 对齐或目标偏移不满足 512 B 对齐时，
+  先拷贝到对齐的 DEFAULT 中转缓冲，再按行 `CopyBufferRegion` 到目标；中转资源保留至槽位 fence 完成。
 - `D3D12GpuQueryPool` 的读取是**阻塞**的：native 把时间戳 resolve 到 readback 缓冲、提交、等围栏，
   然后返回。它不适合放在热路径上按帧调用。
-- 截图路径的读回回调必须挂在设备级全局队列，见 §5。
+- `ScreenshotMixin` 仅对 D3D12 纹理取消原版截图写像素时的上下翻转，兼容截图缩小倍率。
+  不改变通用纹理读回方向。`_port/screenshot_readback_check.py` 检查实际 GPU 数据与完成回调。
 
 ### 4.6 mapped 内存的约束
 
@@ -404,7 +462,7 @@ copyBufferToTexture(...)   // 必须先 ensureListOpen()：分配 staging 不录
 | 长度上限 | `length <= Int.MAX_VALUE`（`MemorySegment` 的 size 是 long，但 map 出来的是 `ByteBuffer`） |
 | 字节序 | `map()` 内强制 `LITTLE_ENDIAN`。`NewDirectByteBuffer` 默认是 **BIG_ENDIAN**，不改的话所有 UBO 都是坏的（矩阵全垃圾、颜色目标全黑） |
 | 必须 unmap | `MappedView.close()` → `D3D12UnmapBuffer`；忘记关会在下次 `Map` 同一资源时撞上 D3D12 的限制 |
-| 关闭后不可用 | `map` 前 `check(!isClosed())`；ring 槽位被 close 时抛 `"allocateGpuMapped: ring buffer slot N is already closed"` |
+| 关闭后不可用 | 瞬时映射分配前检查 `closed`；关闭后抛 `"Transient memory is closed"` |
 | 256 字节 CBV 对齐 | 任何作为 CBV 的偏移（含 meshlet 的 globals）必须 `% 256 == 0`，见 §5 |
 
 ---
@@ -440,7 +498,7 @@ copyBufferToTexture(...)   // 必须先 ensureListOpen()：分配 staging 不录
 
 以下五条写法与上表数值同等严格：
 
-- **拷贝完成回调必须挂到设备级全局队列 `GLOBAL_CALLBACKS`**：任何一次 `submit()` 都会抽干它；挂在单个编码器上的调用若不提交，回调永不执行，READBACK 缓冲每次泄漏。
+- **拷贝完成回调只由所属编码器执行**：提交和 GPU 完成是两个条件，必须等待本次 fence；其他编码器提交不得取走回调。
 - **先 `setPipeline()` 再 `pushDescriptors()`**：绑定表是「条目序号 → register 序号」，由管线布局决定；没有管线时只能记日志跳过（SKIP）。
 - **meshlet 先换 PSO 再 `pushDescriptors()`**：`SetGraphicsRootSignature` 会清掉已绑的根描述符表，顺序反了地形整片消失且不报错。
 - **`copyBufferToTexture()` 先 `ensureListOpen()`**：分配 staging 不录制命令，帧外（资源重载）调用不自查就会命中 `dx12CopyBufferToTexture: no open command list`。
@@ -490,7 +548,7 @@ copyBufferToTexture(...)   // 必须先 ensureListOpen()：分配 staging 不录
 | 缺绑定 | `IllegalStateException("Uniform '…' was not set before core")`、`"Texture '…' was not bound before core"` |
 | 拷贝时列表已关 | native `"dx12CopyBufferToTexture: no open command list"` |
 | staging 块不可映射 | 先 WARN 一次并换块重试；超限抛 `IllegalStateException("staging block … could not be mapped at …")` |
-| UBO ring 槽位已关闭 | `IllegalStateException("allocateGpuMapped: ring buffer slot N is already closed")` |
+| 瞬时分配器已关闭 | `IllegalStateException("Transient memory is closed")` |
 | 上传零字节 | `IllegalArgumentException("Cannot upload zero bytes")` |
 | 视图计数为负 | `IllegalStateException("Too many views removed from texture")` |
 | 查询越界 | `IndexOutOfBoundsException("Query range … exceeds pool size …")` |
@@ -505,7 +563,7 @@ copyBufferToTexture(...)   // 必须先 ensureListOpen()：分配 staging 不录
 
 ## 7. 文件导航
 
-路径相对 `Illusion\src\main\kotlin\dev\nts\expdxr\`。
+路径相对 `Illusion\src\main\kotlin\io\github\dxegp\`。
 
 | 文件 | 一句话职责 |
 | --- | --- |
@@ -524,7 +582,7 @@ copyBufferToTexture(...)   // 必须先 ensureListOpen()：分配 staging 不录
 | `d3d12\render\adapter\D3D12Device.kt` | 设备门面：资源工厂、管线缓存、着色器编译、关闭顺序 |
 | `d3d12\render\adapter\D3D12AdapterInfo.kt` | 适配器信息（手写 JSON 解析）与 F3 显示数据源 |
 | `d3d12\render\adapter\D3D12RenderProf.kt` | 阶段计时（每 300 帧一行），供 Java mixin 静态调用 |
-| `d3d12\render\core\D3D12TransientMemory.kt` | 瞬时内存：UBO ring、staging 块分配器、帧列表与回收 |
+| `d3d12\render\core\D3D12TransientMemory.kt` | 瞬时内存：映射上传块、帧列表与 fence 回收 |
 | `d3d12\render\core\D3D12GpuBuffer.kt` | 缓冲对象与 `map()`（含字节序修正与设备丢失识别） |
 | `d3d12\render\core\D3D12GpuTexture.kt` | 纹理对象与视图引用计数 |
 | `d3d12\render\core\D3D12GpuTextureView.kt` | 纹理视图（带 `baseMip`） |

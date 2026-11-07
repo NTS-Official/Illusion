@@ -18,7 +18,7 @@ DLSS 是本工程里唯一「不是我们自己实现」的超分后端：它由
 SuperResolution（门面）── DLSS 开关变化时只做「认领后端 + 让位」
         │
         ▼
-DeepLearningSuperSampling（本篇主角，dxrmc/sr/dlss/DLSS.kt）
+DeepLearningSuperSampling（本篇主角，dxrmc/superresolution/dlss/DLSS.kt）
   ├─ 开关 / 档位 / preset 的持久化与推送
   ├─ 每帧数据面：速度 pass、深度快照、相机矩阵、jitter
   ├─ 抗锯齿互斥与 DLAA 的锁定/释放
@@ -102,6 +102,14 @@ Performance 时打出一条「DLSS 无法运行」的假警告。
 
 ## 5. 每帧：输入怎么摆
 
+native 在创建特征前结束 render pass；预检拒绝空资源、非纹理对象和输入/输出别名。
+实际 Streamline/NGX 求值时，经统一 SDK scope 接管内部选中的四张资源，
+成功、失败与提前返回都归还、恢复 draw heap 并清空 PSO 缓存。
+深度快照、MV 中间纹理和 handover 同样受归属约束；宿主随后拷回并把 GUI 输出恢复为 `RENDER_TARGET`。
+Streamline 的 `slSetConstants` 返回失败时，native 在资源接管前返回 0，不再继续求值或提交 FG 输入，
+并清零输出交接状态；下一个新帧可以正常重试。同帧同 viewport 提交不同常量的 SDK 错误码为 `0x1B`。
+资源必须存活到 GPU fence 完成，归属归还不代表 GPU 已经用完。
+
 ### 5.1 `DLSS_INPUT` 载荷
 
 `MCDRLayout.DLSS_INPUT` 与 `MCDR\include\mcdr_abi.h` 的同名结构逐字段对应（C 侧 `sizeof = 112`）：
@@ -142,13 +150,16 @@ Performance 时打出一条「DLSS 无法运行」的假警告。
 ### 5.3 深度快照
 
 颜色只有到「世界层画完、GUI 未画」那一刻才完整，但深度在那之前已经被清过。JVM 侧没有任何**单一**
-挂点能同时满足两者，所以拆成两步：
+挂点能同时满足两者，按以下时序执行：
 
-1. main pass 的 RETURN（世界几何刚画完、所有清深度之前）：`mcdr_dx12SnapshotDlssDepth(ctx, depth)`，
-   native 把深度拷进自己的 D32 快照，并**自己负责把调用方深度状态恢复**；
-2. evaluate 时（`GuiRenderer.render` 之前）：优先用快照，而不是载荷里的 `pInDepth`。
+1. `GameRenderer.render` HEAD：`pclFrameBegin()` 使上帧快照失效，再执行 DLSS 的抗锯齿状态协调。
+2. main pass 的 RETURN（世界几何刚画完、所有清深度之前）：`mcdr_dx12SnapshotDlssDepth(ctx, depth)`，
+   native 把深度拷进私有快照，并**自己负责把调用方深度状态恢复**；完整录制成功后才使快照有效。
+3. evaluate 时（`GuiRenderer.render` 之前）：NGX/Streamline 共用选择器，要求本帧捕获成功、源与 `pInDepth` 相同、尺寸与输入一致；条件不满足时使用当前 `pInDepth`。
 
 快照与 `pInDepth` 取自**同一个表达式**（`mainRenderTarget().depthTexture`），否则「快照」和「输入」不是一回事。
+帧起点必须早于捕获，不能挂在后续 `clearDepthTexture` 前；Reflex 关闭也要执行快照失效。
+捕获参数失败、关闭 DLSS 与设备 shutdown 同样使快照失效；漏捕获帧不能沿用旧世界深度。
 
 旧 DLL 没有这个导出时返回 `Int.MIN_VALUE`，JVM 静默退回被清过的深度，只记一行说明——
 不会因此拒绝运行，只是画质降级。
@@ -314,14 +325,14 @@ recreate）后进程直接消失、没有任何 Java 异常**，与「设备移�
 
 ## 9. 文件导航
 
-路径以 `Illusion\src\main\kotlin\dev\nts\expdxr\` 为起点（mixin 在 `Illusion\src\main\java\` 下，已标注）。
+路径以 `Illusion\src\main\kotlin\io\github\dxegp\` 为起点（mixin 在 `Illusion\src\main\java\` 下，已标注）。
 
 | 文件 | 职责 |
 | --- | --- |
-| `dxrmc/sr/dlss/DLSS.kt` | 本篇主体：开关/档位/preset、数据面、深度快照、相机常量、DLAA、抗锯齿互斥、旧 DLL 兼容桥 |
-| `dxrmc/sr/dlss/DLSSOutput.kt` | 输出纹理的创建、交接、释放顺序与失败降级 |
-| `dxrmc/sr/SuperResolution.kt` | 门面：DLSS 与 FSR/XeSS 的分流、让位、后端认领 |
-| `dxrmc/sr/FrameGenerationConstants.kt` | 帧生成常量（与 DLSS 常量是两条独立通路） |
+| `dxrmc/superresolution/dlss/DLSS.kt` | 本篇主体：开关/档位/preset、数据面、深度快照、相机常量、DLAA、抗锯齿互斥、旧 DLL 兼容桥 |
+| `dxrmc/superresolution/dlss/DLSSOutput.kt` | 输出纹理的创建、交接、释放顺序与失败降级 |
+| `dxrmc/superresolution/SuperResolution.kt` | 门面：DLSS 与 FSR/XeSS 的分流、让位、后端认领 |
+| `dxrmc/superresolution/FrameGenerationConstants.kt` | 帧生成常量（与 DLSS 常量是两条独立通路） |
 | `d3d12/extern/MCDR_ABI.kt` | `mcdr_dx12*Dlss*` 的 FFM 绑定与返回值语义（`skipOptional` → `Int.MIN_VALUE`） |
 | `d3d12/render/advanced/taa/D3D12Temporal.kt` | Halton(2,3) jitter、消费者判定、投影/相机捕获 |
 | `d3d12/render/advanced/taa/D3D12Velocity.kt` | 速度 pass、闩锁与 `forceEnable` |
@@ -338,7 +349,7 @@ native 侧（本仓库 `MCDR\`）：`MCDR\src\advanced\d3d12_dlss.cpp`、
 
 ## 10. 文档维护
 
-- 本文对应源码：`Illusion\src\main\kotlin\dev\nts\expdxr\dxrmc\sr\dlss\`（`DLSS.kt`、`DLSSOutput.kt`），
+- 本文对应源码：`Illusion\src\main\kotlin\io\github\dxegp\experimental\superresolution\dlss\`（`DLSS.kt`、`DLSSOutput.kt`），
   以及上表列出的 jitter / 速度 / 渲染比例 / GUI 拆分 / mixin 挂点。
 - 改 DLSS 这条路时最容易破坏的四件事：**返回值语义**（第 2 节）、**比例必须与档位一致**（第 3 节）、
   **输出纹理的创建方与释放顺序**（第 8 节）、**帧内顺序**（总览第 3 节）。

@@ -7,21 +7,27 @@
 | 层 | 文件 | 角色 |
 | --- | --- | --- |
 | 契约 | `MCDR\include\mcdr_abi.h` | 唯一真相：`extern "C"` 导出、结构体定义、错误码约定 |
-| 布局 | `Illusion\src\main\kotlin\dev\nts\expdxr\d3d12\extern\MCDR_Layout.kt` | 结构体的 `MemoryLayout` 镜像 + 自检 |
-| 句柄 | `Illusion\src\main\kotlin\dev\nts\expdxr\d3d12\extern\MCDR_ABI.kt` | 195 个 `downcallHandle` + 每个导出的调用封装 |
+| 布局 | `Illusion\src\main\kotlin\io\github\dxegp\d3d12\extern\MCDR_Layout.kt` | 结构体的 `MemoryLayout` 镜像 + 自检 |
+| 句柄 | `Illusion\src\main\kotlin\io\github\dxegp\d3d12\extern\MCDR_ABI.kt` | 252 个 `downcallHandle` + 每个导出的调用封装 |
 
 适用范围：Java 25 / Minecraft release-26.1 起 FFM 已退出预览。**本项目禁止 JNI**（`System.loadLibrary`、`external fun`、`RegisterNatives` 一律不许出现），native 侧也不许再提供 `JNIEXPORT` 入口。
 
-先把当前的体量摆出来（`_port\abi_check.py` 的实际输出）：
+核心 JVM 命名空间为 `io.github.dxegp`；RT、SR 与帧生成分别位于 `experimental.raytracing`、
+`experimental.superresolution` 与 `experimental.framegen`。完整类名、反射查找、Mixin 清单和早期窗口服务必须使用当前包名。
+源码包名不决定外部标识：保留 `dxr_mc` mod id、`config/dxr_mc-client.toml` 的 `[rt]` / `[sr]`、
+光影包的 `rt:<key>` 与工作目录 `dxrmc/`。`MCDR.dll` 和 SDK 运行库仍解压到同一 `dxrmc/` 目录。
+早期窗口服务只进入独立 companion JAR；主 JAR 内嵌路径为 `META-INF/dxrmc/earlywindow.jar`。
+
+当前头文件、绑定声明和布局表的规模：
 
 | 项 | 数值 |
 | --- | --- |
-| native 导出 | 200 |
-| Kotlin 绑定 | 195 |
-| 其中"允许缺失"的可选导出 | 61 |
+| native 导出 | 257 |
+| Kotlin 绑定 | 252 |
+| 其中"允许缺失"的可选导出 | 75 |
 | 头文件有、Kotlin 未绑定 | 5（回读 / 落盘 / 诊断辅助） |
 | 签名不匹配 | 0 |
-| 双方镜像的结构体 | 16，尺寸与字段偏移全部一致 |
+| 双方镜像的结构体 | 40 个检查大小，其中 38 个逐字段检查，共 425 字段 |
 
 ## 1 三层结构
 
@@ -35,7 +41,7 @@ MCDR\include\mcdr_abi.h            契约：extern "C" 平铺导出 / 结构体 
 MCDR_Layout.kt                     布局：MemoryLayout 镜像 + byteSize 断言 + 偏移比对
         │
         ▼
-MCDR_ABI.kt                        句柄：195 个 downcallHandle + 每导出的封装
+MCDR_ABI.kt                        句柄：252 个 downcallHandle + 每导出的封装
         │
         ▼
 MCDR_PipelineDesc.kt               打包器：把 Kotlin 对象铺进 arena
@@ -48,7 +54,7 @@ MCDR_MeshPipelineDesc.kt
 
 | 规则 | 含义 | 落地位置 |
 | --- | --- | --- |
-| 只有 C 链接 | `extern "C"`，无名字修饰，无生成的头文件 | 全部 200 个导出 |
+| 只有 C 链接 | `extern "C"`，无名字修饰，无生成的头文件 | 全部 257 个导出 |
 | 每个聚合体只有一份定义 | Java 侧 1:1 `MemoryLayout`，不手写偏移、不 packed blob | `MCDR_Layout.kt` |
 | 句柄是不透明指针 | `mcdr_object*` 等，不是"让 Java 猜含义的整数" | §2.1 |
 | 字符串由调用方分配 | UTF-8 缓冲，被调方返回所需字节数（含 NUL） | §2.3 |
@@ -61,7 +67,11 @@ MCDR_MeshPipelineDesc.kt
 - **调用约定是 `__cdecl`**。`MCDR_CALL` 在 Windows 上展开成 `__cdecl`；`MCDR_API` 在 native 编译时是 `__declspec(dllexport)`，在消费方是 `dllimport`。x64 上只有一种调用约定，但这个宏让头文件在 32 位下也不会错。
 - **MSVC 的 `long` 是 32 位**。头文件为此专门写了一条注释：凡是写成 `int32_t` 的参数，Java 侧必须是 `JAVA_INT`；只有 `int64_t` / `size_t` / 指针才是 `JAVA_LONG` / `JAVA_ADDRESS`。这一条是 §5 里"类型不逐字匹配"坑的根源。
 
-版本号是双份的：宏 `MCDR_ABI_VERSION 4u`，以及运行时函数 `mcdrABIVersion()`。两者相等才算握手成功，防止"Java 常量被编译器内联、DLL 却是旧的"。
+版本号是双份的：宏 `MCDR_ABI_VERSION`（当前 `44u`），以及运行时函数 `mcdrABIVersion()`。两者相等才算握手成功，防止"Java 常量被编译器内联、DLL 却是旧的"。
+
+RT 几何注册使用 120 B `mcdr_rt_geometry_desc` 与 56 B `mcdr_rt_geometry_output`，追踪使用 128 B `mcdr_rt_frame_desc`。
+FFM 在 confined Arena 中复制 CPU payload，native 在返回前完成 CPU 数据复制并记录上传；Arena 关闭不影响 GPU 在途寿命。
+复用组传 NULL/0，trace 仅传 snapshotId；native 拥有五个缓冲，输出句柄只可借用。详见 [RT 帧资源边界](../rt/README.md#1610-native-帧资源与录制边界)。
 
 ### 1.2 布局层：`MCDR_Layout.kt`
 
@@ -109,7 +119,7 @@ arrayOf<Any>("mcdr_binding_slot", BINDING_SLOT, 40L),
 
 ### 1.3 句柄层：`MCDR_ABI.kt`
 
-一个 Kotlin `object`，内部 195 个方法句柄字段：
+一个 Kotlin `object`，内部 252 个方法句柄字段：
 
 ```kotlin
 private var MH_createdevice: MethodHandle? = null
@@ -128,7 +138,20 @@ private var MH_createdevice: MethodHandle? = null
 | `skip(name, desc)` | 抛 `IllegalStateException("MCDR export not found: ...")` | 没有它整个库没有意义：版本、布局报告、错误串、日志开关 |
 | `skipOptional(name, desc)` | 返回 `null`，连 `Throwable` 也吞 | 单个功能（SR / FG / DLSS / PIX / VRS…），旧 DLL 上只是那个功能不可用 |
 
-目前 134 个必需、61 个可选。**可选不等于不重要**：帧生成那批入口是 ABI v4 契约的一部分，之所以仍按可选绑定，只是为了让"JVM 新、DLL 旧"退化成"帧生成面板显示不可用"，而不是整个后端起不来。
+目前 177 个必需、75 个可选。可选绑定允许能力探测处理缺失的功能入口；ABI 版本握手仍必须通过。
+
+当前几何生产入口为 `D3D12CreateRtGeometryDelta`：112 B 描述、每条 72 B 内容引用与 72 B 输出。
+调用方保留完整 64 B record table，只有变化的 heap 内容才复制到 FFM arena；未变内容以 identity/长度引用。
+内容列表为空时传零记录表，records/contents 均写空指针、长度与数量均为 0，禁止将零长度外部地址当作几何数据。
+native 返回合法非零快照及最小 raw 缓冲；材质仍须提供或合法复用，复用材质的空请求没有 staging 上传。
+生产配合独立所需目标构造带有限代理或无界 unknown 标记的 scene；没有已观测目标时撤销场景，不以空载荷推断空空间。
+`D3D12GetRtGeometryMemory` 的 16 B 输出分别为在用 DEFAULT/UPLOAD committed 容量，不将多个快照共用的 arena 重复相加。
+几何布局、背压、取消与退休约束见 [native 几何快照](../../../MCDR/docs/advanced/rt-frame.md#11-不可变几何快照)。
+
+时间戳快照的 `D3D12QueueQueryValues` / `D3D12TryReadQueryValues` 是 ABI 38 的兼容追加入口。
+缺少它们时分别返回 `false` / `-1`，不回退到同步读回。轮询的 `1` / `0` / `-1` 分别表示
+已复制并消费、尚未完成、错误；仅 `1` 复制到 JVM 输出数组，pending 或错误均保持数组原值。
+采样窗口与缺失槽的口径见 [RT 逐阶段耗时](../rt/README.md#96-逐阶段耗时)。
 
 描述符助手两个：
 
@@ -139,7 +162,7 @@ private fun fdv(vararg args: MemoryLayout) = FunctionDescriptor.ofVoid(*args)
 
 ### 1.4 封装层：每个导出的四种形态
 
-`MCDR_ABI` 的 200 个公开函数不是风格统一的 API，而是**四种刻意区分的失败语义**：
+`MCDR_ABI` 的公开函数采用**四种失败语义**：
 
 | 形态 | 返回 | 缺句柄时 | 抛异常时 | 例 |
 | --- | --- | --- | --- | --- |
@@ -353,6 +376,112 @@ fun unavailableReason(): String? = LOAD_FAILURE?.toString()
 
 upcall 这条要单独说：`onFenceComplete` 在 native 线程上执行，异常一旦逃出去会**直接终止 JVM**（不是抛到某处可以捕获）。所以它自己 `catch (Throwable)`，只打一条 WARN，不依赖任何 `catchException` 包装。
 
+### 3.5 NRD 显式偏移入口
+
+当前 ABI 版本为 44。`MCDR_ABI.D3D12NrdDenoiseTemporal` 绑定九个参数：
+encoder、七纹理句柄数组、纹理数、64-float 矩阵地址、四 float 偏移地址、帧号、reset、诊断地址与容量。
+FFM descriptor 依次为 `PTR/PTR/I32/PTR/PTR/I32/I32/PTR/I32`，返回 `I32`。
+偏移个数使用 `MCDRLayout.NRD_JITTER_FLOAT_COUNT`，矩阵段至少 256 B，偏移段至少 16 B。
+四个偏移的顺序、单位与数值范围见 [光追接口](../rt/README.md#234-引擎侧的接口s4-4-c)。
+参数段与纹理句柄数组必须在调用返回前有效；调用返回不表示 GPU 已完成，纹理仍受提交 fence 约束。
+实际 RT 帧由 native 帧上下文直接调用 NRD，偏移与光栅/PT 同源，NRD 取 `(-Jx,+Jy)`。
+RR/RT SR 的 104-float 相机载荷 68–71 为当前/上一帧屏幕内容偏移 xy，
+不再作为保留位。SDK 矩阵仍无 jitter；四分量须有限且位于 `[-0.5,0.5]`。
+
+### 3.6 RT 显式曝光入口
+
+`MCDR_ABI.D3D12DlssdEvalExposure` / `D3D12RtSrEvalExposure` 绑定同名 native 导出，
+参数依次为 encoder、纹理句柄数组、纹理数、输入宽/高、输出宽/高、帧号、reset、
+104-float 相机段、独立曝光段、诊断段与容量，共十三项。
+FFM descriptor 为 `PTR/PTR/I32/I32/I32/I32/I32/I32/I32/PTR/PTR/PTR/I32`，返回 `I32`。
+wrapper 检查相机段至少 416 B，曝光数组个数为 `MCDRLayout.RT_EXPOSURE_FLOAT_COUNT=2`，
+且所有分量有限；Arena 分配两 float 参数段及纹理指针数组，生命周期覆盖调用。
+曝光分量依次为 `preExposure / exposureScale`，native 另检查闭区间 `[2^-16,2^16]`。
+
+RR 允许八/九纹理、RT SR 允许四/五纹理；可选最后一张为 1×1 `R32_FLOAT` 最终曝光倍率。
+缺少资源时 SR 显式启用 `useAutoExposure`；RR 没有同名开关，缺资源的内部行为代码中未明确。
+资源模式切换会等待上次求值 fence、释放 feature 并请求 reset；同一未提交列表内切换返回 0。
+旧入口默认两个曝光分量为 1。玩家 RR 与独立 DLSS-SR 由 native 帧直接求值，两个分量仍为 1，
+附带由引擎测光生成的同帧曝光纹理；手动/AUTO 均保留纹理，切换时不改变 SDK 资源模式。
+资源与 GPU 生命周期见 [native ABI](../../../MCDR/docs/abi/README.md#4-版本握手)。
+
+### 3.7 native RT 帧入口
+
+native RT 帧通过 `D3D12CreateRtFrame` / `D3D12RtFrame` / `D3D12ReleaseRtFrame` 管理；
+上下文使用 I64 编号，录制签名为 `PTR/I64/PTR/PTR -> I32`。128 / 128 / 128 B 三个结构体登记在
+`MCDRLayout`，CPU 常量使用 confined arena，仅在调用内借用；返回的 GPU 资源不得由 JVM 销毁。
+描述末尾携带帧时间戳、曝光模式/EV/速率和 reset；native 持有曝光纹理及适应状态，输出附带同帧曝光句柄。
+还包括信号编码（0=RAW、1=REBLUR、2=RR）、当前减上一帧的屏幕 jitter 和 denoisingRange；输出附带同帧 motion、NRD packed-normal、viewZ、diffuse/specular 信号及反射距离借用句柄。
+描述中的 gbufferRevision 位于 56，CPU 常量指针位于 64；contentJitterX/Y 位于 120/124，
+与当前 SL 68/69 同源，供 RAW、失败回退与重建后的合光使用。
+`D3D12CreateRtGeometrySnapshot` 使用 120 B 描述和 56 B 输出，调用内复制 CPU 数据并在当前主列表上传。
+`D3D12CreateRtAcceleration` 为 `I64/I64 -> I64`，以几何编号与可选复用 AS 编号创建 native AS 上下文。
+`D3D12PrepareRtAcceleration` 为 `PTR/I64/PTR -> I32`；`D3D12FilterRtAcceleration` 为 `PTR/I64/PTR/I32/PTR -> I32`。
+两者返回 80 B 输出，必须另查 ready；GPU 资源均为借用句柄。过滤数组通过 confined arena 在调用内传递。
+`D3D12ReleaseRtAcceleration` 为 `I64 -> I32`，撤销编号；`D3D12RtAccelerationMemory` 为 `I64/I64 -> I64`，按实际资源去重计费。
+追踪描述的 snapshotId 位于 32，accelerationId 位于 48；两者均为 I64 注册令牌，不能把 TLAS view 地址当作 AS 令牌。
+构建、过滤和追踪资源保留至实际列表槽 fence 完成；未知、撤销或不匹配的令牌在 native 入口拒绝。
+生产场景通过 `D3D12CreateRtScene`（`-> I64`）、`D3D12PrepareRtSceneTargets`（`PTR/I64/PTR/PTR/I32/PTR -> I32`）
+和 `D3D12ReleaseRtScene`（`I64 -> I32`）管理。64 B 描述携带 worldEpoch、候选几何令牌、liveRevision 和 16 B section 版本数组，
+偏移 40 为真实 `frameId`，同一真实帧共享 scene 构建额度；偏移 48、56、60 为 outputs 指针、数量与完整模式。
+版本数组、独立 8 B node 目标数组与 48 B 当前输出支持记录由同一 CPU 锁内的快照提供；无可信有限界的要求不按来源段盒排除。
+输出支持记录含 node/layer/version、flags/reserved 与局部界六个 float；flags=1 为当前有限界，flags=0 为无界且坐标全零。
+layer=-1 表示等待整段当前编译；具备当前冻结来源证明时可导出包含段盒的有限候选界，否则保持无界。当前输出界不签发空间状态 1/2。
+目标指针和数量仍位于入口参数中，签名登记于 `MCDRLayout.RT_SCENE_TARGETS_CALL`。
+FFM 复制输出 ByteBuffer 当前剩余切片到 confined arena，不修改调用方位置；native 在返回前复制并校验完整清单。
+同世界同 liveRevision 的版本与输出必须逐字节相同；完整模式不得降级，错误输入不修改原场景。
+confined arena 只在调用内有效；native 完成候选构建、发布与局部失效，内容不变时复用目标查找表。
+旧 `D3D12PrepareRtScene`（`PTR/I64/PTR/PTR -> I32`）供独立低层与自检；显式目标 scene 拒绝退回旧入口，生产不以其兜底。
+232 B 输出包括两份配对令牌、版本、去重容量，以及 active/candidate 两份 80 B AS 输出；偏移 224 的 coverageFlags bit 0 表示无界 unknown。
+成功返回后仍须检查 active.ready；ready 不表示查询空间完整。
+scene 自有 AS 令牌拒绝直接 Prepare/Filter/Release；释放 scene 撤销其候选和已发布令牌，资源由实际列表槽退休。
+`D3D12GetRtSceneStats` 使用 `MCDRLayout.RT_SCENE_STATS`（`I64/PTR/I32 -> I32`）。
+confined arena 分配 112 B 数组并传入数量 14，返回后立即解包为 `RtSceneStats`；字段顺序见
+[native RT 文档](../../../MCDR/docs/advanced/rt-frame.md)的 scene 统计表。读取不等待 GPU，也不推进录制或预算。
+可选绑定缺失返回 `null`，统计 JSON 写 `scene:null`；不能写成零积压或退回同步 GPU 查询。
+ABI 版本握手必须与 native 的 44 匹配，不能将可选绑定规则解释为允许混用旧 ABI DLL。
+RT 有限失效体积使用程序化 AABB，并按当前输出界变换；射线库必须提供 `RtInvalidIntersection` 并处理程序化候选。
+无界 unknown 使用追踪表 flags bit 1。调用方在来源全集尚无有限输出范围时置此位，native 在 scene 另有无界要求时也置此位，
+不得清除调用方已冻结的标记；shader 在非空原查询的 TMin 返回 unknown，不制造有限替代盒或缩短生产射线。
+`D3D12RtFrameSetSpatial` 为 `PTR/I64/I64/I64/I64/PTR/I64 -> I32`，签名登记在
+`MCDRLayout.RT_FRAME_SET_SPATIAL`；依次传 encoder、frame context、frameId、worldEpoch、liveRevision、空间载荷与字节数。
+FFM arena 复制 ByteBuffer 当前剩余切片，native 在返回前再次复制；调用方的 buffer 位置与只读性保持不变。
+空间网格和 live versions 必须来自同一池锁快照，冻结发生在当前 G-Buffer 重放之后、追踪之前。
+该入口为必需绑定；与缺少此入口的旧 DLL 混用会导致加载失败，不允许静默跳过空间证明。
+64 B 表头的 flags 仅允许 0–3：bit 0 是可靠物理界，bit 1 是尚未闭合来源的全局 unknown；reserved 必须为 0。
+即使每个格子标为已知，bit 1 仍阻止它们充当完整空间证明。来源的支持、内容、层与生命周期保守清单由
+同一 `Coverage.sources` 提供；它不授予空空间、内容依赖或本帧实际可查询资格。
+受认证的静态模型/普通 fluid 资源全集及空附加监听器列表可把未观测来源限制到逐格范围，
+此时调用方 bit 1 为 0，尚未取得内容或仍有未观测来源的格子继续保持 unknown。
+资源注册表或附加监听器变化须推进同一池 revision，不能把不同证明代次的 versions 和网格混合提交。
+`D3D12RtFrameBeginGBuffer` 签名为 `PTR/I64/I64/I32/I32/PTR -> I32`，传入 frameNanos 与尺寸，
+返回 88 B `mcdr_rt_gbuffer_output`：重放编号、资源代际、时间戳、尺寸、六张借用附件与字节数。
+`D3D12CreateRtGBufferProgram` 为 `PTR -> I64`，提交 56 B 配方：MS/PS DXIL 指针/长度、bindings 指针/数量、剔除与多边形模式。
+native 复制配方、创建并缓存 PSO/根签名；JVM 持有注册令牌，关闭/替换时经 `D3D12ReleaseRtGBufferProgram`（`I64 -> I32`）撤销。
+96 B 批次的首字段是 I64 程序令牌，禁止传入通用 pipeline 指针；在途程序由 native 列表槽保留，释放令牌后仍能重放已经捕获的批次。
+源 pass 的成功绘制立即调用 `D3D12RtCaptureGBuffer`，签名 `PTR/I64/I64/PTR -> I64`，
+传入旧令牌、frameNanos 和 96 B 批次，返回非零令牌；40 B binding 数组复用 `BINDING_SLOT`。
+native 复制常量/表、保留程序并复制精确 view，JVM arena 只在调用内有效。JVM 不再保留批次和绑定 map。
+native 分配/清屏并打开 pass 后，`D3D12RtFrameReplayCapturedGBuffer` 以 `PTR/I64/I64/PTR -> I32`
+提交捕获令牌、48 B 描述中的重放编号、16-float 投影与相机偏移，批次数和数组指针须为零。
+`D3D12RtReleaseGBufferCapture` 为 `PTR/I64 -> I32`，finally 撤销令牌；捕获资源由列表槽 fence 保活。
+独立诊断保留 `D3D12RtFrameReplayGBuffer`（`PTR/I64/PTR -> I32`），在调用内借用整组批次。
+重放后调用 `D3D12RtFrameEndGBuffer`，签名 `PTR/I64/I64/I32 -> I32`，
+传入重放编号和成功标志。只有成功 End 的同列表、同时间戳、同尺寸输入能进入 trace。
+trace 描述不携带 guide 指针；五张颜色与独立深度全部归 native，JVM 仅持借用元数据。
+整组预检失败可重试，录制中失败必须取消；成功批次不得在同一回放编号上重复提交。
+`D3D12RtFrameDenoise` 的签名为 `PTR/I64/PTR/PTR -> I32`，提交 64 B 降噪描述，返回 48 B 输出。
+描述携带当前 frameId、历史代际/序号、Plan 代际、显示尺寸与 NRD/SL 相机常量。
+native 持有双通道 NRD 输出和显示尺寸 RR 输出，执行 SDK、同帧回退与独立历史确认；
+JVM 只发布借用 Long 句柄。独立 SR 通过 `D3D12RtFrameUpscale`，签名为 `PTR/I64/I64/I32/PTR -> I32`，
+传入当前 frameId 和后端，返回同样的 48 B 输出。native 持有重调制 PSO、三张 SR 纹理与历史，
+复用降噪时复制的相机和历史快照。失败保留本帧 NRD 输出，成功后 native 合光线性重建结果。
+`D3D12RtFrameComposite` 签名为 `PTR/I64/I64/PTR/I32/PTR -> I32`，提交当前 frameId、原版颜色和 debugMode；
+native 自动选择本帧输入，拥有合光 PSO/输出。48 B 返回结构的 diffuse 为借用纹理，JVM 仅用于上屏或调试覆盖。
+`D3D12RtFrameReblur` 保留为独立诊断入口，签名 `PTR/I64/I64 -> I32`。
+这些入口都要求同一 encoder 尚未提交的当前帧；本帧重建与合光结束前不得重新 Begin G-Buffer。
+完整输入、输出与在途寿命见 [native RT 帧接口](../../../MCDR/docs/advanced/rt-frame.md)。
+
 ## 4 失败处理
 
 ### 4.1 五类失败，五种处理
@@ -406,11 +535,11 @@ upcall 这条要单独说：`onFenceComplete` 在 native 线程上执行，异�
 
 ## 6 文件导航
 
-相对 `Illusion\src\main\kotlin\dev\nts\expdxr\`：
+相对 `Illusion\src\main\kotlin\io\github\dxegp\`：
 
 | 文件 | 职责 |
 | --- | --- |
-| `d3d12\extern\MCDR_ABI.kt` | 唯一入口：解包 DLL、绑定 195 个方法句柄、封装每个导出、维护 `isAvailable()` |
+| `d3d12\extern\MCDR_ABI.kt` | 唯一入口：解包 DLL、绑定 252 个方法句柄、封装每个导出、维护 `isAvailable()` |
 | `d3d12\extern\MCDR_Layout.kt` | 结构体的 `MemoryLayout` 镜像、尺寸断言、与运行中 DLL 的字段偏移比对 |
 | `d3d12\extern\MCDR_PipelineDesc.kt` | 图形管线描述符 → `mcdr_pipeline_desc` 的 arena 打包 |
 | `d3d12\extern\MCDR_MeshPipelineDesc.kt` | mesh 管线描述符（DXIL）→ `mcdr_mesh_pipeline_desc` 的 arena 打包 |

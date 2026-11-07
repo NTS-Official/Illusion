@@ -50,7 +50,7 @@ options.txt + native（专用 ABI 函数）
 `DlssImplementation`、`DlssFrameGeneration`、`SrBackend`、`HdrMode`、`RtMode`、`MeshDiagnostics`），
 因为 `defineEnum` 需要类型；枚举常量上的 KDoc 是「这个取值意味着什么」的第一现场。
 
-### 2.2 八节
+### 2.2 九节
 
 | 节 | 键前缀 | 管什么 | 生效粒度 |
 | --- | --- | --- | --- |
@@ -58,7 +58,8 @@ options.txt + native（专用 ABI 函数）
 | `[renderer]` | `…renderer` | GL 上下文逃生口、异步录制、命令 bundle、HDR、交换链、锐化 | 混合：多数要重启 |
 | `[dlss]` | `…dlss` | DLSS 实现、输出交接、Reflex 限帧、帧生成 | 实现选择要重启 |
 | `[sr]` | `…sr` | 超分后端（NONE/DLSS/FSR/XeSS）、锐度、响应遮罩 | 下一帧 |
-| `[raytracing]` | `…raytracing` | 光追可见性分层 | 下一帧 |
+| `[rt]` | `…rt` | 光追可见性分层 | 下一帧 |
+| `[shaderpack]` | `…shaderpack` | 启用的光影包（空串＝无光影） | 下次打开光追 |
 | `[mesh]` | `…mesh` | mesh 地形与 amplification 剔除 | 代码中未明确 |
 | `[vrs]` | `…vrs` | 逐图元距离带、着色率图像参数 | 每个地形批次 |
 | `[debug]` | `…debug` | PIX、调试层、自检、HLSL 落盘、崩溃弹窗 | 多数要重启 |
@@ -241,7 +242,7 @@ glContext = config(false) { IllusionConfig.GL_CONTEXT.get() } ||
 | `[renderer] sharpenAmount`、`taaSharpenAmount` | 下一帧的后处理参数 |
 | `[dlss] frameGeneration`、`frameGenerationFrames`、`reflexFrameLimitUs` | 立即推给 native，下一帧 |
 | `[sr] backend`、`sharpness`、`mask` | 下一帧；切后端会等 GPU 一次 |
-| `[raytracing] mode` | 下一帧 |
+| `[rt] mode` | 下一帧 |
 | `[vrs] *` | 每个地形批次重读 |
 | `[debug] profiling`、`dumpHlsl`、`skipGlSwap`、`temporalChain`、`temporalJitter`、`noCrashPopup` | 下一个使用点 |
 | `[debug] pixTimingCapture`、`pixCaptureFrames` | 按下捕获热键那一刻 |
@@ -275,7 +276,7 @@ mesh tier 时被忽略，没写是管线创建时读还是每帧读。
 ### 6.2 屏幕骨架与布局
 
 `D3D12VideoSettingsScreen` 是原版 `Screen`，标题 `dxr_mc.video.title`，内容全部自绘：左侧竖排
-页签、右侧内容区、底部动作按钮。它不把控件注册进 `Screen.renderables`，而是在 `extractRenderState`
+页签、右侧内容区（右边界外挂右侧滚动条，见 §6.9）、底部动作按钮。它不把控件注册进 `Screen.renderables`，而是在 `extractRenderState`
 里按自己的顺序遍历、自己控制裁剪。
 
 | 常量 | 值 | 用途 |
@@ -287,6 +288,9 @@ mesh tier 时被忽略，没写是管线创建时读还是每帧读。
 | `D3D12TabWidget.WIDTH` / `HEIGHT` | 120 / 25 | 页签 |
 | `D3D12Widget.DEFAULT_HEIGHT` | 21 | 一行设置的高度 |
 | `D3D12OptionWidget.SLIDER_LINE` | 12 | 折叠展开后多出的第二行 |
+| `D3D12ScrollBarWidget.WIDTH` / `HIT_PADDING` | 4 / 2 | 右侧滚动条的可见宽度与两侧命中放宽 |
+| `SCROLLBAR_OFFSET` / `SCROLLBAR_NESTED_OFFSET` | 6 / 2 | 滚动条距内容区右边界的外扩距离；有二级子页时向内收缩 |
+| `HINT_COLUMN_OFFSET` | 14 | 右侧提示块为滚动条让出的整列宽度（`SCROLLBAR_OFFSET + WIDTH + 4`） |
 
 `optimalWidth()` 把「显示器宽度 × 0.809 ÷ GUI 缩放」夹到 `[MIN_WIDTH, 当前宽度]`；下限写成
 `MIN_WIDTH.coerceAtMost(width)` 而不是直接 `MIN_WIDTH`，否则窗口比 360 还窄时 `coerceIn` 的
@@ -302,7 +306,11 @@ mesh tier 时被忽略，没写是管线创建时读还是每帧读。
 | Display | `dxr_mc.video.tab.display` | 独占全屏分辨率模式、全屏、独占全屏、垂直同步、HDR 呈现、界面尺寸、最大帧率、降低帧率、亮度、图形 API |
 | Quality & Performance | `…tab.quality` | 画质预设、原版 quality 数组、抗锯齿 |
 | Preferences | `…tab.preferences` | 原版 preference 数组 |
-| Illusion Settings | `…tab.illusion` | 渲染缩放、VRS、NVIDIA（DLSS/Reflex/帧生成）、AMD（FSR/FSR-FG）、Intel（XeSS/XeSS-FG）、超分共享项 |
+| Illusion Settings | `…tab.illusion` | 顶部固定：渲染缩放、VRS；三个二级子页 NVIDIA / AMD / Intel，每页是「状态块 + 该厂商设置 + 帧生成开关」；页尾接超分共享项 |
+| Shader packs | `…tab.shaderpack` | 当前包名、打开包列表（独立屏，见 §6.10）、光影包设置（独立屏，见 §6.11）、打开包目录、一句目录约定 |
+
+光影包必须自成**一页**：把它塞进别的页的顶部固定区会连带把二级页签与内容区一起压下去，
+而顶部固定区按设计不参与滚动（§6.5），压下去就再也滚不回来。
 
 原版三个选项数组经 `VideoSettingsScreenOptionsAccessor` 的 `@Invoker` 取出，不复制构造逻辑——
 复制一份会在原版改签名时悄悄失效。显示页按原版数组下标重排（0 最大帧率、1 垂直同步、2 降低
@@ -310,30 +318,40 @@ mesh tier 时被忽略，没写是管线创建时读还是每帧读。
 里，是原版内联的滑条，这里重建一份：取值 `-1..模式数-1`，`-1` 表示跟随当前桌面模式，写入
 `window.setPreferredFullscreenVideoMode(...)`。
 
-条目是三个 `sealed` 类型之一：`Heading(text)`（分组标题，只画字、不参与悬停，空文本＝留白行）、
+条目是四个类型之一：`Heading(text)`（分组标题，只画字、不参与悬停，空文本＝留白行）、
 `Note(text, warning)`（只读说明，解释「这项为什么现在不可用」，必须看起来不可交互）、
-`Setting(option)`（真正的一行控件，持有原版 `OptionInstance`）。`pages()` 每次打开都重算，因为
-条目依赖运行时状态；**不要在静态初始化时缓存页**，否则第一次打开的状态会被永久沿用。
+`Setting(option)`（真正的一行控件，持有原版 `OptionInstance`）、
+`Action(label, onClick)`（整行按钮，点开一个子界面；回调参数是当前屏，子界面把它当父级）。
+`pages()` 每次打开都重算，因为条目依赖运行时状态；**不要在静态初始化时缓存页**，否则第一次打开的状态会被永久沿用。
 
 #### 6.3.1 嵌套子页
 
-一页里还要再分组时，给 `D3D12VideoSettingsPage` 传 `subPages`（此时 `entries` 不使用）：
+一页里还要再分组时，给 `D3D12VideoSettingsPage` 传 `subPages`。页自己的行仍用 `entries`，固定在
+子页签**上方**、不参与滚动；`trailingEntries` 接在子页内容**下方**、跟着滚动：
 
 ```kotlin
 D3D12VideoSettingsPage(
     translatable("dxr_mc.video.tab.illusion"),
+    entries = listOf(renderScaleRow, vrsRow),               // 页签上方，固定
     subPages = listOf(
-        D3D12VideoSettingsSubPage(translatable("dxr_mc.video.group.nvidia"), nvidiaRows),
-        D3D12VideoSettingsSubPage(translatable("dxr_mc.video.group.amd"), amdRows),
-        D3D12VideoSettingsSubPage(translatable("dxr_mc.video.group.intel"), intelRows),
+        D3D12VideoSettingsSubPage(Component.literal("NVIDIA"), nvidiaRows),
+        D3D12VideoSettingsSubPage(Component.literal("AMD"), amdRows),
+        D3D12VideoSettingsSubPage(Component.literal("Intel"), intelRows),
     ),
+    trailingEntries = sharedRows,                           // 子页内容之后
 )
 ```
 
-- 子页标题横着排在内容区顶部；宽度 = 标题像素宽 + 两侧内边距（12 → 排不下压到 4 → 再排不下按内容区截断）。
-- 下面的行整体让出一行（`D3D12SubTabWidget.HEIGHT + GAP`），行仍然是同一套 `Heading` / `Note` / `Setting`。
-- 每个页签各自记住自己选中的子页，切走再切回不会跳回第一组。
+- 子页标题横着排在 `contentTop + 上方 entries 的高度 + GAP`；宽度 = 标题像素宽 + 两侧内边距
+  （12 → 排不下压到 4 → 再排不下按内容区截断）。
+- 只有子页内容与 `trailingEntries` 滚动、裁剪；上方 `entries` 固定不动。滚轮同样只在这块区域
+  （页签下方、`rowsTop()` 起）生效 —— 指针停在固定行或页签上时，滚轮不带动子页内容；行裁剪、
+  命中判定与悬停提示也以 `rowsTop()` 为分界。
+- 每个页签各自记住自己选中的子页，切走再切回不会跳回第一组；同一页内只挪页签位置、不重建控件。
 - 子页标题不参与滚动、不弹提示；行照旧滚动与裁剪。
+- 页签列表只在 `buildRows()` 里跟着页走：走「本页没有二级子页」那条分支时必须 `clearSubTabs()`：
+  `subTabs.clear()` 并把 `subTabsPage = -1`（迫使下次重建）。页签不属于任何一页，切到没有子页的
+  页面后没人清就会继续画在 `tabY` 上，压住新页面的第一行 —— 看起来像"三个按钮粘在界面上"。
 
 ### 6.4 控件种类
 
@@ -345,6 +363,7 @@ D3D12VideoSettingsPage(
 | `D3D12SubTabWidget` | 18 高，宽度随标题文本，选中时下缘 1px 紫条 | 点击切子页并播 UI 音 |
 | `D3D12OptionWidget` | 开关 / 滑条 / 枚举 / 折叠行 | 见下 |
 | `D3D12ButtonWidget` | 深底白字，可淡入淡出 | 应用 / 撤销 / 完成 |
+| `D3D12ScrollBarWidget` | 4 宽半透明轨道 + 主题色滑块 | 拖动滑块或点轨道滚动；用过滚轮后自动淡出（§6.9） |
 
 `D3D12OptionWidget` 一行容纳三种外观，判定顺序不能改：`isSwitch = option.get() is Boolean`
 **必须最先判**（26.3 的布尔取值集合同时实现了 `SliderableValueSet`，先判滑条会把开关画成没有
@@ -397,9 +416,10 @@ D3D12VideoSettingsPage(
 ### 6.7 提示与「需要重启」
 
 提示有两种版式：右侧剩余空间 ≥ `MIN_HINT_WIDTH` 时用固定块（内容「标题 / 空行 / 描述」+ 顶部
-1px 强调线），否则改成跟随鼠标的悬浮提示。固定块把锁定原因并进同一个框（两块半透明面板叠在
-一起更黑更难读），悬浮式把锁定原因另画在鼠标上方并加表头。提示只在内容区可视范围内、且整行
-都落在视口里时才画。
+1px 强调线），否则改成跟随鼠标的悬浮提示。固定块从 `contentRight + HINT_COLUMN_OFFSET` 起画，
+把右侧滚动条那一列整列让开；算「右侧剩余空间」时也已经扣掉这一列，否则固定块会压在滚动条上。
+固定块把锁定原因并进同一个框（两块半透明面板叠在一起更黑更难读），悬浮式把锁定原因另画在鼠标上方并加表头。
+提示只在内容区可视范围内、且整行都落在视口里时才画。
 
 「需要重启」是底部常驻行的内容：`D3D12HdrPresentation.isRestartPending()` 或原版
 `isRestartRequiredToApplyVideoSettings()` 为真时，画红色 `options.restartRequired`。
@@ -408,9 +428,92 @@ D3D12VideoSettingsPage(
 
 行总高超过内容区才滚动：`maxScroll = 行尾 - contentTop - 内容区高度`，滚动量 `roundToInt()` 后
 整体偏移行位置；`maxScroll > 0` 时对内容区 `enableScissor`，滚出视口的行不画，滚轮每格 12 像素。
-点击先给控件（页签、按钮），再给行，且只有 `mouseY` 在内容区内才算点到行。
+滚轮只在指针落在滚动区内时生效（页签上方的固定行与页签本身不滚），指针压在右侧滚动条上也算
+滚动区。滚动量只在 `moveTo(...)` 里被设置（重排时执行一次夹取，不引入新值）：夹到
+`[0, maxScroll]` 后立刻重排行位置，滚轮与滚动条拖动走同一条路径。点击先给页签与动作按钮，
+再给上方的固定行与滚动区里的行，最后给滚动条——它在内容区右侧之外，与行不重叠。只有 `mouseY`
+在内容区内才算点到行。
+
+### 6.9 右侧滚动条
+
+`D3D12ScrollBarWidget` 提供不用滚轮就能上下滑动的入口，挂在屏幕之外不占行：
+
+| 项 | 规则 |
+| --- | --- |
+| 横坐标 | `contentRight + SCROLLBAR_OFFSET`；当前页有二级子页时改成 `contentRight + SCROLLBAR_NESTED_OFFSET`（向内收缩）：它滚的是子页内容，位置要能看出这一层。窗口窄到内容区右边界贴着画面时夹到 `width - 4`，否则整条落在画面外 |
+| 纵向范围 | `rowsTop()` 到 `contentBottom`，与滚动区、裁剪区完全一致；有二级子页时自然从子页签下方开始 |
+| 宽度 | 可见 4 像素（`D3D12ScrollBarWidget.WIDTH`），轨道与滑块都画满这 4 像素，靠颜色区分 |
+| 命中区 | 左右各放宽 `HIT_PADDING` = 2，共 8 像素宽：按 4 像素去抓一条线太费劲。命中区不越进内容区（二级子页时左边界正好落在 `contentRight`） |
+| 滑块长度 | 可见高度 ÷ 内容总高 × 轨道高度，最短 `MIN_THUMB` = 18；内容放得下（`maxScroll == 0`）就整条不画 |
+| 颜色 | 轨道半透明白、滑块 `ACCENT`，悬停或拖动时用 `blend(ACCENT, WHITE, …)` 提亮（0.15 秒） |
+| 拖动 | 按住滑块 1:1 跟手拖动；点轨道是「滑块中心跳到指针」，不翻页。拖动中不隐藏，松手后照常按滚轮计时淡出 |
+| 按键判定 | 只认左键，写 `InputConstants.MOUSE_BUTTON_LEFT`。原版输入栈已换成 SDL 编号（左 1 / 中 2 / 右 3），按 GLFW 的 0/1/2 判会让控件静默失灵：按下不响应，看起来就像拖不动 |
+
+自动隐藏：
+
+```
+从未用过滚轮            → 常显（否则鼠标玩家找不到入口）
+滚轮滚动过页面          → 记录时间，1 秒没有再滚就淡出
+滚轮再滚                → 立刻淡入
+指针停在条上 / 正在拖动 → 不隐藏
+淡入淡出时长             → 0.3 秒
+```
+
+计时用 `System.nanoTime()` 自己算每帧步长，不用 `partialTick`：后者在一帧内会重复取值，停顿
+菜单里也不推进，动画会抖或卡在半透明。透明度为 0 时既不画也不接受点击（此时把指针移上去会让它
+淡回来，再点即可）。自动隐藏状态是屏幕级的，切页不重置。
+
+「用过滚轮」的判据是滚轮真的滚动了内容（`maxScroll > 0` 且在滚动区内），不是页面上任意一次滚轮。
 
 ---
+
+### 6.10 子页面：光影包选择
+
+「视频设置 → 光影包」页里的 `Action` 条目「光影包…」，点开 `D3D12ShaderPackScreen`
+（`D3D12VideoSettingsScreen` 当父级，`onClose()` 就回它上面那屏）。这一屏是**独立 `Screen`**，
+复用 `D3D12WidgetRenderer` 与 `D3D12ButtonWidget`，但布局照抄 Iris 的包选择页而不是设置页骨架。
+
+| 元素 | 数值 |
+| --- | --- |
+| 标题 / 副标题 | 居中，`y = 8` / `y = 21`，副标题灰色斜体 |
+| 列表 | 顶 `32`、底 `height - 94`；行高 20；行宽 `min(308, width - 50)`，水平居中 |
+| 行文字 | 居中在行内；悬停加粗并加一层按钮底色 |
+| 已应用行 / 不可用行 | `0xFFFFF263` 黄 / `0xFFA2A2A2` 灰 |
+| 说明面板 | 宽 314，底边 `height - 4`，高度 `max(50, 18 + 行数 * 10)`；悬停 10 帧后才淡入 |
+| 第一行按钮 | `y = height - 51`、152×20：打开文件夹 / 重新扫描 |
+| 第二行按钮 | `y = height - 27`、100×20：取消（`width/2 - 154`）、应用（`width/2 - 50`）、完成（`width/2 + 54`） |
+
+行为规则：
+
+- 「无光影」永远是第 0 行，其余是 `D3D12ShaderPacks.all()` 的顺序（内置在前、用户包在后）。
+- 选中只是改 `selection`；**应用**才写配置（`D3D12ShaderPacks.apply`），并把 `[rt] backend`
+  一起改掉。「取消」把选择回退到已应用的那一行；「完成」先应用、成功才关界面（应用失败时留在
+  这一屏并显示原因，否则玩家点完不知道到底改没改）。
+- 不可用的包（缺入口着色器）在说明面板里列出缺哪个文件，点「应用」只出一条提示、不写配置。
+- 滚轮只在列表区域内生效，越过列表就不滚。
+- 换包之后已有的 compute 管线不会原地换，提示文案里写明「重新打开光追后生效」，规则见 [rt 文档](../../rt/README.md) 的 11.4 节。
+
+### 6.11 子页面：光影包设置
+
+「视频设置 → 光影包」页里的 `Action` 条目「光影包设置」，点开 `D3D12ShaderPackConfigScreen`。
+控件不是写死的：行 = 包在 `shaders/configs.json` 里声明的 `attributes`，按 `group` 分段。
+声明格式与取值/落盘规则见 [rt 文档](../../rt/README.md) 的 11.6 节。
+
+| 元素 | 数值 |
+| --- | --- |
+| 标题 / 副标题 | 居中，`y = 8` / `y = 21`；副标题带包名，灰色斜体 |
+| 列表 | 顶 `32`、底 `height - 35`；行宽 `min(320, width - 50)`，水平居中 |
+| 分组标题行 | 高 16，文字用强调色 |
+| 设置项行 | 高 20：左侧名称，右侧当前值，区间项在行内画一条轨道 |
+| 底部按钮 | `y = height - 27`、100×20：「完成」（只关界面，改动即时生效） |
+
+行为规则：
+
+- 点行即改：布尔翻转、枚举循环到下一个取值、区间项按点击位置吸附取值（拖动时连续改）。
+- 每次改动立刻落盘（包的 `settings.json`，带 `key` 的再写 TOML），不等「完成」，因为这类开关是
+  画质/调试用途，玩家要边看边调；没有「应用」按钮，也就没有需要撤销的暂存态。
+- 包没有 `configs.json` 时只显示一行说明，不显示任何开关。
+- 滚轮只在列表区域内生效；内容超过列表高度时才裁剪。
 
 ## 7. 新增一个选项
 
@@ -513,7 +616,7 @@ false 都会在下一帧被拉回），不是只在首帧设一次——只设�
 
 ## 9. 文件导航
 
-路径相对 `Illusion\src\main\kotlin\dev\nts\expdxr\`；最后一列标注不在该根下的真实位置。
+路径相对 `Illusion\src\main\kotlin\io\github\dxegp\`；最后一列标注不在该根下的真实位置。
 
 | 文件 | 一句话职责 |
 | --- | --- |
@@ -524,11 +627,15 @@ false 都会在下一帧被拉回），不是只在首帧设一次——只设�
 | `misc\settings\ImprovedTransparencyLock.kt` | D3D12 下把「改进的透明」强制常开并给出原因 |
 | `misc\gui\D3D12VideoSettingsScreen.kt` | 视频设置屏幕：布局、页签、滚动、绘制、输入、应用/撤销 |
 | `misc\gui\D3D12VideoSettingsContent.kt` | 四个页面的内容、条目类型、灰化联动与取值过滤 |
+| `misc\gui\D3D12ShaderPackScreen.kt` | 光影包子页面：包列表、说明面板、应用/取消/完成（见 §6.10） |
+| `dxrmc\raytracing\D3D12ShaderPacks.kt` | 光影包的发现、元数据与 `[shaderpack] active` 的读写入点 |
+| `misc\gui\D3D12ShaderPackConfigScreen.kt` | 光影包设置子页面：按包声明的 `attributes` 出控件（见 §6.11） |
+| `dxrmc\raytracing\D3D12PackConfig.kt` | 读包内 `shaders/configs.json`，读写包的 `settings.json` 与它绑的 TOML 键 |
 | `misc\gui\D3D12Widget.kt` | 控件基类、`WidgetRenderer`（提取器的 alpha/scissor 封装）、调色板 |
-| `misc\gui\D3D12Widgets.kt` | 标题/分组/说明/页签/二级页签/设置行/按钮七种控件 |
+| `misc\gui\D3D12Widgets.kt` | 标题/分组/说明/页签/二级页签/设置行/按钮/滚动条八种控件 |
 | `d3d12\render\advanced\vrs\D3D12RenderScale.kt` | 渲染缩放选项、25% 步进取值集合、DLAA 锁定 |
 | `d3d12\render\advanced\D3D12AntiAliasing.kt` | 抗锯齿选项（原版取值集合上的 `OptionInstance`） |
-| `dxrmc\nvidia\reflex\NvidiaReflex.kt` | Reflex 三档选项、`options.txt` 读写、与帧生成的互锁 |
+| `dxrmc\superresolution\dlss\NvidiaReflex.kt` | Reflex 三档选项、`options.txt` 读写、与帧生成的互锁 |
 | `…FrameGeneration`、`…SuperResolution` | 帧生成/超分的后端选择与状态行，向界面提供实时状态 |
 | `Illusion\src\main\java\…\mixin\options\OptionsScreenVideoMixin.java` | 把原版「视频设置…」按钮换成自绘界面 |
 | `…\mixin\options\OptionsRenderOptionsMixin.java` | 在 `Options.load`/`save` 上读写视频设置项的 `options.txt` 行，并补一票重启提示 |
@@ -560,3 +667,10 @@ false 都会在下一帧被拉回），不是只在首帧设一次——只设�
   读者能据此去问作者而不是被误导。
 - **语言文件同步是硬要求**：只加 `en_us` 会在中文环境显示键名，反之亦然；改完两份都过一遍
   `ConvertFrom-Json`，确认没有多余逗号或重复键。
+
+
+
+
+
+
+
